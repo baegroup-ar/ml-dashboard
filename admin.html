@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Admin — Panel ML</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Inter', sans-serif; background: #f5f5f3; color: #111; }
+    nav { background: #fff; border-bottom: 1px solid #e5e5e3; padding: 0 1.5rem; height: 56px; display: flex; align-items: center; justify-content: space-between; }
+    .nav-brand { font-weight: 600; font-size: 15px; display: flex; align-items: center; gap: 8px; }
+    .badge-admin { background: #3483FA; color: #fff; border-radius: 6px; padding: 2px 8px; font-size: 11px; }
+    .btn-nav { padding: 6px 14px; border: 1px solid #ddd; border-radius: 8px; background: #fff; font-size: 13px; cursor: pointer; text-decoration: none; color: #111; }
+    main { max-width: 900px; margin: 0 auto; padding: 2rem 1.5rem; }
+    h1 { font-size: 22px; font-weight: 600; margin-bottom: 1.5rem; }
+
+    .card { background: #fff; border: 1px solid #e5e5e3; border-radius: 12px; overflow: hidden; margin-bottom: 1.5rem; }
+    .card-header { padding: 1rem 1.25rem; border-bottom: 1px solid #e5e5e3; display: flex; align-items: center; justify-content: space-between; }
+    .card-header h2 { font-size: 15px; font-weight: 600; }
+    .card-body { padding: 1.25rem; }
+
+    .form-row { display: grid; grid-template-columns: 1fr 1fr 1fr auto; gap: 10px; align-items: end; }
+    @media (max-width: 680px) { .form-row { grid-template-columns: 1fr; } }
+    .field label { font-size: 12px; color: #666; display: block; margin-bottom: 5px; }
+    input[type=text], input[type=email], input[type=password] {
+      width: 100%; padding: 8px 10px; border: 1px solid #ddd; border-radius: 8px;
+      font-size: 13px; font-family: 'Inter', sans-serif;
+    }
+    input:focus { outline: none; border-color: #3483FA; }
+    .btn-create { padding: 8px 18px; background: #3483FA; border: none; border-radius: 8px; color: #fff; font-size: 13px; font-weight: 500; cursor: pointer; white-space: nowrap; height: 36px; }
+    .btn-create:hover { background: #2970e0; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th { padding: 10px 14px; text-align: left; color: #888; font-weight: 500; border-bottom: 1px solid #eee; }
+    td { padding: 10px 14px; border-bottom: 1px solid #f0f0ee; }
+    tr:last-child td { border-bottom: none; }
+    .badge { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 99px; font-weight: 500; }
+    .badge-blue { background: #e6f0fb; color: #185FA5; }
+    .badge-gray { background: #f0f0ee; color: #666; }
+    .btn-del { padding: 5px 12px; background: #fff; border: 1px solid #fcc; border-radius: 6px; color: #c0392b; font-size: 12px; cursor: pointer; }
+    .btn-del:hover { background: #fce9e9; }
+    .alert { border-radius: 8px; padding: 10px 14px; font-size: 13px; margin-bottom: 1rem; }
+    .alert-error { background: #fce9e9; color: #c0392b; }
+    .alert-success { background: #e6f5ee; color: #1a8a5a; }
+    .ml-accounts-cell { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .ml-pill { background: #FFF8CC; color: #7a6000; border-radius: 99px; padding: 2px 9px; font-size: 11px; font-weight: 500; }
+    .empty { text-align: center; padding: 2rem; color: #aaa; font-size: 13px; }
+  </style>
+</head>
+<body>
+<nav>
+  <div class="nav-brand">
+    <div style="width:24px;height:24px;background:#FFE600;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;">ML</div>
+    Panel de ventas <span class="badge-admin">Admin</span>
+  </div>
+  <div style="display:flex;gap:8px;">
+    <a href="/dashboard" class="btn-nav">Ver panel</a>
+    <a href="/logout" class="btn-nav">Salir</a>
+  </div>
+</nav>
+
+<main>
+  <h1>Gestión de usuarios</h1>
+
+  {% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}
+  {% if success %}<div class="alert alert-success">Usuario creado correctamente.</div>{% endif %}
+
+  <div class="card">
+    <div class="card-header"><h2>Crear usuario</h2></div>
+    <div class="card-body">
+      <form method="post" action="/admin/users/create">
+        <div class="form-row">
+          <div class="field">
+            <label>Nombre</label>
+            <input type="text" name="name" placeholder="Juan García" required />
+          </div>
+          <div class="field">
+            <label>Email</label>
+            <input type="email" name="email" placeholder="juan@email.com" required />
+          </div>
+          <div class="field">
+            <label>Contraseña</label>
+            <input type="password" name="password" placeholder="Mínimo 8 caracteres" minlength="8" required />
+          </div>
+          <button type="submit" class="btn-create">Crear usuario</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header">
+      <h2>Usuarios ({{ users | length }})</h2>
+    </div>
+    {% if users %}
+    <table>
+      <thead>
+        <tr>
+          <th>Nombre</th>
+          <th>Email</th>
+          <th>Rol</th>
+          <th>Cuentas ML</th>
+          <th>Creado</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for u in users %}
+        <tr>
+          <td style="font-weight:500;">{{ u.name }}</td>
+          <td style="color:#555;">{{ u.email }}</td>
+          <td>
+            {% if u.is_admin %}
+              <span class="badge badge-blue">Admin</span>
+            {% else %}
+              <span class="badge badge-gray">Usuario</span>
+            {% endif %}
+          </td>
+          <td>
+            <span class="ml-pill">{{ u.ml_count }} cuenta{% if u.ml_count != 1 %}s{% endif %} ML</span>
+          </td>
+          <td style="color:#888;">{{ u.created_at.strftime('%d/%m/%Y') }}</td>
+          <td>
+            {% if not u.is_admin %}
+            <form method="post" action="/admin/users/delete/{{ u.id }}" style="margin:0;" onsubmit="return confirm('¿Eliminar a {{ u.name }}? Se van a desconectar todas sus cuentas de ML.')">
+              <button type="submit" class="btn-del">Eliminar</button>
+            </form>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div class="empty">No hay usuarios todavía.</div>
+    {% endif %}
+  </div>
+</main>
+</body>
+</html>
