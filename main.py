@@ -12,13 +12,14 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from itsdangerous import URLSafeTimedSerializer, BadSignature
 import bcrypt
-import asyncpg
+from sqlalchemy import create_engine, text
+from sqlalchemy.pool import StaticPool
 
 ML_CLIENT_ID = os.environ["ML_CLIENT_ID"]
 ML_CLIENT_SECRET = os.environ["ML_CLIENT_SECRET"]
 APP_URL = os.environ.get("APP_URL", "http://localhost:8000")
 SECRET_KEY = os.environ.get("SECRET_KEY", secrets.token_hex(32))
-DATABASE_URL = os.environ["DATABASE_URL"]
+DATABASE_URL = os.environ["DATABASE_URL"].replace("postgres://", "postgresql://")
 ADMIN_EMAIL = os.environ["ADMIN_EMAIL"]
 ADMIN_PASSWORD = os.environ["ADMIN_PASSWORD"]
 
@@ -27,26 +28,12 @@ ML_TOKEN_URL = "https://api.mercadolibre.com/oauth/token"
 ML_API_URL = "https://api.mercadolibre.com"
 
 serializer = URLSafeTimedSerializer(SECRET_KEY)
-db_pool = None
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
 
-@asynccontextmanager
-async def lifespan(app):
-    global db_pool
-    db_pool = await asyncpg.create_pool(DATABASE_URL, ssl="require")
-    await init_db()
-    yield
-    await db_pool.close()
-
-
-app = FastAPI(lifespan=lifespan)
-app.mount("/static", StaticFiles(directory="static"), name="static")
-templates = Jinja2Templates(directory="templates")
-
-
-async def init_db():
-    async with db_pool.acquire() as conn:
-        await conn.execute("""
+def init_db():
+    with engine.connect() as conn:
+        conn.execute(text("""
             CREATE TABLE IF NOT EXISTS users (
                 id SERIAL PRIMARY KEY,
                 email TEXT UNIQUE NOT NULL,
@@ -55,8 +42,8 @@ async def init_db():
                 is_admin BOOLEAN DEFAULT FALSE,
                 created_at TIMESTAMP DEFAULT NOW()
             )
-        """)
-        await conn.execute("""
+        """))
+        conn.execute(text("""
             CREATE TABLE IF NOT EXISTS ml_accounts (
                 id SERIAL PRIMARY KEY,
                 user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
@@ -68,15 +55,44 @@ async def init_db():
                 created_at TIMESTAMP DEFAULT NOW(),
                 UNIQUE(user_id, ml_user_id)
             )
-        """)
-        # Crear admin si no existe
-        existing = await conn.fetchrow("SELECT id FROM users WHERE email=$1", ADMIN_EMAIL)
+        """))
+        existing = conn.execute(text("SELECT id FROM users WHERE email=:e"), {"e": ADMIN_EMAIL}).fetchone()
         if not existing:
             hashed = bcrypt.hashpw(ADMIN_PASSWORD.encode(), bcrypt.gensalt()).decode()
-            await conn.execute(
-                "INSERT INTO users (email, password_hash, name, is_admin) VALUES ($1,$2,$3,$4)",
-                ADMIN_EMAIL, hashed, "Administrador", True
-            )
+            conn.execute(text(
+                "INSERT INTO users (email, password_hash, name, is_admin) VALUES (:e,:h,:n,:a)"
+            ), {"e": ADMIN_EMAIL, "h": hashed, "n": "Administrador", "a": True})
+        conn.commit()
+
+
+@asynccontextmanager
+async def lifespan(app):
+    init_db()
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
+app.mount("/static", StaticFiles(directory="static"), name="static")
+templates = Jinja2Templates(directory="templates")
+
+
+def db_fetchone(query, params=None):
+    with engine.connect() as conn:
+        result = conn.execute(text(query), params or {})
+        row = result.fetchone()
+        return dict(row._mapping) if row else None
+
+
+def db_fetchall(query, params=None):
+    with engine.connect() as conn:
+        result = conn.execute(text(query), params or {})
+        return [dict(r._mapping) for r in result.fetchall()]
+
+
+def db_execute(query, params=None):
+    with engine.connect() as conn:
+        conn.execute(text(query), params or {})
+        conn.commit()
 
 
 def get_session_user_id(request: Request) -> Optional[int]:
@@ -89,44 +105,40 @@ def get_session_user_id(request: Request) -> Optional[int]:
         return None
 
 
-async def get_user(user_id: int):
-    async with db_pool.acquire() as conn:
-        return await conn.fetchrow("SELECT * FROM users WHERE id=$1", user_id)
+def get_user(user_id: int):
+    return db_fetchone("SELECT * FROM users WHERE id=:id", {"id": user_id})
 
 
 async def refresh_ml_token(account_id: int) -> Optional[str]:
-    async with db_pool.acquire() as conn:
-        acc = await conn.fetchrow("SELECT * FROM ml_accounts WHERE id=$1", account_id)
-        if not acc:
+    acc = db_fetchone("SELECT * FROM ml_accounts WHERE id=:id", {"id": account_id})
+    if not acc:
+        return None
+    if datetime.utcnow() < acc["expires_at"] - timedelta(minutes=5):
+        return acc["access_token"]
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(ML_TOKEN_URL, data={
+            "grant_type": "refresh_token",
+            "client_id": ML_CLIENT_ID,
+            "client_secret": ML_CLIENT_SECRET,
+            "refresh_token": acc["refresh_token"],
+        })
+        if resp.status_code != 200:
             return None
-        if datetime.utcnow() < acc["expires_at"] - timedelta(minutes=5):
-            return acc["access_token"]
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(ML_TOKEN_URL, data={
-                "grant_type": "refresh_token",
-                "client_id": ML_CLIENT_ID,
-                "client_secret": ML_CLIENT_SECRET,
-                "refresh_token": acc["refresh_token"],
-            })
-            if resp.status_code != 200:
-                return None
-            tokens = resp.json()
-            new_expires = datetime.utcnow() + timedelta(seconds=tokens["expires_in"])
-            await conn.execute(
-                "UPDATE ml_accounts SET access_token=$1, refresh_token=$2, expires_at=$3 WHERE id=$4",
-                tokens["access_token"],
-                tokens.get("refresh_token", acc["refresh_token"]),
-                new_expires,
-                account_id
-            )
-            return tokens["access_token"]
+        tokens = resp.json()
+        new_expires = datetime.utcnow() + timedelta(seconds=tokens["expires_in"])
+        db_execute(
+            "UPDATE ml_accounts SET access_token=:at, refresh_token=:rt, expires_at=:ea WHERE id=:id",
+            {"at": tokens["access_token"], "rt": tokens.get("refresh_token", acc["refresh_token"]),
+             "ea": new_expires, "id": account_id}
+        )
+        return tokens["access_token"]
 
 
 async def get_order_fees(client, order_id, headers):
-    fees_resp = await client.get(f"{ML_API_URL}/orders/{order_id}", headers=headers)
-    if fees_resp.status_code != 200:
+    r = await client.get(f"{ML_API_URL}/orders/{order_id}", headers=headers)
+    if r.status_code != 200:
         return {"comision": 0, "envio": 0}
-    data = fees_resp.json()
+    data = r.json()
     comision = sum(abs(f.get("amount", 0)) for f in data.get("fees", []))
     envio = 0
     shipping_id = (data.get("shipping") or {}).get("id")
@@ -148,8 +160,7 @@ async def index(request: Request):
 
 @app.post("/", response_class=HTMLResponse)
 async def do_login(request: Request, email: str = Form(...), password: str = Form(...)):
-    async with db_pool.acquire() as conn:
-        user = await conn.fetchrow("SELECT * FROM users WHERE email=$1", email.lower().strip())
+    user = db_fetchone("SELECT * FROM users WHERE email=:e", {"e": email.lower().strip()})
     if not user or not bcrypt.checkpw(password.encode(), user["password_hash"].encode()):
         return templates.TemplateResponse("login.html", {"request": request, "error": "Email o contraseña incorrectos"})
     session_token = serializer.dumps(user["id"])
@@ -172,14 +183,9 @@ async def dashboard(request: Request):
     user_id = get_session_user_id(request)
     if not user_id:
         return RedirectResponse("/")
-    user = await get_user(user_id)
-    async with db_pool.acquire() as conn:
-        accounts = await conn.fetch("SELECT id, nickname, ml_user_id FROM ml_accounts WHERE user_id=$1 ORDER BY id", user_id)
-    return templates.TemplateResponse("dashboard.html", {
-        "request": request,
-        "user": user,
-        "accounts": accounts,
-    })
+    user = get_user(user_id)
+    accounts = db_fetchall("SELECT id, nickname, ml_user_id FROM ml_accounts WHERE user_id=:uid ORDER BY id", {"uid": user_id})
+    return templates.TemplateResponse("dashboard.html", {"request": request, "user": user, "accounts": accounts})
 
 
 # ── ML OAuth ────────────────────────────────────────────────────
@@ -190,12 +196,8 @@ async def ml_connect(request: Request):
     if not user_id:
         return RedirectResponse("/")
     state = secrets.token_urlsafe(16)
-    url = (
-        f"{ML_AUTH_URL}?response_type=code"
-        f"&client_id={ML_CLIENT_ID}"
-        f"&redirect_uri={APP_URL}/ml/callback"
-        f"&state={state}"
-    )
+    url = (f"{ML_AUTH_URL}?response_type=code&client_id={ML_CLIENT_ID}"
+           f"&redirect_uri={APP_URL}/ml/callback&state={state}")
     r = RedirectResponse(url)
     r.set_cookie("oauth_state", state, max_age=600, httponly=True)
     return r
@@ -222,13 +224,13 @@ async def ml_callback(request: Request, code: str, state: str):
     ml_user_id = str(tokens["user_id"])
     nickname = tokens.get("nickname", ml_user_id)
     expires_at = datetime.utcnow() + timedelta(seconds=tokens["expires_in"])
-    async with db_pool.acquire() as conn:
-        await conn.execute("""
-            INSERT INTO ml_accounts (user_id, ml_user_id, nickname, access_token, refresh_token, expires_at)
-            VALUES ($1,$2,$3,$4,$5,$6)
-            ON CONFLICT (user_id, ml_user_id) DO UPDATE
-            SET access_token=$4, refresh_token=$5, expires_at=$6, nickname=$3
-        """, user_id, ml_user_id, nickname, tokens["access_token"], tokens["refresh_token"], expires_at)
+    db_execute("""
+        INSERT INTO ml_accounts (user_id, ml_user_id, nickname, access_token, refresh_token, expires_at)
+        VALUES (:uid,:mlid,:nick,:at,:rt,:ea)
+        ON CONFLICT (user_id, ml_user_id) DO UPDATE
+        SET access_token=:at, refresh_token=:rt, expires_at=:ea, nickname=:nick
+    """, {"uid": user_id, "mlid": ml_user_id, "nick": nickname,
+          "at": tokens["access_token"], "rt": tokens["refresh_token"], "ea": expires_at})
     r = RedirectResponse("/dashboard", status_code=303)
     r.delete_cookie("oauth_state")
     return r
@@ -239,8 +241,7 @@ async def ml_disconnect(request: Request, account_id: int):
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
-    async with db_pool.acquire() as conn:
-        await conn.execute("DELETE FROM ml_accounts WHERE id=$1 AND user_id=$2", account_id, user_id)
+    db_execute("DELETE FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
     return RedirectResponse("/dashboard", status_code=303)
 
 
@@ -251,19 +252,17 @@ async def api_summary(request: Request, account_id: int):
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
-    async with db_pool.acquire() as conn:
-        acc = await conn.fetchrow("SELECT * FROM ml_accounts WHERE id=$1 AND user_id=$2", account_id, user_id)
+    acc = db_fetchone("SELECT * FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
     if not acc:
         raise HTTPException(404)
     token = await refresh_ml_token(account_id)
     if not token:
         raise HTTPException(502, "No se pudo renovar el token de ML")
     headers = {"Authorization": f"Bearer {token}"}
-    ml_user_id = acc["ml_user_id"]
     async with httpx.AsyncClient(timeout=30) as client:
         date_from = (datetime.utcnow() - timedelta(days=30)).strftime("%Y-%m-%dT00:00:00.000-00:00")
         r = await client.get(f"{ML_API_URL}/orders/search", headers=headers, params={
-            "seller": ml_user_id, "order.status": "paid",
+            "seller": acc["ml_user_id"], "order.status": "paid",
             "order.date_created.from": date_from, "limit": 50, "sort": "date_desc",
         })
         if r.status_code != 200:
@@ -274,7 +273,6 @@ async def api_summary(request: Request, account_id: int):
             async with sem:
                 return await get_order_fees(client, oid, headers)
         fees_list = await asyncio.gather(*[fetch(str(o["id"])) for o in results])
-
     ingresos = sum(o.get("total_amount", 0) for o in results)
     comisiones = sum(f["comision"] for f in fees_list)
     envios = sum(f["envio"] for f in fees_list)
@@ -316,8 +314,7 @@ async def api_orders(request: Request, account_id: int, limit: int = 20):
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
-    async with db_pool.acquire() as conn:
-        acc = await conn.fetchrow("SELECT * FROM ml_accounts WHERE id=$1 AND user_id=$2", account_id, user_id)
+    acc = db_fetchone("SELECT * FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
     if not acc:
         raise HTTPException(404)
     token = await refresh_ml_token(account_id)
@@ -358,47 +355,39 @@ async def admin_panel(request: Request):
     user_id = get_session_user_id(request)
     if not user_id:
         return RedirectResponse("/")
-    user = await get_user(user_id)
+    user = get_user(user_id)
     if not user["is_admin"]:
-        raise HTTPException(403, "Acceso denegado")
-    async with db_pool.acquire() as conn:
-        users = await conn.fetch("""
-            SELECT u.*, COUNT(m.id) as ml_count
-            FROM users u
-            LEFT JOIN ml_accounts m ON m.user_id = u.id
-            GROUP BY u.id ORDER BY u.created_at DESC
-        """)
-    return templates.TemplateResponse("admin.html", {"request": request, "users": users, "error": None, "success": None})
+        raise HTTPException(403)
+    users = db_fetchall("""
+        SELECT u.id, u.email, u.name, u.is_admin, u.created_at, COUNT(m.id) as ml_count
+        FROM users u LEFT JOIN ml_accounts m ON m.user_id = u.id
+        GROUP BY u.id ORDER BY u.created_at DESC
+    """)
+    success = request.query_params.get("success")
+    return templates.TemplateResponse("admin.html", {"request": request, "users": users, "error": None, "success": success})
 
 
 @app.post("/admin/users/create", response_class=HTMLResponse)
-async def admin_create_user(
-    request: Request,
-    name: str = Form(...),
-    email: str = Form(...),
-    password: str = Form(...),
-):
+async def admin_create_user(request: Request, name: str = Form(...), email: str = Form(...), password: str = Form(...)):
     user_id = get_session_user_id(request)
     if not user_id:
         return RedirectResponse("/")
-    user = await get_user(user_id)
+    user = get_user(user_id)
     if not user["is_admin"]:
         raise HTTPException(403)
     hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
     try:
-        async with db_pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO users (email, password_hash, name) VALUES ($1,$2,$3)",
-                email.lower().strip(), hashed, name
-            )
+        db_execute(
+            "INSERT INTO users (email, password_hash, name) VALUES (:e,:h,:n)",
+            {"e": email.lower().strip(), "h": hashed, "n": name}
+        )
         return RedirectResponse("/admin?success=1", status_code=303)
     except Exception:
-        async with db_pool.acquire() as conn:
-            users = await conn.fetch("""
-                SELECT u.*, COUNT(m.id) as ml_count
-                FROM users u LEFT JOIN ml_accounts m ON m.user_id = u.id
-                GROUP BY u.id ORDER BY u.created_at DESC
-            """)
+        users = db_fetchall("""
+            SELECT u.id, u.email, u.name, u.is_admin, u.created_at, COUNT(m.id) as ml_count
+            FROM users u LEFT JOIN ml_accounts m ON m.user_id = u.id
+            GROUP BY u.id ORDER BY u.created_at DESC
+        """)
         return templates.TemplateResponse("admin.html", {"request": request, "users": users, "error": "El email ya existe", "success": None})
 
 
@@ -407,28 +396,10 @@ async def admin_delete_user(request: Request, target_id: int):
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
-    user = await get_user(user_id)
+    user = get_user(user_id)
     if not user["is_admin"]:
         raise HTTPException(403)
     if target_id == user_id:
         raise HTTPException(400, "No podés eliminarte a vos mismo")
-    async with db_pool.acquire() as conn:
-        await conn.execute("DELETE FROM users WHERE id=$1", target_id)
+    db_execute("DELETE FROM users WHERE id=:id", {"id": target_id})
     return RedirectResponse("/admin", status_code=303)
-
-
-@app.get("/admin/users/{target_id}/accounts")
-async def admin_user_accounts(request: Request, target_id: int):
-    user_id = get_session_user_id(request)
-    if not user_id:
-        raise HTTPException(401)
-    user = await get_user(user_id)
-    if not user["is_admin"]:
-        raise HTTPException(403)
-    async with db_pool.acquire() as conn:
-        accounts = await conn.fetch("SELECT * FROM ml_accounts WHERE user_id=$1", target_id)
-        target_user = await conn.fetchrow("SELECT * FROM users WHERE id=$1", target_id)
-    return JSONResponse([{
-        "id": a["id"], "nickname": a["nickname"], "ml_user_id": a["ml_user_id"],
-        "created_at": a["created_at"].isoformat()
-    } for a in accounts])
