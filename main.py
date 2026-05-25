@@ -1,11 +1,12 @@
 import os
 import httpx
 import secrets
+import asyncio
 from datetime import datetime, timedelta
 from typing import Optional
 
-from fastapi import FastAPI, Request, HTTPException, Depends
-from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from itsdangerous import URLSafeTimedSerializer, BadSignature
@@ -24,9 +25,6 @@ ML_TOKEN_URL = "https://api.mercadolibre.com/oauth/token"
 ML_API_URL = "https://api.mercadolibre.com"
 
 serializer = URLSafeTimedSerializer(SECRET_KEY)
-
-# In-memory token store: {user_id: {access_token, refresh_token, expires_at, nickname}}
-# For production, replace with a database (PostgreSQL on Railway)
 token_store: dict = {}
 
 
@@ -61,6 +59,32 @@ async def refresh_token_if_needed(user_id: str):
         token_store[user_id]["refresh_token"] = tokens.get("refresh_token", data["refresh_token"])
         token_store[user_id]["expires_at"] = datetime.utcnow() + timedelta(seconds=tokens["expires_in"])
         return True
+
+
+async def get_order_fees(client: httpx.AsyncClient, order_id: str, headers: dict) -> dict:
+    """Obtiene comisiones y costo de envío real de una orden."""
+    fees_resp = await client.get(f"{ML_API_URL}/orders/{order_id}", headers=headers)
+    if fees_resp.status_code != 200:
+        return {"comision": 0, "envio": 0}
+    data = fees_resp.json()
+
+    # Comisiones ML (marketplace_fee)
+    comision = 0
+    for fee in data.get("fees", []):
+        comision += abs(fee.get("amount", 0))
+
+    # Costo de envío
+    envio = 0
+    shipping = data.get("shipping", {}) or {}
+    shipping_id = shipping.get("id")
+    if shipping_id:
+        ship_resp = await client.get(f"{ML_API_URL}/shipments/{shipping_id}", headers=headers)
+        if ship_resp.status_code == 200:
+            ship_data = ship_resp.json()
+            base_cost = ship_data.get("shipping_option", {}) or {}
+            envio = base_cost.get("cost", 0) or 0
+
+    return {"comision": round(comision, 2), "envio": round(envio, 2)}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -136,8 +160,6 @@ async def dashboard(request: Request):
     return templates.TemplateResponse("dashboard.html", {"request": request, "nickname": nickname})
 
 
-# ── API endpoints ──────────────────────────────────────────────
-
 @app.get("/api/summary")
 async def api_summary(request: Request):
     user_id = get_session_user(request)
@@ -147,8 +169,7 @@ async def api_summary(request: Request):
     token = token_store[user_id]["access_token"]
     headers = {"Authorization": f"Bearer {token}"}
 
-    async with httpx.AsyncClient() as client:
-        # Get orders from last 30 days
+    async with httpx.AsyncClient(timeout=30) as client:
         date_from = (datetime.utcnow() - timedelta(days=30)).strftime("%Y-%m-%dT00:00:00.000-00:00")
         orders_resp = await client.get(
             f"{ML_API_URL}/orders/search",
@@ -164,34 +185,34 @@ async def api_summary(request: Request):
         if orders_resp.status_code != 200:
             raise HTTPException(502, "Error al obtener órdenes")
         orders_data = orders_resp.json()
+        results = orders_data.get("results", [])
 
-    results = orders_data.get("results", [])
+        # Obtener fees reales en paralelo (máx 10 a la vez para no saturar la API)
+        semaphore = asyncio.Semaphore(10)
+        async def fetch_fees(order_id):
+            async with semaphore:
+                return await get_order_fees(client, order_id, headers)
+
+        fees_list = await asyncio.gather(*[fetch_fees(str(o["id"])) for o in results])
+
     total_ventas = len(results)
     ingresos_brutos = sum(o.get("total_amount", 0) for o in results)
-    total_comisiones = sum(
-        sum(f.get("amount", 0) for f in o.get("fees", []))
-        for o in results
-    )
-    total_envios = sum(
-        (o.get("shipping", {}) or {}).get("cost", 0) or 0
-        for o in results
-    )
+    total_comisiones = sum(f["comision"] for f in fees_list)
+    total_envios = sum(f["envio"] for f in fees_list)
     ganancia_neta = ingresos_brutos - total_comisiones - total_envios
 
-    # Last 7 days breakdown
+    # Daily breakdown últimos 7 días
     daily = {}
-    for o in results:
+    for o, fees in zip(results, fees_list):
         date_str = o.get("date_created", "")[:10]
         if date_str:
             daily.setdefault(date_str, {"ventas": 0, "ingresos": 0, "ganancia": 0})
             amount = o.get("total_amount", 0)
-            fees = sum(f.get("amount", 0) for f in o.get("fees", []))
-            shipping = (o.get("shipping", {}) or {}).get("cost", 0) or 0
             daily[date_str]["ventas"] += 1
             daily[date_str]["ingresos"] += amount
-            daily[date_str]["ganancia"] += amount - fees - shipping
+            daily[date_str]["ganancia"] += amount - fees["comision"] - fees["envio"]
 
-    # Top products
+    # Top productos
     products = {}
     for o in results:
         for item in o.get("order_items", []):
@@ -228,7 +249,7 @@ async def api_orders(request: Request, limit: int = 20):
     token = token_store[user_id]["access_token"]
     headers = {"Authorization": f"Bearer {token}"}
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(
             f"{ML_API_URL}/orders/search",
             headers=headers,
@@ -237,11 +258,17 @@ async def api_orders(request: Request, limit: int = 20):
         if resp.status_code != 200:
             raise HTTPException(502, "Error al obtener órdenes")
         data = resp.json()
+        results = data.get("results", [])
+
+        semaphore = asyncio.Semaphore(10)
+        async def fetch_fees(order_id):
+            async with semaphore:
+                return await get_order_fees(client, order_id, headers)
+
+        fees_list = await asyncio.gather(*[fetch_fees(str(o["id"])) for o in results])
 
     orders = []
-    for o in data.get("results", []):
-        fees = sum(f.get("amount", 0) for f in o.get("fees", []))
-        shipping = (o.get("shipping", {}) or {}).get("cost", 0) or 0
+    for o, fees in zip(results, fees_list):
         amount = o.get("total_amount", 0)
         items = [i.get("item", {}).get("title", "?") for i in o.get("order_items", [])]
         orders.append({
@@ -249,9 +276,9 @@ async def api_orders(request: Request, limit: int = 20):
             "fecha": o.get("date_created", "")[:10],
             "producto": ", ".join(items),
             "monto": round(amount, 2),
-            "comision": round(fees, 2),
-            "envio": round(shipping, 2),
-            "ganancia": round(amount - fees - shipping, 2),
+            "comision": fees["comision"],
+            "envio": fees["envio"],
+            "ganancia": round(amount - fees["comision"] - fees["envio"], 2),
             "estado": o.get("status", ""),
         })
 
