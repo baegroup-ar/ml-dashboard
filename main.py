@@ -19,7 +19,7 @@ ML_CLIENT_ID = os.environ["ML_CLIENT_ID"]
 ML_CLIENT_SECRET = os.environ["ML_CLIENT_SECRET"]
 APP_URL = os.environ.get("APP_URL", "http://localhost:8000")
 SECRET_KEY = os.environ.get("SECRET_KEY", secrets.token_hex(32))
-DATABASE_URL = os.environ["DATABASE_URL"].replace("postgres://", "postgresql://")
+DATABASE_URL = os.environ["DATABASE_URL"].replace("postgres://", "postgresql+pg8000://").replace("postgresql://", "postgresql+pg8000://")
 ADMIN_EMAIL = os.environ["ADMIN_EMAIL"]
 ADMIN_PASSWORD = os.environ["ADMIN_PASSWORD"]
 
