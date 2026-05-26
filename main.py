@@ -168,10 +168,22 @@ def db_save_shipping_costs(costs: dict):
 
 
 def to_ar(dt_str: str) -> tuple:
-    """Extrae fecha y hora del string de ML (ya viene en hora Argentina)."""
+    """Convierte datetime ISO de ML a fecha/hora Argentina (UTC-3).
+    ML puede devolver -03:00 (ya local) o +00:00 (UTC) según el endpoint."""
+    if not dt_str:
+        return "", ""
     try:
-        dt = datetime.strptime(dt_str[:19], "%Y-%m-%dT%H:%M:%S")
-        return dt.strftime("%Y-%m-%d"), dt.strftime("%H:%M")
+        dt_naive = datetime.strptime(dt_str[:19], "%Y-%m-%dT%H:%M:%S")
+        # Extraer offset saltando milisegundos opcionales: "...T12:16:00.000-03:00"
+        tail = dt_str[19:].lstrip(".0123456789")  # quita ".000" si existe
+        offset_min = 0
+        if len(tail) >= 6 and tail[0] in ("+", "-"):
+            sign = -1 if tail[0] == "-" else 1
+            h, m = int(tail[1:3]), int(tail[4:6])
+            offset_min = sign * (h * 60 + m)
+        # dt_naive está en el timezone del offset → convertir a UTC → luego a AR (UTC-3)
+        dt_ar = dt_naive - timedelta(minutes=offset_min) - timedelta(hours=3)
+        return dt_ar.strftime("%Y-%m-%d"), dt_ar.strftime("%H:%M")
     except Exception:
         return dt_str[:10], ""
 
