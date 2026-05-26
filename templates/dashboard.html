@@ -170,7 +170,7 @@
       </div>
       <div style="overflow-x:auto;">
         <table>
-          <thead><tr><th>Fecha</th><th>Producto</th><th>Monto</th><th>Comisión</th><th>Envío</th><th>Ganancia neta</th><th>Estado</th></tr></thead>
+          <thead><tr><th>Fecha</th><th>Hora</th><th>N° Venta</th><th>Producto</th><th>Monto</th><th>Comisión</th><th>Envío</th><th>Ganancia neta</th><th>Estado</th></tr></thead>
           <tbody id="orders-tbody"></tbody>
         </table>
       </div>
@@ -195,8 +195,9 @@
   let ordersCache = [];
   let feesCache = {};
 
-  function todayStr() { return new Date().toISOString().slice(0,10); }
-  function addDays(d, n) { const dt = new Date(d); dt.setDate(dt.getDate()+n); return dt.toISOString().slice(0,10); }
+  // Fecha en timezone Argentina (UTC-3)
+  function todayStr() { return new Intl.DateTimeFormat('sv', {timeZone:'America/Argentina/Buenos_Aires'}).format(new Date()); }
+  function addDays(d, n) { const dt = new Date(d + 'T12:00:00'); dt.setDate(dt.getDate()+n); return dt.toISOString().slice(0,10); }
 
   function setPeriod(p, btn) {
     document.querySelectorAll('.period-btn').forEach(b => b.classList.remove('active'));
@@ -361,12 +362,14 @@
 
   function renderOrders(orders) {
     const tbody = document.getElementById('orders-tbody');
-    if(!orders.length){ tbody.innerHTML='<tr><td colspan="7" style="text-align:center;color:#aaa;padding:2rem;">Sin ventas en este período.</td></tr>'; return; }
+    if(!orders.length){ tbody.innerHTML='<tr><td colspan="9" style="text-align:center;color:#aaa;padding:2rem;">Sin ventas en este período.</td></tr>'; return; }
     tbody.innerHTML = orders.map(o => {
       const pc = o.estado==='paid'?'green':o.estado==='cancelled'?'red':'gray';
       const el = {paid:'Pagada',cancelled:'Cancelada',confirmed:'Confirmada'}[o.estado]||o.estado;
       return `<tr data-id="${o.id}">
         <td>${o.fecha}</td>
+        <td style="color:#888;">${o.hora||'—'}</td>
+        <td style="font-size:11px;color:#aaa;white-space:nowrap;">#${o.id}</td>
         <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${o.producto}">${o.producto}</td>
         <td>${fmt(o.monto)}</td>
         <td class="td-comision td-loading">...</td>

@@ -167,6 +167,17 @@ def db_save_shipping_costs(costs: dict):
         )
 
 
+AR_OFFSET = timedelta(hours=-3)
+
+def to_ar(dt_str: str) -> tuple:
+    """Convierte fecha UTC de ML a fecha y hora en Argentina (UTC-3)."""
+    try:
+        dt = datetime.strptime(dt_str[:19], "%Y-%m-%dT%H:%M:%S") + AR_OFFSET
+        return dt.strftime("%Y-%m-%d"), dt.strftime("%H:%M")
+    except Exception:
+        return dt_str[:10], ""
+
+
 async def get_shipping_cost(client, shipping_id, headers) -> float:
     r = await client.get(f"{ML_API_URL}/shipments/{shipping_id}", headers=headers)
     if r.status_code != 200:
@@ -300,8 +311,8 @@ async def api_orders(request: Request, account_id: int,
         "seller": acc["ml_user_id"],
         "sort": "date_desc",
         "limit": 50,
-        "order.date_created.from": f"{df}T00:00:00.000-00:00",
-        "order.date_created.to": f"{dt}T23:59:59.000-00:00",
+        "order.date_created.from": f"{df}T00:00:00.000-03:00",
+        "order.date_created.to": f"{dt}T23:59:59.000-03:00",
     }
 
     async with httpx.AsyncClient(timeout=60) as client:
@@ -349,12 +360,13 @@ async def api_orders(request: Request, account_id: int,
     for o, sid in zip(all_results, all_sids):
         a = o.get("total_amount", 0)
         estado = o.get("status", "")
-        d = o.get("date_created", "")[:10]
+        fecha, hora = to_ar(o.get("date_created", ""))
         comision = round(sum(item.get("sale_fee", 0) for item in o.get("order_items", [])), 2)
         envio = cost_cache.get(sid, 0.0) if sid else 0.0
         orders.append({
             "id": o.get("id"),
-            "fecha": d,
+            "fecha": fecha,
+            "hora": hora,
             "producto": ", ".join(i.get("item", {}).get("title", "?") for i in o.get("order_items", [])),
             "monto": round(a, 2),
             "comision": comision,
@@ -362,11 +374,11 @@ async def api_orders(request: Request, account_id: int,
             "ganancia": round(a - comision - envio, 2),
             "estado": estado,
         })
-        if d and estado == "paid":
-            daily.setdefault(d, {"ventas": 0, "ingresos": 0, "ganancia": 0})
-            daily[d]["ventas"] += 1
-            daily[d]["ingresos"] += a
-            daily[d]["ganancia"] += a - comision - envio
+        if fecha and estado == "paid":
+            daily.setdefault(fecha, {"ventas": 0, "ingresos": 0, "ganancia": 0})
+            daily[fecha]["ventas"] += 1
+            daily[fecha]["ingresos"] += a
+            daily[fecha]["ganancia"] += a - comision - envio
             for item in o.get("order_items", []):
                 t = item.get("item", {}).get("title", "Sin título")
                 products.setdefault(t, {"cantidad": 0, "ingresos": 0})
