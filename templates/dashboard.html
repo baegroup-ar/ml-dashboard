@@ -15,22 +15,33 @@
     .nav-right { display: flex; align-items: center; gap: 10px; font-size: 13px; }
     .btn-nav { padding: 6px 14px; border: 1px solid #ddd; border-radius: 8px; background: #fff; font-size: 13px; cursor: pointer; text-decoration: none; color: #111; }
     .btn-nav:hover { background: #f5f5f3; }
-    .btn-blue { background: #3483FA; color: #fff; border-color: #3483FA; }
-    .btn-blue:hover { background: #2970e0; }
-    main { max-width: 1100px; margin: 0 auto; padding: 2rem 1.5rem; }
+    .btn-blue { background: #3483FA; color: #fff !important; border-color: #3483FA; }
+    .btn-blue:hover { background: #2970e0 !important; }
+    .admin-link { font-size: 12px; color: #3483FA; text-decoration: none; }
+    main { max-width: 1150px; margin: 0 auto; padding: 1.5rem; }
 
-    .account-bar { background: #fff; border: 1px solid #e5e5e3; border-radius: 12px; padding: 1rem 1.25rem; margin-bottom: 1.5rem; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    /* Account bar */
+    .account-bar { background: #fff; border: 1px solid #e5e5e3; border-radius: 12px; padding: 1rem 1.25rem; margin-bottom: 1rem; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
     .account-bar label { font-size: 13px; color: #666; white-space: nowrap; }
-    .account-bar select { flex: 1; min-width: 200px; padding: 7px 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 14px; font-family: 'Inter', sans-serif; background: #fff; }
-    .account-bar select:focus { outline: none; border-color: #3483FA; }
+    .account-bar select { flex: 1; min-width: 180px; padding: 7px 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 14px; font-family: 'Inter', sans-serif; }
     .connect-link { display: flex; align-items: center; gap: 6px; padding: 7px 14px; background: #FFE600; border: none; border-radius: 8px; font-size: 13px; font-weight: 500; text-decoration: none; color: #111; cursor: pointer; white-space: nowrap; }
     .connect-link:hover { background: #f0d800; }
-    .disconnect-btn { padding: 7px 12px; border: 1px solid #fcc; border-radius: 8px; background: #fff; color: #c0392b; font-size: 13px; cursor: pointer; white-space: nowrap; }
+    .disconnect-btn { padding: 7px 12px; border: 1px solid #fcc; border-radius: 8px; background: #fff; color: #c0392b; font-size: 13px; cursor: pointer; }
     .disconnect-btn:hover { background: #fce9e9; }
-    .no-accounts { text-align: center; padding: 3rem; color: #888; font-size: 14px; }
-    .no-accounts a { color: #3483FA; text-decoration: none; font-weight: 500; }
 
-    .cards-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(175px, 1fr)); gap: 12px; margin-bottom: 1.75rem; }
+    /* Filter bar */
+    .filter-bar { background: #fff; border: 1px solid #e5e5e3; border-radius: 12px; padding: 1rem 1.25rem; margin-bottom: 1.5rem; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .filter-bar label { font-size: 13px; color: #666; }
+    .filter-bar input[type=date] { padding: 6px 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 13px; font-family: 'Inter', sans-serif; }
+    .period-btn { padding: 6px 12px; border: 1px solid #ddd; border-radius: 8px; background: #fff; font-size: 13px; cursor: pointer; color: #555; }
+    .period-btn:hover, .period-btn.active { background: #3483FA; color: #fff; border-color: #3483FA; }
+    .filter-sep { color: #ddd; }
+    .live-badge { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #1a8a5a; margin-left: auto; }
+    .live-dot { width: 8px; height: 8px; background: #1a8a5a; border-radius: 50%; animation: pulse 2s infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+    /* Cards */
+    .cards-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(175px, 1fr)); gap: 12px; margin-bottom: 1.5rem; }
     .metric-card { background: #fff; border: 1px solid #e5e5e3; border-radius: 12px; padding: 1rem 1.25rem; }
     .metric-card .label { font-size: 12px; color: #888; margin-bottom: 6px; }
     .metric-card .value { font-size: 16px; font-weight: 600; word-break: break-all; }
@@ -38,15 +49,18 @@
     .value.red { color: #c0392b; }
     .value.orange { color: #c47a1e; }
 
-    .charts-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 1.75rem; }
-    @media (max-width: 700px) { .charts-row { grid-template-columns: 1fr; } }
+    /* Charts */
+    .charts-row { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; margin-bottom: 1.5rem; }
+    @media (max-width: 750px) { .charts-row { grid-template-columns: 1fr; } }
     .chart-card { background: #fff; border: 1px solid #e5e5e3; border-radius: 12px; padding: 1.25rem; }
     .chart-card h3 { font-size: 14px; font-weight: 500; margin-bottom: 1rem; color: #444; }
-    .chart-wrap { position: relative; height: 200px; }
+    .chart-wrap { position: relative; height: 220px; }
 
+    /* Table */
     .table-card { background: #fff; border: 1px solid #e5e5e3; border-radius: 12px; overflow: hidden; }
-    .table-header { padding: 1rem 1.25rem; border-bottom: 1px solid #e5e5e3; }
+    .table-header { padding: 1rem 1.25rem; border-bottom: 1px solid #e5e5e3; display: flex; align-items: center; justify-content: space-between; }
     .table-header h3 { font-size: 14px; font-weight: 500; color: #444; }
+    .table-header span { font-size: 12px; color: #aaa; }
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
     th { padding: 10px 14px; text-align: left; color: #888; font-weight: 500; border-bottom: 1px solid #eee; }
     td { padding: 10px 14px; border-bottom: 1px solid #f0f0ee; color: #333; }
@@ -58,10 +72,11 @@
 
     .loading { text-align: center; padding: 4rem; color: #888; font-size: 14px; }
     .error-box { background: #fce9e9; border: 1px solid #f5c6c6; border-radius: 10px; padding: 1rem 1.25rem; color: #c0392b; font-size: 13px; margin-bottom: 1.5rem; }
-    .last-update { font-size: 12px; color: #aaa; margin-top: 1rem; text-align: right; }
     .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid #ddd; border-top-color: #3483FA; border-radius: 50%; animation: spin 0.7s linear infinite; vertical-align: -2px; margin-right: 6px; }
     @keyframes spin { to { transform: rotate(360deg); } }
-    .admin-link { font-size: 12px; color: #3483FA; text-decoration: none; }
+    .no-accounts { text-align: center; padding: 4rem; color: #888; font-size: 14px; }
+    .no-accounts a { color: #3483FA; text-decoration: none; font-weight: 500; }
+    .last-update { font-size: 12px; color: #aaa; margin-top: 1rem; text-align: right; }
   </style>
 </head>
 <body>
@@ -73,7 +88,7 @@
   <div class="nav-right">
     <span style="color:#888;">{{ user.name }}</span>
     {% if user.is_admin %}<a href="/admin" class="admin-link">Admin</a>{% endif %}
-    <button class="btn-nav" id="refresh-btn" onclick="loadData()">
+    <button class="btn-nav btn-blue" id="refresh-btn" onclick="loadData()">
       <span id="spinner" style="display:none;" class="spinner"></span>Actualizar
     </button>
     <a href="/logout" class="btn-nav">Salir</a>
@@ -95,8 +110,26 @@
     </form>
   </div>
 
-  <div id="page-header" style="margin-bottom:1.5rem;">
-    <h1 style="font-size:22px;font-weight:600;margin-bottom:4px;">Resumen de los últimos 30 días</h1>
+  <div class="filter-bar">
+    <label>Período:</label>
+    <button class="period-btn" onclick="setPeriod('today')">Hoy</button>
+    <button class="period-btn" onclick="setPeriod('yesterday')">Ayer</button>
+    <button class="period-btn" onclick="setPeriod('7d')">7 días</button>
+    <button class="period-btn active" onclick="setPeriod('30d')">30 días</button>
+    <button class="period-btn" onclick="setPeriod('90d')">90 días</button>
+    <button class="period-btn" onclick="setPeriod('365d')">1 año</button>
+    <span class="filter-sep">|</span>
+    <label>Desde:</label>
+    <input type="date" id="date-from" onchange="onDateChange()" />
+    <label>Hasta:</label>
+    <input type="date" id="date-to" onchange="onDateChange()" />
+    <div class="live-badge" id="live-badge" style="display:none;">
+      <div class="live-dot"></div> En vivo
+    </div>
+  </div>
+
+  <div id="page-header" style="margin-bottom:1.25rem;">
+    <h1 style="font-size:20px;font-weight:600;margin-bottom:4px;" id="period-title">Últimos 30 días</h1>
     <p id="last-update" style="font-size:13px;color:#888;">Cargando...</p>
   </div>
 
@@ -113,11 +146,14 @@
       <div class="metric-card"><div class="label">Margen promedio</div><div class="value" id="m-margen">—</div></div>
     </div>
     <div class="charts-row">
-      <div class="chart-card"><h3>Ingresos diarios (últimos 7 días)</h3><div class="chart-wrap"><canvas id="chart-ingresos"></canvas></div></div>
-      <div class="chart-card"><h3>Top 5 productos por ingresos</h3><div class="chart-wrap"><canvas id="chart-productos"></canvas></div></div>
+      <div class="chart-card"><h3 id="chart-title">Ingresos diarios</h3><div class="chart-wrap"><canvas id="chart-ingresos"></canvas></div></div>
+      <div class="chart-card"><h3>Top 5 productos</h3><div class="chart-wrap"><canvas id="chart-productos"></canvas></div></div>
     </div>
     <div class="table-card">
-      <div class="table-header"><h3>Últimas ventas</h3></div>
+      <div class="table-header">
+        <h3>Ventas del período</h3>
+        <span id="orders-count"></span>
+      </div>
       <div style="overflow-x:auto;">
         <table>
           <thead><tr><th>Fecha</th><th>Producto</th><th>Monto</th><th>Comisión</th><th>Envío</th><th>Ganancia neta</th><th>Estado</th></tr></thead>
@@ -142,6 +178,72 @@
   let chartIngresos = null, chartProductos = null;
   let currentAccountId = document.getElementById('account-select')?.value;
   let autoRefresh = null;
+  let currentPeriod = '30d';
+
+  function todayStr() {
+    return new Date().toISOString().slice(0, 10);
+  }
+
+  function addDays(d, n) {
+    const dt = new Date(d);
+    dt.setDate(dt.getDate() + n);
+    return dt.toISOString().slice(0, 10);
+  }
+
+  function setPeriod(p) {
+    currentPeriod = p;
+    document.querySelectorAll('.period-btn').forEach(b => b.classList.remove('active'));
+    event.target.classList.add('active');
+    const today = todayStr();
+    const df = document.getElementById('date-from');
+    const dt = document.getElementById('date-to');
+    const liveBadge = document.getElementById('live-badge');
+
+    if (p === 'today') {
+      df.value = today; dt.value = today;
+      liveBadge.style.display = 'flex';
+      startAutoRefresh(2 * 60 * 1000);
+    } else if (p === 'yesterday') {
+      const y = addDays(today, -1);
+      df.value = y; dt.value = y;
+      liveBadge.style.display = 'none';
+      stopAutoRefresh();
+    } else if (p === '7d') {
+      df.value = addDays(today, -6); dt.value = today;
+      liveBadge.style.display = 'none'; stopAutoRefresh();
+    } else if (p === '30d') {
+      df.value = addDays(today, -29); dt.value = today;
+      liveBadge.style.display = 'none'; stopAutoRefresh();
+    } else if (p === '90d') {
+      df.value = addDays(today, -89); dt.value = today;
+      liveBadge.style.display = 'none'; stopAutoRefresh();
+    } else if (p === '365d') {
+      df.value = addDays(today, -364); dt.value = today;
+      liveBadge.style.display = 'none'; stopAutoRefresh();
+    }
+
+    const titles = {today:'Hoy', yesterday:'Ayer', '7d':'Últimos 7 días', '30d':'Últimos 30 días', '90d':'Últimos 90 días', '365d':'Último año'};
+    document.getElementById('period-title').textContent = titles[p] || 'Período personalizado';
+    loadData();
+  }
+
+  function onDateChange() {
+    currentPeriod = 'custom';
+    document.querySelectorAll('.period-btn').forEach(b => b.classList.remove('active'));
+    document.getElementById('live-badge').style.display = 'none';
+    stopAutoRefresh();
+    document.getElementById('period-title').textContent = 'Período personalizado';
+    loadData();
+  }
+
+  function startAutoRefresh(ms) {
+    stopAutoRefresh();
+    autoRefresh = setInterval(loadData, ms);
+  }
+
+  function stopAutoRefresh() {
+    if (autoRefresh) { clearInterval(autoRefresh); autoRefresh = null; }
+  }
 
   function onAccountChange() {
     currentAccountId = document.getElementById('account-select').value;
@@ -160,10 +262,17 @@
     const spinner = document.getElementById('spinner');
     spinner.style.display = 'inline-block';
     document.getElementById('error-box').style.display = 'none';
+
+    const df = document.getElementById('date-from')?.value;
+    const dt = document.getElementById('date-to')?.value;
+    const params = new URLSearchParams();
+    if (df) params.set('date_from', df);
+    if (dt) params.set('date_to', dt);
+
     try {
       const [sr, or] = await Promise.all([
-        fetch(`/api/summary/${currentAccountId}`),
-        fetch(`/api/orders/${currentAccountId}?limit=20`),
+        fetch(`/api/summary/${currentAccountId}?${params}`),
+        fetch(`/api/orders/${currentAccountId}?${params}&limit=100`),
       ]);
       if (!sr.ok || !or.ok) throw new Error('Error al obtener datos. Intentá reconectar la cuenta.');
       const summary = await sr.json();
@@ -199,18 +308,19 @@
 
   function renderCharts(data) {
     const daily = data.daily;
-    const labels = Object.keys(daily).map(d => { const [,m,day] = d.split('-'); return `${day}/${m}`; });
+    const keys = Object.keys(daily);
+    const labels = keys.map(d => { const [,m,day] = d.split('-'); return `${day}/${m}`; });
     if (chartIngresos) chartIngresos.destroy();
     chartIngresos = new Chart(document.getElementById('chart-ingresos'), {
       type: 'bar',
       data: { labels, datasets: [
-        { label: 'Ingresos', data: Object.values(daily).map(d=>d.ingresos), backgroundColor: '#B5D4F4', borderRadius: 6 },
-        { label: 'Ganancia', data: Object.values(daily).map(d=>d.ganancia), backgroundColor: '#9FE1CB', borderRadius: 6 },
+        { label: 'Ingresos', data: keys.map(k=>daily[k].ingresos), backgroundColor: '#B5D4F4', borderRadius: 5 },
+        { label: 'Ganancia', data: keys.map(k=>daily[k].ganancia), backgroundColor: '#9FE1CB', borderRadius: 5 },
       ]},
       options: { responsive: true, maintainAspectRatio: false,
         plugins: { legend: { labels: { font: { family: 'Inter', size: 12 }, boxWidth: 12 } } },
         scales: {
-          x: { grid: { display: false }, ticks: { font: { family: 'Inter', size: 11 } } },
+          x: { grid: { display: false }, ticks: { font: { family: 'Inter', size: 11 }, maxTicksLimit: 15 } },
           y: { ticks: { font: { family: 'Inter', size: 11 }, callback: v => '$' + v.toLocaleString('es-AR') } }
         }
       }
@@ -224,14 +334,18 @@
         datasets: [{ data: products.map(p=>p.ingresos), backgroundColor: ['#378ADD','#1D9E75','#EF9F27','#D4537E','#7F77DD'], borderWidth: 0 }]
       },
       options: { responsive: true, maintainAspectRatio: false,
-        plugins: { legend: { position: 'bottom', labels: { font: { family: 'Inter', size: 11 }, boxWidth: 12, padding: 10 } } }
+        plugins: { legend: { position: 'bottom', labels: { font: { family: 'Inter', size: 11 }, boxWidth: 12, padding: 8 } } }
       }
     });
   }
 
   function renderOrders(orders) {
     const tbody = document.getElementById('orders-tbody');
-    if (!orders.length) { tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#aaa;padding:2rem;">Sin ventas recientes.</td></tr>'; return; }
+    document.getElementById('orders-count').textContent = `${orders.length} ventas`;
+    if (!orders.length) {
+      tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#aaa;padding:2rem;">Sin ventas en este período.</td></tr>';
+      return;
+    }
     tbody.innerHTML = orders.map(o => {
       const pillClass = o.estado === 'paid' ? 'green' : o.estado === 'cancelled' ? 'red' : 'gray';
       const estadoLabel = {paid:'Pagada', cancelled:'Cancelada', confirmed:'Confirmada'}[o.estado] || o.estado;
@@ -248,9 +362,12 @@
     }).join('');
   }
 
+  // Init: setear fechas por defecto (30d)
   if (currentAccountId) {
+    const today = todayStr();
+    document.getElementById('date-from').value = addDays(today, -29);
+    document.getElementById('date-to').value = today;
     loadData();
-    autoRefresh = setInterval(loadData, 5 * 60 * 1000);
   }
 </script>
 </body>
