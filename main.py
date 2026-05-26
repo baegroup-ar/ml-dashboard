@@ -167,12 +167,10 @@ def db_save_shipping_costs(costs: dict):
         )
 
 
-AR_OFFSET = timedelta(hours=-3)
-
 def to_ar(dt_str: str) -> tuple:
-    """Convierte fecha UTC de ML a fecha y hora en Argentina (UTC-3)."""
+    """Extrae fecha y hora del string de ML (ya viene en hora Argentina)."""
     try:
-        dt = datetime.strptime(dt_str[:19], "%Y-%m-%dT%H:%M:%S") + AR_OFFSET
+        dt = datetime.strptime(dt_str[:19], "%Y-%m-%dT%H:%M:%S")
         return dt.strftime("%Y-%m-%d"), dt.strftime("%H:%M")
     except Exception:
         return dt_str[:10], ""
