@@ -60,8 +60,12 @@ def init_db():
             CREATE TABLE IF NOT EXISTS shipment_cost_cache (
                 shipping_id BIGINT PRIMARY KEY,
                 cost NUMERIC(10,2) NOT NULL,
+                buyer_cost NUMERIC(10,2) NOT NULL DEFAULT 0,
                 cached_at TIMESTAMP DEFAULT NOW()
             )
+        """))
+        conn.execute(text("""
+            ALTER TABLE shipment_cost_cache ADD COLUMN IF NOT EXISTS buyer_cost NUMERIC(10,2) NOT NULL DEFAULT 0
         """))
         existing = conn.execute(text("SELECT id FROM users WHERE email=:e"), {"e": ADMIN_EMAIL}).fetchone()
         if not existing:
@@ -151,19 +155,21 @@ def db_get_cached_shipping(shipping_ids: list) -> dict:
         placeholders = ",".join(f":id{j}" for j in range(len(batch)))
         params = {f"id{j}": sid for j, sid in enumerate(batch)}
         rows = db_fetchall(
-            f"SELECT shipping_id, cost FROM shipment_cost_cache WHERE shipping_id IN ({placeholders})",
+            f"SELECT shipping_id, cost, buyer_cost FROM shipment_cost_cache WHERE shipping_id IN ({placeholders})",
             params,
         )
-        result.update({row["shipping_id"]: float(row["cost"]) for row in rows})
+        result.update({row["shipping_id"]: {"seller": float(row["cost"]), "buyer": float(row["buyer_cost"])} for row in rows})
     return result
 
 
 def db_save_shipping_costs(costs: dict):
-    for sid, cost in costs.items():
+    for sid, c in costs.items():
+        seller = c["seller"] if isinstance(c, dict) else float(c)
+        buyer = c["buyer"] if isinstance(c, dict) else 0.0
         db_execute(
-            "INSERT INTO shipment_cost_cache (shipping_id, cost) VALUES (:sid, :cost)"
+            "INSERT INTO shipment_cost_cache (shipping_id, cost, buyer_cost) VALUES (:sid, :cost, :buyer_cost)"
             " ON CONFLICT (shipping_id) DO NOTHING",
-            {"sid": sid, "cost": cost},
+            {"sid": sid, "cost": seller, "buyer_cost": buyer},
         )
 
 
@@ -188,14 +194,17 @@ def to_ar(dt_str: str) -> tuple:
         return dt_str[:10], ""
 
 
-async def get_shipping_cost(client, shipping_id, headers) -> float:
+async def get_shipping_cost(client, shipping_id, headers) -> dict:
     r = await client.get(f"{ML_API_URL}/shipments/{shipping_id}", headers=headers)
     if r.status_code != 200:
-        return 0.0
+        return {"seller": 0.0, "buyer": 0.0}
     data = r.json()
-    # base_cost es lo que paga el vendedor; shipping_option.cost puede ser 0 en Envío Gratis
-    cost = data.get("base_cost") or (data.get("shipping_option") or {}).get("list_cost") or (data.get("shipping_option") or {}).get("cost") or 0
-    return round(float(cost), 2)
+    seller_cost = data.get("base_cost") or 0
+    buyer_cost = (data.get("shipping_option") or {}).get("cost") or 0
+    return {
+        "seller": round(float(seller_cost), 2),
+        "buyer": round(float(buyer_cost), 2),
+    }
 
 
 # ── Auth ────────────────────────────────────────────────────────
@@ -318,7 +327,9 @@ async def api_orders(request: Request, account_id: int,
         df = str(datetime.strptime(dt, "%Y-%m-%d").date() - timedelta(days=365))
 
     # Convertir fechas AR (UTC-3) a UTC para el filtro: medianoche AR = 03:00 UTC del mismo día
-    from_utc = datetime.strptime(df, "%Y-%m-%d") + timedelta(hours=3)
+    # Se resta 24h al inicio para capturar órdenes cuyo date_created fue el día anterior
+    # pero cuyo pago (date_approved) cayó dentro del rango solicitado.
+    from_utc = datetime.strptime(df, "%Y-%m-%d") + timedelta(hours=3) - timedelta(hours=24)
     to_utc   = datetime.strptime(dt, "%Y-%m-%d") + timedelta(hours=27)  # 23:59:59 AR = ~03:00 UTC día siguiente
     search_params: dict = {
         "seller": acc["ml_user_id"],
@@ -370,15 +381,24 @@ async def api_orders(request: Request, account_id: int,
     orders = []
     daily: dict = {}
     products: dict = {}
+    empty_ship = {"seller": 0.0, "buyer": 0.0}
     for o, sid in zip(all_results, all_sids):
         a = o.get("total_amount", 0)
         estado = o.get("status", "")
-        fecha, hora = to_ar(o.get("date_created", ""))
-        # Filtro client-side: solo órdenes dentro del rango AR solicitado
+        # Usar fecha de pago aprobado para mostrar; caer en date_created si no hay pago
+        payments = o.get("payments", [])
+        pay_str = ""
+        if payments:
+            pay_str = payments[0].get("date_approved", "") or payments[0].get("date_created", "")
+        fecha, hora = to_ar(pay_str if pay_str else o.get("date_created", ""))
+        # Filtro client-side sobre fecha de pago: solo dentro del rango AR solicitado
         if fecha and not (df <= fecha <= dt):
             continue
         comision = round(sum(item.get("sale_fee", 0) for item in o.get("order_items", [])), 2)
-        envio = cost_cache.get(sid, 0.0) if sid else 0.0
+        ship_info = cost_cache.get(sid, empty_ship) if sid else empty_ship
+        envio = ship_info["seller"]
+        ingreso_envio = ship_info["buyer"]
+        ganancia = round(a + ingreso_envio - comision - envio, 2)
         orders.append({
             "id": o.get("id"),
             "fecha": fecha,
@@ -386,15 +406,16 @@ async def api_orders(request: Request, account_id: int,
             "producto": ", ".join(i.get("item", {}).get("title", "?") for i in o.get("order_items", [])),
             "monto": round(a, 2),
             "comision": comision,
+            "ingreso_envio": ingreso_envio,
             "envio": envio,
-            "ganancia": round(a - comision - envio, 2),
+            "ganancia": ganancia,
             "estado": estado,
         })
         if fecha and estado == "paid":
             daily.setdefault(fecha, {"ventas": 0, "ingresos": 0, "ganancia": 0})
             daily[fecha]["ventas"] += 1
             daily[fecha]["ingresos"] += a
-            daily[fecha]["ganancia"] += a - comision - envio
+            daily[fecha]["ganancia"] += ganancia
             for item in o.get("order_items", []):
                 t = item.get("item", {}).get("title", "Sin título")
                 products.setdefault(t, {"cantidad": 0, "ingresos": 0})
