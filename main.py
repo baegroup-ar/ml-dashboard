@@ -310,7 +310,8 @@ async def api_summary(request: Request, account_id: int):
 
 
 @app.get("/api/orders/{account_id}")
-async def api_orders(request: Request, account_id: int, limit: int = 20):
+async def api_orders(request: Request, account_id: int, limit: int = 50,
+                     date_from: Optional[str] = None, date_to: Optional[str] = None):
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
@@ -321,9 +322,13 @@ async def api_orders(request: Request, account_id: int, limit: int = 20):
     if not token:
         raise HTTPException(502)
     headers = {"Authorization": f"Bearer {token}"}
+    search_params: dict = {"seller": acc["ml_user_id"], "sort": "date_desc", "limit": limit}
+    if date_from:
+        search_params["order.date_created.from"] = f"{date_from}T00:00:00.000-00:00"
+    if date_to:
+        search_params["order.date_created.to"] = f"{date_to}T23:59:59.000-00:00"
     async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.get(f"{ML_API_URL}/orders/search", headers=headers,
-            params={"seller": acc["ml_user_id"], "sort": "date_desc", "limit": limit})
+        r = await client.get(f"{ML_API_URL}/orders/search", headers=headers, params=search_params)
         if r.status_code != 200:
             raise HTTPException(502)
         results = r.json().get("results", [])
@@ -333,19 +338,39 @@ async def api_orders(request: Request, account_id: int, limit: int = 20):
                 return await get_order_fees(client, oid, headers)
         fees_list = await asyncio.gather(*[fetch(str(o["id"])) for o in results])
     orders = []
+    daily: dict = {}
+    products: dict = {}
     for o, f in zip(results, fees_list):
         a = o.get("total_amount", 0)
+        estado = o.get("status", "")
+        d = o.get("date_created", "")[:10]
         orders.append({
             "id": o.get("id"),
-            "fecha": o.get("date_created", "")[:10],
+            "fecha": d,
             "producto": ", ".join(i.get("item", {}).get("title", "?") for i in o.get("order_items", [])),
             "monto": round(a, 2),
             "comision": f["comision"],
             "envio": f["envio"],
             "ganancia": round(a - f["comision"] - f["envio"], 2),
-            "estado": o.get("status", ""),
+            "estado": estado,
         })
-    return {"orders": orders}
+        if d and estado == "paid":
+            daily.setdefault(d, {"ventas": 0, "ingresos": 0, "ganancia": 0})
+            daily[d]["ventas"] += 1
+            daily[d]["ingresos"] += a
+            daily[d]["ganancia"] += a - f["comision"] - f["envio"]
+            for item in o.get("order_items", []):
+                t = item.get("item", {}).get("title", "Sin título")
+                products.setdefault(t, {"cantidad": 0, "ingresos": 0})
+                products[t]["cantidad"] += item.get("quantity", 1)
+                products[t]["ingresos"] += item.get("unit_price", 0) * item.get("quantity", 1)
+    top = sorted(products.items(), key=lambda x: x[1]["ingresos"], reverse=True)[:5]
+    return {
+        "orders": orders,
+        "daily": dict(sorted(daily.items())),
+        "top_products": [{"nombre": k, **v} for k, v in top],
+        "ultima_actualizacion": datetime.utcnow().isoformat(),
+    }
 
 
 # ── Admin ────────────────────────────────────────────────────────

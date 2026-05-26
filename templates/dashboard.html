@@ -279,17 +279,20 @@
     }
   }
 
-  async function loadFees(params) {
+  function loadFees(params) {
     try {
-      const r = await fetch(`/api/fees/${currentAccountId}?${params}`);
-      if(!r.ok) throw new Error('No se pudieron cargar las comisiones.');
-      feesCache = await r.json();
-      // Actualizar tarjetas
-      const ingresos = ordersCache.reduce((s,o)=>s+o.monto,0);
-      const comisiones = feesCache.total_comisiones;
-      const envios = feesCache.total_envios;
+      const comisiones = ordersCache.reduce((s,o) => s + (o.comision || 0), 0);
+      const envios = ordersCache.reduce((s,o) => s + (o.envio || 0), 0);
+      const ingresos = ordersCache.filter(o => o.estado === 'paid').reduce((s,o) => s + o.monto, 0);
       const neta = ingresos - comisiones - envios;
       const margen = ingresos > 0 ? (neta/ingresos*100) : 0;
+
+      feesCache = {
+        total_comisiones: comisiones,
+        total_envios: envios,
+        fees_by_order: Object.fromEntries(ordersCache.map(o => [String(o.id), o.comision || 0])),
+        shipping_by_order: Object.fromEntries(ordersCache.map(o => [String(o.id), o.envio || 0])),
+      };
 
       document.getElementById('m-comisiones').textContent = fmt(comisiones);
       document.getElementById('m-comisiones').className = 'value red';
@@ -304,7 +307,6 @@
         document.getElementById(`lb-${id}`).style.display='none';
       });
 
-      // Actualizar tabla con fees reales
       updateTableWithFees();
       document.getElementById('fees-status-bar').style.display='none';
       const ts = new Date().toLocaleString('es-AR',{dateStyle:'short',timeStyle:'short'});
@@ -315,8 +317,10 @@
   }
 
   function renderBasic(data) {
-    document.getElementById('m-ventas').textContent = data.resumen.total_ventas;
-    document.getElementById('m-bruto').textContent = fmt(data.resumen.ingresos_brutos);
+    const paidOrders = data.orders.filter(o => o.estado === 'paid');
+    const ingresos_brutos = paidOrders.reduce((s, o) => s + o.monto, 0);
+    document.getElementById('m-ventas').textContent = paidOrders.length;
+    document.getElementById('m-bruto').textContent = fmt(ingresos_brutos);
     renderCharts(data);
     renderOrders(data.orders);
     document.getElementById('orders-count').textContent = `${data.orders.length} ventas`;
