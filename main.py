@@ -317,12 +317,15 @@ async def api_orders(request: Request, account_id: int,
     if (datetime.strptime(dt, "%Y-%m-%d") - datetime.strptime(df, "%Y-%m-%d")).days > 365:
         df = str(datetime.strptime(dt, "%Y-%m-%d").date() - timedelta(days=365))
 
+    # Convertir fechas AR (UTC-3) a UTC para el filtro: medianoche AR = 03:00 UTC del mismo día
+    from_utc = datetime.strptime(df, "%Y-%m-%d") + timedelta(hours=3)
+    to_utc   = datetime.strptime(dt, "%Y-%m-%d") + timedelta(hours=27)  # 23:59:59 AR = ~03:00 UTC día siguiente
     search_params: dict = {
         "seller": acc["ml_user_id"],
         "sort": "date_desc",
         "limit": 50,
-        "order.date_created.from": f"{df}T00:00:00.000-03:00",
-        "order.date_created.to": f"{dt}T23:59:59.000-03:00",
+        "order.date_created.from": from_utc.strftime("%Y-%m-%dT%H:%M:%S.000-00:00"),
+        "order.date_created.to":   to_utc.strftime("%Y-%m-%dT%H:%M:%S.000-00:00"),
     }
 
     async with httpx.AsyncClient(timeout=60) as client:
@@ -371,6 +374,9 @@ async def api_orders(request: Request, account_id: int,
         a = o.get("total_amount", 0)
         estado = o.get("status", "")
         fecha, hora = to_ar(o.get("date_created", ""))
+        # Filtro client-side: solo órdenes dentro del rango AR solicitado
+        if fecha and not (df <= fecha <= dt):
+            continue
         comision = round(sum(item.get("sale_fee", 0) for item in o.get("order_items", [])), 2)
         envio = cost_cache.get(sid, 0.0) if sid else 0.0
         orders.append({

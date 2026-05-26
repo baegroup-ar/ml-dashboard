@@ -170,7 +170,7 @@
       </div>
       <div style="overflow-x:auto;">
         <table>
-          <thead><tr><th>Fecha</th><th>Hora</th><th>N° Venta</th><th>Producto</th><th>Monto</th><th>Comisión</th><th>Envío</th><th>Ganancia neta</th><th>Estado</th></tr></thead>
+          <thead><tr><th>Fecha</th><th>Hora</th><th>N° Venta</th><th>Producto</th><th>Monto</th><th>Comisión</th><th>Envío</th><th>Ganancia neta</th><th>Margen</th></tr></thead>
           <tbody id="orders-tbody"></tbody>
         </table>
       </div>
@@ -295,11 +295,14 @@
         shipping_by_order: Object.fromEntries(ordersCache.map(o => [String(o.id), o.envio || 0])),
       };
 
-      document.getElementById('m-comisiones').textContent = fmt(comisiones);
+      const pctCom = ingresos > 0 ? (comisiones/ingresos*100).toFixed(1) : '0.0';
+      const pctEnv = ingresos > 0 ? (envios/ingresos*100).toFixed(1) : '0.0';
+      const pctNet = ingresos > 0 ? (neta/ingresos*100).toFixed(1) : '0.0';
+      document.getElementById('m-comisiones').innerHTML = `${fmt(comisiones)} <span style="font-size:11px;font-weight:400;">(${pctCom}%)</span>`;
       document.getElementById('m-comisiones').className = 'value red';
-      document.getElementById('m-envios').textContent = fmt(envios);
+      document.getElementById('m-envios').innerHTML = `${fmt(envios)} <span style="font-size:11px;font-weight:400;">(${pctEnv}%)</span>`;
       document.getElementById('m-envios').className = 'value orange';
-      document.getElementById('m-neta').textContent = fmt(neta);
+      document.getElementById('m-neta').innerHTML = `${fmt(neta)} <span style="font-size:11px;font-weight:400;">(${pctNet}%)</span>`;
       document.getElementById('m-neta').className = 'value ' + (neta >= 0 ? 'green' : 'red');
       document.getElementById('m-margen').textContent = margen.toFixed(1) + '%';
       document.getElementById('m-margen').className = 'value';
@@ -366,6 +369,9 @@
     tbody.innerHTML = orders.map(o => {
       const pc = o.estado==='paid'?'green':o.estado==='cancelled'?'red':'gray';
       const el = {paid:'Pagada',cancelled:'Cancelada',confirmed:'Confirmada'}[o.estado]||o.estado;
+      const margenCell = o.estado === 'paid'
+        ? `<span class="td-margen td-loading" style="font-size:13px;font-weight:600;">...</span>`
+        : `<span class="pill ${pc}">${el}</span>`;
       return `<tr data-id="${o.id}">
         <td>${o.fecha}</td>
         <td style="color:#888;">${o.hora||'—'}</td>
@@ -375,7 +381,7 @@
         <td class="td-comision td-loading">...</td>
         <td class="td-envio td-loading">...</td>
         <td class="td-ganancia td-loading">...</td>
-        <td><span class="pill ${pc}">${el}</span></td>
+        <td>${margenCell}</td>
       </tr>`;
     }).join('');
   }
@@ -399,6 +405,13 @@
       gc.textContent = fmt(ganancia);
       gc.className = 'td-ganancia';
       gc.style.cssText = `color:${ganancia>=0?'#1a8a5a':'#c0392b'};font-weight:500`;
+      const tm = row.querySelector('.td-margen');
+      if(tm) {
+        const pct = monto > 0 ? ((ganancia/monto)*100).toFixed(1) : '0.0';
+        tm.textContent = pct + '%';
+        tm.className = 'td-margen';
+        tm.style.cssText = `color:${ganancia>=0?'#1a8a5a':'#c0392b'};font-size:13px;font-weight:600`;
+      }
     });
   }
 
