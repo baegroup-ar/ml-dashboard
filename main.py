@@ -56,6 +56,13 @@ def init_db():
                 UNIQUE(user_id, ml_user_id)
             )
         """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS shipment_cost_cache (
+                shipping_id BIGINT PRIMARY KEY,
+                cost NUMERIC(10,2) NOT NULL,
+                cached_at TIMESTAMP DEFAULT NOW()
+            )
+        """))
         existing = conn.execute(text("SELECT id FROM users WHERE email=:e"), {"e": ADMIN_EMAIL}).fetchone()
         if not existing:
             hashed = bcrypt.hashpw(ADMIN_PASSWORD.encode(), bcrypt.gensalt()).decode()
@@ -132,6 +139,32 @@ async def refresh_ml_token(account_id: int) -> Optional[str]:
              "ea": new_expires, "id": account_id}
         )
         return tokens["access_token"]
+
+
+def db_get_cached_shipping(shipping_ids: list) -> dict:
+    if not shipping_ids:
+        return {}
+    result = {}
+    chunk = 500
+    for i in range(0, len(shipping_ids), chunk):
+        batch = shipping_ids[i:i+chunk]
+        placeholders = ",".join(f":id{j}" for j in range(len(batch)))
+        params = {f"id{j}": sid for j, sid in enumerate(batch)}
+        rows = db_fetchall(
+            f"SELECT shipping_id, cost FROM shipment_cost_cache WHERE shipping_id IN ({placeholders})",
+            params,
+        )
+        result.update({row["shipping_id"]: float(row["cost"]) for row in rows})
+    return result
+
+
+def db_save_shipping_costs(costs: dict):
+    for sid, cost in costs.items():
+        db_execute(
+            "INSERT INTO shipment_cost_cache (shipping_id, cost) VALUES (:sid, :cost)"
+            " ON CONFLICT (shipping_id) DO NOTHING",
+            {"sid": sid, "cost": cost},
+        )
 
 
 async def get_shipping_cost(client, shipping_id, headers) -> float:
@@ -242,68 +275,6 @@ async def ml_disconnect(request: Request, account_id: int):
 
 # ── API datos ───────────────────────────────────────────────────
 
-@app.get("/api/summary/{account_id}")
-async def api_summary(request: Request, account_id: int):
-    user_id = get_session_user_id(request)
-    if not user_id:
-        raise HTTPException(401)
-    acc = db_fetchone("SELECT * FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
-    if not acc:
-        raise HTTPException(404)
-    token = await refresh_ml_token(account_id)
-    if not token:
-        raise HTTPException(502, "No se pudo renovar el token de ML")
-    headers = {"Authorization": f"Bearer {token}"}
-    async with httpx.AsyncClient(timeout=30) as client:
-        date_from = (datetime.utcnow() - timedelta(days=30)).strftime("%Y-%m-%dT00:00:00.000-00:00")
-        r = await client.get(f"{ML_API_URL}/orders/search", headers=headers, params={
-            "seller": acc["ml_user_id"], "order.status": "paid",
-            "order.date_created.from": date_from, "limit": 50, "sort": "date_desc",
-        })
-        if r.status_code != 200:
-            raise HTTPException(502, "Error al obtener órdenes")
-        results = r.json().get("results", [])
-        sem = asyncio.Semaphore(10)
-        async def fetch(oid):
-            async with sem:
-                return await get_order_fees(client, oid, headers)
-        fees_list = await asyncio.gather(*[fetch(str(o["id"])) for o in results])
-    ingresos = sum(o.get("total_amount", 0) for o in results)
-    comisiones = sum(f["comision"] for f in fees_list)
-    envios = sum(f["envio"] for f in fees_list)
-    neta = ingresos - comisiones - envios
-    daily = {}
-    for o, f in zip(results, fees_list):
-        d = o.get("date_created", "")[:10]
-        if d:
-            daily.setdefault(d, {"ventas": 0, "ingresos": 0, "ganancia": 0})
-            a = o.get("total_amount", 0)
-            daily[d]["ventas"] += 1
-            daily[d]["ingresos"] += a
-            daily[d]["ganancia"] += a - f["comision"] - f["envio"]
-    products = {}
-    for o in results:
-        for item in o.get("order_items", []):
-            t = item.get("item", {}).get("title", "Sin título")
-            products.setdefault(t, {"cantidad": 0, "ingresos": 0})
-            products[t]["cantidad"] += item.get("quantity", 1)
-            products[t]["ingresos"] += item.get("unit_price", 0) * item.get("quantity", 1)
-    top = sorted(products.items(), key=lambda x: x[1]["ingresos"], reverse=True)[:5]
-    return {
-        "resumen": {
-            "total_ventas": len(results),
-            "ingresos_brutos": round(ingresos, 2),
-            "total_comisiones": round(comisiones, 2),
-            "total_envios": round(envios, 2),
-            "ganancia_neta": round(neta, 2),
-            "margen_promedio": round((neta / ingresos * 100) if ingresos else 0, 1),
-        },
-        "daily": dict(sorted(daily.items())[-7:]),
-        "top_products": [{"nombre": k, **v} for k, v in top],
-        "ultima_actualizacion": datetime.utcnow().isoformat(),
-    }
-
-
 @app.get("/api/orders/{account_id}")
 async def api_orders(request: Request, account_id: int,
                      date_from: Optional[str] = None, date_to: Optional[str] = None):
@@ -317,47 +288,70 @@ async def api_orders(request: Request, account_id: int,
     if not token:
         raise HTTPException(502)
     headers = {"Authorization": f"Bearer {token}"}
-    search_params: dict = {"seller": acc["ml_user_id"], "sort": "date_desc", "limit": 50}
-    if date_from:
-        search_params["order.date_created.from"] = f"{date_from}T00:00:00.000-00:00"
-    if date_to:
-        search_params["order.date_created.to"] = f"{date_to}T23:59:59.000-00:00"
 
-    # Paginar hasta traer todas las órdenes del período (máx 2000 por seguridad)
-    all_results: list = []
-    async with httpx.AsyncClient(timeout=30) as client:
-        while len(all_results) < 2000:
-            search_params["offset"] = len(all_results)
-            r = await client.get(f"{ML_API_URL}/orders/search", headers=headers, params=search_params)
-            if r.status_code != 200:
-                raise HTTPException(502)
-            resp = r.json()
-            page = resp.get("results", [])
-            all_results.extend(page)
-            total = resp.get("paging", {}).get("total", 0)
-            if len(all_results) >= total or not page:
-                break
+    today = datetime.utcnow().date()
+    df = date_from or str(today - timedelta(days=365))
+    dt = date_to or str(today)
+    # Limitar rango a 1 año máximo
+    if (datetime.strptime(dt, "%Y-%m-%d") - datetime.strptime(df, "%Y-%m-%d")).days > 365:
+        df = str(datetime.strptime(dt, "%Y-%m-%d").date() - timedelta(days=365))
 
-        # Buscar costo de envío en paralelo solo para órdenes con shipping
-        sem = asyncio.Semaphore(15)
-        async def fetch_shipping(sid):
-            if not sid:
-                return 0.0
-            async with sem:
-                return await get_shipping_cost(client, sid, headers)
+    search_params: dict = {
+        "seller": acc["ml_user_id"],
+        "sort": "date_desc",
+        "limit": 50,
+        "order.date_created.from": f"{df}T00:00:00.000-00:00",
+        "order.date_created.to": f"{dt}T23:59:59.000-00:00",
+    }
 
-        shipping_ids = [(o.get("shipping") or {}).get("id") for o in all_results]
-        shipping_costs = await asyncio.gather(*[fetch_shipping(sid) for sid in shipping_ids])
+    async with httpx.AsyncClient(timeout=60) as client:
+        # Primera página para saber el total
+        r = await client.get(f"{ML_API_URL}/orders/search", headers=headers, params={**search_params, "offset": 0})
+        if r.status_code != 200:
+            raise HTTPException(502)
+        first = r.json()
+        all_results = list(first.get("results", []))
+        total = first.get("paging", {}).get("total", 0)
+
+        # Resto de páginas en paralelo
+        offsets = list(range(50, total, 50))
+        if offsets:
+            page_sem = asyncio.Semaphore(10)
+            async def fetch_page(off: int):
+                async with page_sem:
+                    rp = await client.get(
+                        f"{ML_API_URL}/orders/search", headers=headers,
+                        params={**search_params, "offset": off},
+                    )
+                    return rp.json().get("results", []) if rp.status_code == 200 else []
+            pages = await asyncio.gather(*[fetch_page(off) for off in offsets])
+            for page in pages:
+                all_results.extend(page)
+
+        # Costos de envío: primero desde cache, luego API solo para los que faltan
+        all_sids = [(o.get("shipping") or {}).get("id") for o in all_results]
+        unique_sids = [sid for sid in dict.fromkeys(s for s in all_sids if s)]
+        cost_cache = db_get_cached_shipping(unique_sids)
+
+        uncached = [sid for sid in unique_sids if sid not in cost_cache]
+        if uncached:
+            ship_sem = asyncio.Semaphore(15)
+            async def fetch_ship(sid):
+                async with ship_sem:
+                    return sid, await get_shipping_cost(client, sid, headers)
+            new_costs = dict(await asyncio.gather(*[fetch_ship(sid) for sid in uncached]))
+            db_save_shipping_costs(new_costs)
+            cost_cache.update(new_costs)
 
     orders = []
     daily: dict = {}
     products: dict = {}
-    for o, envio in zip(all_results, shipping_costs):
+    for o, sid in zip(all_results, all_sids):
         a = o.get("total_amount", 0)
         estado = o.get("status", "")
         d = o.get("date_created", "")[:10]
-        # sale_fee viene en cada item del resultado de búsqueda — no requiere llamada extra
         comision = round(sum(item.get("sale_fee", 0) for item in o.get("order_items", [])), 2)
+        envio = cost_cache.get(sid, 0.0) if sid else 0.0
         orders.append({
             "id": o.get("id"),
             "fecha": d,
