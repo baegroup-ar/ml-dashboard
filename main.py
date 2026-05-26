@@ -134,19 +134,14 @@ async def refresh_ml_token(account_id: int) -> Optional[str]:
         return tokens["access_token"]
 
 
-async def get_order_fees(client, order_id, headers):
-    r = await client.get(f"{ML_API_URL}/orders/{order_id}", headers=headers)
+async def get_shipping_cost(client, shipping_id, headers) -> float:
+    r = await client.get(f"{ML_API_URL}/shipments/{shipping_id}", headers=headers)
     if r.status_code != 200:
-        return {"comision": 0, "envio": 0}
+        return 0.0
     data = r.json()
-    comision = sum(abs(f.get("amount", 0)) for f in data.get("fees", []))
-    envio = 0
-    shipping_id = (data.get("shipping") or {}).get("id")
-    if shipping_id:
-        sr = await client.get(f"{ML_API_URL}/shipments/{shipping_id}", headers=headers)
-        if sr.status_code == 200:
-            envio = (sr.json().get("shipping_option") or {}).get("cost", 0) or 0
-    return {"comision": round(comision, 2), "envio": round(envio, 2)}
+    # base_cost es lo que paga el vendedor; shipping_option.cost puede ser 0 en Envío Gratis
+    cost = data.get("base_cost") or (data.get("shipping_option") or {}).get("list_cost") or (data.get("shipping_option") or {}).get("cost") or 0
+    return round(float(cost), 2)
 
 
 # ── Auth ────────────────────────────────────────────────────────
@@ -310,7 +305,7 @@ async def api_summary(request: Request, account_id: int):
 
 
 @app.get("/api/orders/{account_id}")
-async def api_orders(request: Request, account_id: int, limit: int = 50,
+async def api_orders(request: Request, account_id: int,
                      date_from: Optional[str] = None, date_to: Optional[str] = None):
     user_id = get_session_user_id(request)
     if not user_id:
@@ -322,43 +317,62 @@ async def api_orders(request: Request, account_id: int, limit: int = 50,
     if not token:
         raise HTTPException(502)
     headers = {"Authorization": f"Bearer {token}"}
-    search_params: dict = {"seller": acc["ml_user_id"], "sort": "date_desc", "limit": limit}
+    search_params: dict = {"seller": acc["ml_user_id"], "sort": "date_desc", "limit": 50}
     if date_from:
         search_params["order.date_created.from"] = f"{date_from}T00:00:00.000-00:00"
     if date_to:
         search_params["order.date_created.to"] = f"{date_to}T23:59:59.000-00:00"
+
+    # Paginar hasta traer todas las órdenes del período (máx 2000 por seguridad)
+    all_results: list = []
     async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.get(f"{ML_API_URL}/orders/search", headers=headers, params=search_params)
-        if r.status_code != 200:
-            raise HTTPException(502)
-        results = r.json().get("results", [])
-        sem = asyncio.Semaphore(10)
-        async def fetch(oid):
+        while len(all_results) < 2000:
+            search_params["offset"] = len(all_results)
+            r = await client.get(f"{ML_API_URL}/orders/search", headers=headers, params=search_params)
+            if r.status_code != 200:
+                raise HTTPException(502)
+            resp = r.json()
+            page = resp.get("results", [])
+            all_results.extend(page)
+            total = resp.get("paging", {}).get("total", 0)
+            if len(all_results) >= total or not page:
+                break
+
+        # Buscar costo de envío en paralelo solo para órdenes con shipping
+        sem = asyncio.Semaphore(15)
+        async def fetch_shipping(sid):
+            if not sid:
+                return 0.0
             async with sem:
-                return await get_order_fees(client, oid, headers)
-        fees_list = await asyncio.gather(*[fetch(str(o["id"])) for o in results])
+                return await get_shipping_cost(client, sid, headers)
+
+        shipping_ids = [(o.get("shipping") or {}).get("id") for o in all_results]
+        shipping_costs = await asyncio.gather(*[fetch_shipping(sid) for sid in shipping_ids])
+
     orders = []
     daily: dict = {}
     products: dict = {}
-    for o, f in zip(results, fees_list):
+    for o, envio in zip(all_results, shipping_costs):
         a = o.get("total_amount", 0)
         estado = o.get("status", "")
         d = o.get("date_created", "")[:10]
+        # sale_fee viene en cada item del resultado de búsqueda — no requiere llamada extra
+        comision = round(sum(item.get("sale_fee", 0) for item in o.get("order_items", [])), 2)
         orders.append({
             "id": o.get("id"),
             "fecha": d,
             "producto": ", ".join(i.get("item", {}).get("title", "?") for i in o.get("order_items", [])),
             "monto": round(a, 2),
-            "comision": f["comision"],
-            "envio": f["envio"],
-            "ganancia": round(a - f["comision"] - f["envio"], 2),
+            "comision": comision,
+            "envio": envio,
+            "ganancia": round(a - comision - envio, 2),
             "estado": estado,
         })
         if d and estado == "paid":
             daily.setdefault(d, {"ventas": 0, "ingresos": 0, "ganancia": 0})
             daily[d]["ventas"] += 1
             daily[d]["ingresos"] += a
-            daily[d]["ganancia"] += a - f["comision"] - f["envio"]
+            daily[d]["ganancia"] += a - comision - envio
             for item in o.get("order_items", []):
                 t = item.get("item", {}).get("title", "Sin título")
                 products.setdefault(t, {"cantidad": 0, "ingresos": 0})
