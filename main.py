@@ -68,9 +68,22 @@ def init_db():
         conn.execute(text("ALTER TABLE shipment_cost_cache ADD COLUMN IF NOT EXISTS buyer_cost NUMERIC(10,2) DEFAULT NULL"))
         conn.execute(text("ALTER TABLE shipment_cost_cache ALTER COLUMN buyer_cost DROP NOT NULL"))
         conn.execute(text("ALTER TABLE shipment_cost_cache ADD COLUMN IF NOT EXISTS logistic_type VARCHAR(50) DEFAULT NULL"))
-        conn.execute(text("DELETE FROM shipment_cost_cache WHERE logistic_type IS NULL"))
-        # Re-fetchear flex para recalcular buyer_cost con list_cost en vez del bonus manual
-        conn.execute(text("DELETE FROM shipment_cost_cache WHERE logistic_type = 'home_delivery'"))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS app_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TIMESTAMP DEFAULT NOW()
+            )
+        """))
+        # Invalida el caché cuando cambia la lógica de cálculo de envío.
+        SHIPPING_LOGIC_VERSION = "v3-colecta-paga"
+        current = conn.execute(text("SELECT value FROM app_meta WHERE key='shipping_logic_version'")).fetchone()
+        if not current or current[0] != SHIPPING_LOGIC_VERSION:
+            conn.execute(text("DELETE FROM shipment_cost_cache"))
+            conn.execute(text(
+                "INSERT INTO app_meta (key, value) VALUES ('shipping_logic_version', :v)"
+                " ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()"
+            ), {"v": SHIPPING_LOGIC_VERSION})
         existing = conn.execute(text("SELECT id FROM users WHERE email=:e"), {"e": ADMIN_EMAIL}).fetchone()
         if not existing:
             hashed = bcrypt.hashpw(ADMIN_PASSWORD.encode(), bcrypt.gensalt()).decode()
@@ -206,6 +219,16 @@ def to_ar(dt_str: str) -> tuple:
 
 
 async def get_shipping_cost(client, shipping_id, headers) -> dict:
+    """Devuelve costos de envío reales para el vendedor y el comprador.
+
+    Lógica basada en shipping_option.cost (lo que efectivamente paga el comprador):
+      - cost > 0  → el comprador pagó el envío. En colecta/full ML descuenta al
+                     vendedor el mismo importe (neto 0). En flex idem o con
+                     bonificación adicional.
+      - cost == 0 → Envío Gratis. Flex: ML bonifica al vendedor con list_cost.
+                     Colecta/Full: el vendedor paga con descuento (50% o el
+                     que indique discount).
+    """
     r = await client.get(f"{ML_API_URL}/shipments/{shipping_id}", headers=headers)
     if r.status_code != 200:
         return {"seller": 0.0, "buyer": 0.0, "logistic_type": ""}
@@ -213,30 +236,36 @@ async def get_shipping_cost(client, shipping_id, headers) -> dict:
     shipping_option = data.get("shipping_option") or {}
     logistic_type = data.get("logistic_type") or ""
 
+    cost = float(shipping_option.get("cost") or 0)
+    list_cost = float(shipping_option.get("list_cost") or 0)
+    base_cost = float(data.get("base_cost") or 0)
     discount = shipping_option.get("discount") or {}
-    if discount:
-        seller_cost = float(discount.get("promoted_amount") or 0)
-        if not seller_cost and discount.get("rate"):
-            list_cost = float(shipping_option.get("list_cost") or data.get("base_cost") or 0)
-            seller_cost = list_cost * (1.0 - float(discount.get("rate", 0)))
-    else:
-        items = data.get("items") or []
-        if items:
-            seller_cost = max(0.0, sum(float(i.get("amount", 0)) for i in items))
-        else:
-            seller_cost = float(data.get("base_cost") or 0)
-        # Colecta y Full tienen 50% de descuento en Argentina
-        if logistic_type in {"xd_drop_off", "drop_off", "fulfillment", "cross_docking"}:
-            seller_cost *= 0.5
 
     if logistic_type == "home_delivery":
-        # Flex: list_cost = pago comprador + bonificación ML combinados
-        buyer_cost = float(shipping_option.get("list_cost") or shipping_option.get("cost") or 0)
-    elif logistic_type in {"xd_drop_off", "drop_off", "fulfillment", "cross_docking"}:
-        # Colecta/Full: envío gratis para el comprador
-        buyer_cost = 0.0
+        # Flex: list_cost combina pago del comprador + bonificación ML.
+        # Vendedor no paga (usa su propio transporte).
+        buyer_cost = list_cost or cost
+        seller_cost = 0.0
+    elif logistic_type in {"xd_drop_off", "drop_off", "cross_docking", "fulfillment"}:
+        # Colecta / Full
+        if cost > 0:
+            # El comprador pagó el envío. ML descuenta al vendedor el mismo monto.
+            buyer_cost = cost
+            seller_cost = cost
+        else:
+            # Envío Gratis para el comprador: el vendedor paga con descuento.
+            buyer_cost = 0.0
+            if discount.get("promoted_amount") is not None:
+                seller_cost = float(discount["promoted_amount"])
+            elif discount.get("rate"):
+                seller_cost = list_cost * (1.0 - float(discount["rate"]))
+            else:
+                # Default Argentina: 50% al vendedor cuando no se expone el descuento.
+                seller_cost = (list_cost or base_cost) * 0.5
     else:
-        buyer_cost = float(shipping_option.get("cost") or 0)
+        # Otros tipos (self_service, custom, etc.)
+        buyer_cost = cost
+        seller_cost = base_cost or cost
 
     return {
         "seller": round(seller_cost, 2),

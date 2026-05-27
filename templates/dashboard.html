@@ -162,7 +162,7 @@
       </div>
       <div style="overflow-x:auto;">
         <table>
-          <thead><tr><th>Fecha</th><th>Hora</th><th>N° Venta</th><th>Producto</th><th>Monto</th><th>Comisión</th><th>Ing. Envío</th><th>Costo Envío</th><th>Ganancia neta</th><th>Margen</th></tr></thead>
+          <thead><tr><th>Fecha</th><th>Hora</th><th>N° Venta</th><th>Producto</th><th>Unid.</th><th>Monto</th><th>Comisión</th><th>Ing. Envío</th><th>Costo Envío</th><th>Ganancia neta</th><th>Margen</th></tr></thead>
           <tbody id="orders-tbody"></tbody>
         </table>
       </div>
@@ -297,10 +297,14 @@
     });
 
     currentPage = 1;
-    ordersCache = paidOrders;
+    ordersCache = data.orders;
     renderCharts(data);
-    renderOrders(paidOrders);
-    document.getElementById('orders-count').textContent = `${paidOrders.length} ventas`;
+    renderOrders(data.orders);
+    const total = data.orders.length;
+    const canceladas = total - paidOrders.length;
+    document.getElementById('orders-count').textContent = canceladas > 0
+      ? `${total} ventas (${paidOrders.length} pagadas · ${canceladas} cancelada${canceladas>1?'s':''})`
+      : `${total} ventas`;
     const ts = new Date().toLocaleString('es-AR',{dateStyle:'short',timeStyle:'short'});
     document.getElementById('update-footer').textContent = `Última actualización completa: ${ts}`;
   }
@@ -341,7 +345,7 @@
   function renderOrders(orders) {
     const tbody = document.getElementById('orders-tbody');
     if(!orders.length){
-      tbody.innerHTML='<tr><td colspan="10" style="text-align:center;color:#aaa;padding:2rem;">Sin ventas en este período.</td></tr>';
+      tbody.innerHTML='<tr><td colspan="11" style="text-align:center;color:#aaa;padding:2rem;">Sin ventas en este período.</td></tr>';
       document.getElementById('pagination').innerHTML='';
       return;
     }
@@ -350,22 +354,27 @@
     const slice = orders.slice((currentPage-1)*PAGE_SIZE, currentPage*PAGE_SIZE);
     const rows = [];
     slice.forEach(o => {
+      const isCancel = o.estado !== 'paid';
+      const rowStyle = isCancel ? 'background:#fdecec;color:#a0524d;' : '';
+      const units = (o.items||[]).reduce((s,i)=>s+(i.cantidad||1), 0);
       const g = o.ganancia || 0;
-      const gc = g >= 0 ? '#1a8a5a' : '#c0392b';
+      const gc = isCancel ? '#a0524d' : (g >= 0 ? '#1a8a5a' : '#c0392b');
       const base = o.monto + (o.ingreso_envio || 0);
       const pct = base > 0 ? ((g/base)*100).toFixed(1) : '0.0';
+      const cancelPill = isCancel ? `<span class="pill red" style="margin-left:6px;font-size:10px;">${o.estado === 'cancelled' ? 'Cancelada' : o.estado}</span>` : '';
       const commonCells = `
+        <td style="text-align:center;">${units}</td>
         <td>${fmt(o.monto)}</td>
-        <td style="color:#c0392b;">${fmt(o.comision)}</td>
-        <td style="color:#1a8a5a;">${fmt(o.ingreso_envio || 0)}</td>
-        <td style="color:#c47a1e;">${fmt(o.envio)}</td>
+        <td style="color:${isCancel?'#a0524d':'#c0392b'};">${fmt(o.comision)}</td>
+        <td style="color:${isCancel?'#a0524d':'#1a8a5a'};">${fmt(o.ingreso_envio || 0)}</td>
+        <td style="color:${isCancel?'#a0524d':'#c47a1e'};">${fmt(o.envio)}</td>
         <td style="color:${gc};font-weight:500;">${fmt(g)}</td>
         <td style="color:${gc};font-size:13px;font-weight:600;">${pct}%</td>`;
       if(o.is_pack) {
-        rows.push(`<tr data-id="${o.id}" style="background:#fafaf8;">
+        rows.push(`<tr data-id="${o.id}" style="${rowStyle || 'background:#fafaf8;'}">
           <td>${o.fecha}</td>
           <td style="color:#888;">${o.hora||'—'}</td>
-          <td style="font-size:11px;color:#aaa;white-space:nowrap;">#${o.venta_id||o.id}</td>
+          <td style="font-size:11px;color:#aaa;white-space:nowrap;">#${o.venta_id||o.id}${cancelPill}</td>
           <td>
             <button id="btn-pack-${o.id}" onclick="togglePack('${o.id}')" style="background:none;border:none;cursor:pointer;font-size:11px;color:#3483FA;padding:0 4px 0 0;line-height:1;">▶</button>
             <span style="font-weight:500;">Paquete (${o.items.length} productos)</span>
@@ -374,10 +383,10 @@
         </tr>`);
         o.items.forEach(item => {
           const label = item.sku ? `<b style="color:#333;">${item.sku}</b> — ${item.titulo}` : item.titulo;
-          const qty = item.cantidad > 1 ? ` <span style="color:#aaa;font-size:11px;">x${item.cantidad}</span>` : '';
           rows.push(`<tr class="pack-items-${o.id}" style="display:none;background:#f5f5f3;">
             <td colspan="3" style="border-bottom:1px solid #f0f0ee;"></td>
-            <td style="padding-left:2rem;font-size:12px;color:#555;">${label}${qty}</td>
+            <td style="padding-left:2rem;font-size:12px;color:#555;">${label}</td>
+            <td style="font-size:12px;text-align:center;">${item.cantidad||1}</td>
             <td style="font-size:12px;">${fmt(item.monto)}</td>
             <td style="font-size:12px;color:#c0392b;">${fmt(item.comision)}</td>
             <td colspan="4"></td>
@@ -385,10 +394,10 @@
         });
       } else {
         const prod = o.producto || '';
-        rows.push(`<tr data-id="${o.id}">
+        rows.push(`<tr data-id="${o.id}" style="${rowStyle}">
           <td>${o.fecha}</td>
           <td style="color:#888;">${o.hora||'—'}</td>
-          <td style="font-size:11px;color:#aaa;white-space:nowrap;">#${o.venta_id||o.id}</td>
+          <td style="font-size:11px;color:#aaa;white-space:nowrap;">#${o.venta_id||o.id}${cancelPill}</td>
           <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${prod}">${prod}</td>
           ${commonCells}
         </tr>`);
