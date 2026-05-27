@@ -61,20 +61,15 @@ def init_db():
                 shipping_id BIGINT PRIMARY KEY,
                 cost NUMERIC(10,2) NOT NULL,
                 buyer_cost NUMERIC(10,2) DEFAULT NULL,
+                logistic_type VARCHAR(50) DEFAULT NULL,
                 cached_at TIMESTAMP DEFAULT NOW()
             )
         """))
-        # Migraciones para bases existentes
-        conn.execute(text("""
-            ALTER TABLE shipment_cost_cache ADD COLUMN IF NOT EXISTS buyer_cost NUMERIC(10,2) DEFAULT NULL
-        """))
-        # Quitar NOT NULL si quedó de deploy anterior (necesario para poder setear NULL)
-        conn.execute(text("""
-            ALTER TABLE shipment_cost_cache ALTER COLUMN buyer_cost DROP NOT NULL
-        """))
-        # Limpiar cache completo: la lógica de cálculo cambió (items[] para colecta/full).
-        # El próximo load re-fetchea todo con datos correctos.
-        conn.execute(text("DELETE FROM shipment_cost_cache"))
+        conn.execute(text("ALTER TABLE shipment_cost_cache ADD COLUMN IF NOT EXISTS buyer_cost NUMERIC(10,2) DEFAULT NULL"))
+        conn.execute(text("ALTER TABLE shipment_cost_cache ALTER COLUMN buyer_cost DROP NOT NULL"))
+        conn.execute(text("ALTER TABLE shipment_cost_cache ADD COLUMN IF NOT EXISTS logistic_type VARCHAR(50) DEFAULT NULL"))
+        # Re-fetchear entradas sin logistic_type para obtener el dato
+        conn.execute(text("DELETE FROM shipment_cost_cache WHERE logistic_type IS NULL"))
         existing = conn.execute(text("SELECT id FROM users WHERE email=:e"), {"e": ADMIN_EMAIL}).fetchone()
         if not existing:
             hashed = bcrypt.hashpw(ADMIN_PASSWORD.encode(), bcrypt.gensalt()).decode()
@@ -163,13 +158,16 @@ def db_get_cached_shipping(shipping_ids: list) -> dict:
         placeholders = ",".join(f":id{j}" for j in range(len(batch)))
         params = {f"id{j}": sid for j, sid in enumerate(batch)}
         rows = db_fetchall(
-            f"SELECT shipping_id, cost, buyer_cost FROM shipment_cost_cache WHERE shipping_id IN ({placeholders})",
+            f"SELECT shipping_id, cost, buyer_cost, logistic_type FROM shipment_cost_cache WHERE shipping_id IN ({placeholders})",
             params,
         )
         for row in rows:
-            # Solo se considera "en cache" si ya tiene buyer_cost (no NULL)
-            if row["buyer_cost"] is not None:
-                result[row["shipping_id"]] = {"seller": float(row["cost"]), "buyer": float(row["buyer_cost"])}
+            if row["buyer_cost"] is not None and row["logistic_type"] is not None:
+                result[row["shipping_id"]] = {
+                    "seller": float(row["cost"]),
+                    "buyer": float(row["buyer_cost"]),
+                    "logistic_type": row["logistic_type"] or "",
+                }
     return result
 
 
@@ -177,10 +175,11 @@ def db_save_shipping_costs(costs: dict):
     for sid, c in costs.items():
         seller = c["seller"] if isinstance(c, dict) else float(c)
         buyer = c["buyer"] if isinstance(c, dict) else 0.0
+        lt = c.get("logistic_type", "") if isinstance(c, dict) else ""
         db_execute(
-            "INSERT INTO shipment_cost_cache (shipping_id, cost, buyer_cost) VALUES (:sid, :cost, :buyer_cost)"
-            " ON CONFLICT (shipping_id) DO UPDATE SET buyer_cost = EXCLUDED.buyer_cost",
-            {"sid": sid, "cost": seller, "buyer_cost": buyer},
+            "INSERT INTO shipment_cost_cache (shipping_id, cost, buyer_cost, logistic_type) VALUES (:sid, :cost, :buyer_cost, :lt)"
+            " ON CONFLICT (shipping_id) DO UPDATE SET buyer_cost = EXCLUDED.buyer_cost, logistic_type = EXCLUDED.logistic_type",
+            {"sid": sid, "cost": seller, "buyer_cost": buyer, "lt": lt},
         )
 
 
@@ -237,6 +236,7 @@ async def get_shipping_cost(client, shipping_id, headers) -> dict:
     return {
         "seller": round(seller_cost, 2),
         "buyer": round(buyer_cost, 2),
+        "logistic_type": logistic_type,
     }
 
 
@@ -411,7 +411,7 @@ async def api_orders(request: Request, account_id: int,
             db_save_shipping_costs(new_costs)
             cost_cache.update(new_costs)
 
-    empty_ship = {"seller": 0.0, "buyer": 0.0}
+    empty_ship = {"seller": 0.0, "buyer": 0.0, "logistic_type": ""}
 
     # ── Paso 1: construir lista raw por orden individual ──────────
     raw_list = []
@@ -446,7 +446,7 @@ async def api_orders(request: Request, account_id: int,
             "monto": round(a, 2),
             "comision": comision,
             "envio": ship_info["seller"],
-            "shipping_buyer": ship_info["buyer"],
+            "shipping_buyer": round(ship_info["buyer"] + (ship_info["seller"] * 0.10 if ship_info.get("logistic_type") == "home_delivery" else 0.0), 2),
             "coupon_amt": round(float((o.get("coupon") or {}).get("amount", 0)), 2),
             "estado": estado,
             "items": items,
@@ -492,7 +492,11 @@ async def api_orders(request: Request, account_id: int,
         ingreso_envio = round(p["shipping_buyer"] + p["coupon_total"], 2)
         p["ingreso_envio"] = ingreso_envio
         p["ganancia"] = round(p["monto"] + ingreso_envio - p["comision"] - p["envio"], 2)
-        p["producto"] = f"Paquete ({len(p['items'])} productos)"
+        if len(p["items"]) == 1:
+            p["is_pack"] = False
+            p["producto"] = p["items"][0]["sku"] or p["items"][0]["titulo"]
+        else:
+            p["producto"] = f"Paquete ({len(p['items'])} productos)"
         del p["shipping_buyer"], p["coupon_total"]
         orders.append(p)
 
