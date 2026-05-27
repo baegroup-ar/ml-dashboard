@@ -2,6 +2,7 @@ import os
 import httpx
 import secrets
 import asyncio
+import json
 from datetime import datetime, timedelta
 from typing import Optional
 from contextlib import asynccontextmanager
@@ -77,6 +78,19 @@ def init_db():
                 updated_at TIMESTAMP DEFAULT NOW()
             )
         """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS order_snapshot_cache (
+                account_id INTEGER NOT NULL REFERENCES ml_accounts(id) ON DELETE CASCADE,
+                order_id TEXT NOT NULL,
+                paid_date DATE NOT NULL,
+                paid_time TEXT,
+                payload JSONB NOT NULL,
+                details_complete BOOLEAN DEFAULT FALSE,
+                updated_at TIMESTAMP DEFAULT NOW(),
+                PRIMARY KEY (account_id, order_id)
+            )
+        """))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_order_snapshot_cache_account_date ON order_snapshot_cache (account_id, paid_date)"))
         # Invalida el caché cuando cambia la lógica de cálculo de envío.
         current = conn.execute(text("SELECT value FROM app_meta WHERE key='shipping_logic_version'")).fetchone()
         if not current or current[0] != SHIPPING_LOGIC_VERSION:
@@ -122,6 +136,72 @@ def db_execute(query, params=None):
     with engine.connect() as conn:
         conn.execute(text(query), params or {})
         conn.commit()
+
+
+def db_fetch_order_snapshots(account_id: int, date_from: str, date_to: str) -> list:
+    rows = db_fetchall("""
+        SELECT payload FROM order_snapshot_cache
+        WHERE account_id=:aid AND paid_date BETWEEN :df AND :dt
+        ORDER BY paid_date DESC, paid_time DESC
+    """, {"aid": account_id, "df": date_from, "dt": date_to})
+    orders = []
+    for row in rows:
+        payload = row["payload"]
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        orders.append(payload)
+    return orders
+
+
+def db_save_order_snapshots(account_id: int, orders: list, details_complete: bool):
+    for order in orders:
+        db_execute("""
+            INSERT INTO order_snapshot_cache
+                (account_id, order_id, paid_date, paid_time, payload, details_complete, updated_at)
+            VALUES (:aid, :oid, :paid_date, :paid_time, CAST(:payload AS JSONB), :complete, NOW())
+            ON CONFLICT (account_id, order_id) DO UPDATE SET
+                paid_date=EXCLUDED.paid_date,
+                paid_time=EXCLUDED.paid_time,
+                payload=EXCLUDED.payload,
+                details_complete=EXCLUDED.details_complete,
+                updated_at=NOW()
+        """, {
+            "aid": account_id,
+            "oid": str(order["id"]),
+            "paid_date": order["fecha"],
+            "paid_time": order.get("hora") or "",
+            "payload": json.dumps(order),
+            "complete": details_complete,
+        })
+
+
+def build_dashboard_payload(orders: list, details_complete: bool):
+    orders = sorted(orders, key=lambda x: (x.get("fecha") or "", x.get("hora") or ""), reverse=True)
+
+
+    daily: dict = {}
+    products: dict = {}
+    for order in orders:
+        if order.get("fecha") and order.get("estado") == "paid":
+            f = order["fecha"]
+            daily.setdefault(f, {"ventas": 0, "ingresos": 0, "ganancia": 0})
+            daily[f]["ventas"] += 1
+            daily[f]["ingresos"] += order.get("monto", 0)
+            daily[f]["ganancia"] += order.get("ganancia", 0)
+            for item in order.get("items", []):
+                t = item.get("sku") or item.get("titulo", "Sin título")
+                products.setdefault(t, {"cantidad": 0, "ingresos": 0})
+                products[t]["cantidad"] += item.get("cantidad", 1)
+                products[t]["ingresos"] += item.get("monto", 0)
+
+    top = sorted(products.items(), key=lambda x: x[1]["ingresos"], reverse=True)[:5]
+    return {
+        "orders": orders,
+        "daily": dict(sorted(daily.items())),
+        "top_products": [{"nombre": k, **v} for k, v in top],
+        "details_complete": details_complete,
+        "ultima_actualizacion": datetime.utcnow().isoformat(),
+    }
 
 
 def get_session_user_id(request: Request) -> Optional[int]:
@@ -677,6 +757,10 @@ async def api_orders(request: Request, account_id: int,
     # Convertir fechas AR (UTC-3) a UTC para el filtro: medianoche AR = 03:00 UTC del mismo día
     # Se resta 24h al inicio para capturar órdenes cuyo date_created fue el día anterior
     # pero cuyo pago (date_approved) cayó dentro del rango solicitado.
+    cached_orders = db_fetch_order_snapshots(account_id, df, dt)
+    if fast and cached_orders:
+        return build_dashboard_payload(cached_orders, details_complete=True)
+
     from_utc = datetime.strptime(df, "%Y-%m-%d") + timedelta(hours=3) - timedelta(hours=24)
     to_utc   = datetime.strptime(dt, "%Y-%m-%d") + timedelta(hours=27)  # 23:59:59 AR = ~03:00 UTC día siguiente
     search_params: dict = {
@@ -863,6 +947,10 @@ async def api_orders(request: Request, account_id: int,
         orders.append(p)
 
     orders.sort(key=lambda x: (x.get("fecha") or "", x.get("hora") or ""), reverse=True)
+    if not fast:
+        db_save_order_snapshots(account_id, orders, details_complete=True)
+    return build_dashboard_payload(orders, details_complete=not fast)
+
 
     # ── Paso 3: agregados diarios y top productos ─────────────────
     daily: dict = {}
