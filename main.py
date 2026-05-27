@@ -26,7 +26,7 @@ ADMIN_PASSWORD = os.environ["ADMIN_PASSWORD"]
 ML_AUTH_URL = "https://auth.mercadolibre.com.ar/authorization"
 ML_TOKEN_URL = "https://api.mercadolibre.com/oauth/token"
 ML_API_URL = "https://api.mercadolibre.com"
-SHIPPING_LOGIC_VERSION = "v11-billing-order-details"
+SHIPPING_LOGIC_VERSION = "v12-flex-billing-details"
 
 serializer = URLSafeTimedSerializer(SECRET_KEY)
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -283,6 +283,85 @@ def apply_billing_row(target: dict, row: dict):
     elif detail_type == "BONUS" and ("envío" in transaction_detail or "envio" in transaction_detail or "shipping" in transaction_detail):
         target["bonificacion"] += detail_amount
         target["has_shipping"] = True
+
+
+def period_key_from_ml_date(value: str) -> str:
+    if not value:
+        return ""
+    return f"{value[:7]}-01"
+
+
+def flex_order_id(row: dict) -> str:
+    shipping = row.get("shipping_info") or {}
+    order = shipping.get("order") or {}
+    oid = order.get("order_id") or row.get("order_id")
+    return str(oid) if oid is not None else ""
+
+
+def apply_flex_billing_row(target: dict, row: dict):
+    charge = row.get("charge_info") or {}
+    shipping = row.get("shipping_info") or {}
+    detail_type = str(charge.get("detail_type") or row.get("detail_type") or "").upper()
+    transaction_detail = str(charge.get("transaction_detail") or row.get("transaction_detail") or "").lower()
+    amount = abs(amount_value(charge.get("detail_amount", row.get("detail_amount"))))
+    receiver_cost = amount_value(shipping.get("receiver_shipping_cost"))
+    if receiver_cost > 0:
+        target["ingreso_envio"] = max(target["ingreso_envio"], receiver_cost)
+    if not amount:
+        return
+    is_cancellation = "anulaci" in transaction_detail or "cancellation" in transaction_detail
+    is_bonus = detail_type == "BONUS" or ("bonific" in transaction_detail and not is_cancellation)
+    if is_bonus:
+        target["bonificacion"] += amount
+        target["has_flex"] = True
+    elif is_cancellation or detail_type == "CHARGE":
+        target["envio"] += amount
+        target["has_flex_charge"] = True
+
+
+async def fetch_flex_billing_by_order(client, headers, order_periods: dict) -> dict:
+    if not order_periods:
+        return {}
+    parsed = {}
+    period_map = {}
+    for oid, key in order_periods.items():
+        if key:
+            period_map.setdefault(key, []).append(str(oid))
+
+    document_types = ("BILL", "CREDIT_NOTE", "DEBIT_NOTE")
+    for key, ids in period_map.items():
+        unique_ids = list(dict.fromkeys(ids))
+        for i in range(0, len(unique_ids), 100):
+            batch = unique_ids[i:i+100]
+            for document_type in document_types:
+                params = {
+                    "document_type": document_type,
+                    "order_ids": ",".join(batch),
+                    "limit": 1000,
+                }
+                r = await client.get(
+                    f"{ML_API_URL}/billing/integration/periods/key/{key}/group/ML/flex/details",
+                    headers=headers,
+                    params=params,
+                )
+                if r.status_code not in (200, 206):
+                    continue
+                for row in r.json().get("results", []):
+                    oid = flex_order_id(row)
+                    if not oid:
+                        continue
+                    parsed.setdefault(oid, {
+                        "envio": 0.0, "bonificacion": 0.0, "ingreso_envio": 0.0,
+                        "has_flex": False, "has_flex_charge": False,
+                    })
+                    apply_flex_billing_row(parsed[oid], row)
+    return {
+        oid: {
+            k: (round(v, 2) if isinstance(v, (int, float)) else v)
+            for k, v in values.items()
+        }
+        for oid, values in parsed.items()
+    }
 
 
 async def fetch_billing_by_order(client, headers, seller_id, order_ids: list) -> dict:
@@ -648,6 +727,11 @@ async def api_orders(request: Request, account_id: int,
         billing_by_order = await fetch_billing_by_order(
             client, headers, acc["ml_user_id"], [str(o.get("id")) for o in all_results if o.get("id")]
         )
+        flex_billing_by_order = await fetch_flex_billing_by_order(client, headers, {
+            str(o.get("id")): period_key_from_ml_date(o.get("date_created", ""))
+            for o in all_results
+            if o.get("id")
+        })
 
     empty_ship = {"seller": 0.0, "buyer": 0.0, "bonificacion": 0.0}
 
@@ -665,6 +749,7 @@ async def api_orders(request: Request, account_id: int,
             continue
         order_id = str(o.get("id"))
         billing = billing_by_order.get(order_id, {})
+        flex_billing = flex_billing_by_order.get(order_id, {})
         comision = round(sum(
             float(i.get("sale_fee", 0)) * int(i.get("quantity", 1))
             for i in o.get("order_items", [])
@@ -678,6 +763,13 @@ async def api_orders(request: Request, account_id: int,
             envio = ship_info["seller"]
             ingreso_envio = ship_info["buyer"]
             bonificacion = ship_info.get("bonificacion", 0)
+        if flex_billing.get("has_flex") or flex_billing.get("has_flex_charge"):
+            bonificacion = flex_billing.get("bonificacion", bonificacion)
+            ingreso_envio = flex_billing.get("ingreso_envio", ingreso_envio) or ingreso_envio
+            if flex_billing.get("has_flex_charge"):
+                envio = flex_billing.get("envio", envio)
+            elif abs(envio - bonificacion) < 0.01:
+                envio = 0.0
         if billing.get("has_comision"):
             comision = billing.get("comision", comision)
         items = []
