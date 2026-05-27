@@ -210,14 +210,30 @@ async def get_shipping_cost(client, shipping_id, headers) -> dict:
     if r.status_code != 200:
         return {"seller": 0.0, "buyer": 0.0}
     data = r.json()
-    # items[] incluye cargos y descuentos detallados (colecta/full tienen ítem de descuento 50%).
-    # Sumarlos da el costo neto real que paga el vendedor.
-    items = data.get("items") or []
-    if items:
-        seller_cost = max(0.0, sum(float(i.get("amount", 0)) for i in items))
+    shipping_option = data.get("shipping_option") or {}
+
+    # 1. Si shipping_option trae objeto discount, usar promoted_amount o calcular con rate
+    discount = shipping_option.get("discount") or {}
+    if discount:
+        seller_cost = float(discount.get("promoted_amount") or 0)
+        if not seller_cost and discount.get("rate"):
+            list_cost = float(shipping_option.get("list_cost") or data.get("base_cost") or 0)
+            seller_cost = list_cost * (1.0 - float(discount.get("rate", 0)))
     else:
-        seller_cost = float(data.get("base_cost") or 0)
-    buyer_cost = float((data.get("shipping_option") or {}).get("cost") or 0)
+        # 2. Sumar items[] (pueden incluir ítems negativos de descuento)
+        items = data.get("items") or []
+        if items:
+            seller_cost = max(0.0, sum(float(i.get("amount", 0)) for i in items))
+        else:
+            seller_cost = float(data.get("base_cost") or 0)
+
+        # 3. Colecta y Full tienen 50% de descuento en Argentina que no siempre
+        #    aparece en items[] ni en discount. Flex (home_delivery) no tiene descuento.
+        logistic_type = data.get("logistic_type") or ""
+        if logistic_type in {"xd_drop_off", "drop_off", "fulfillment", "cross_docking"}:
+            seller_cost *= 0.5
+
+    buyer_cost = float(shipping_option.get("cost") or 0)
     return {
         "seller": round(seller_cost, 2),
         "buyer": round(buyer_cost, 2),
