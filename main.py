@@ -68,8 +68,9 @@ def init_db():
         conn.execute(text("ALTER TABLE shipment_cost_cache ADD COLUMN IF NOT EXISTS buyer_cost NUMERIC(10,2) DEFAULT NULL"))
         conn.execute(text("ALTER TABLE shipment_cost_cache ALTER COLUMN buyer_cost DROP NOT NULL"))
         conn.execute(text("ALTER TABLE shipment_cost_cache ADD COLUMN IF NOT EXISTS logistic_type VARCHAR(50) DEFAULT NULL"))
-        # Re-fetchear entradas sin logistic_type para obtener el dato
         conn.execute(text("DELETE FROM shipment_cost_cache WHERE logistic_type IS NULL"))
+        # Re-fetchear flex para recalcular buyer_cost con list_cost en vez del bonus manual
+        conn.execute(text("DELETE FROM shipment_cost_cache WHERE logistic_type = 'home_delivery'"))
         existing = conn.execute(text("SELECT id FROM users WHERE email=:e"), {"e": ADMIN_EMAIL}).fetchone()
         if not existing:
             hashed = bcrypt.hashpw(ADMIN_PASSWORD.encode(), bcrypt.gensalt()).decode()
@@ -207,11 +208,11 @@ def to_ar(dt_str: str) -> tuple:
 async def get_shipping_cost(client, shipping_id, headers) -> dict:
     r = await client.get(f"{ML_API_URL}/shipments/{shipping_id}", headers=headers)
     if r.status_code != 200:
-        return {"seller": 0.0, "buyer": 0.0}
+        return {"seller": 0.0, "buyer": 0.0, "logistic_type": ""}
     data = r.json()
     shipping_option = data.get("shipping_option") or {}
+    logistic_type = data.get("logistic_type") or ""
 
-    # 1. Si shipping_option trae objeto discount, usar promoted_amount o calcular con rate
     discount = shipping_option.get("discount") or {}
     if discount:
         seller_cost = float(discount.get("promoted_amount") or 0)
@@ -219,20 +220,24 @@ async def get_shipping_cost(client, shipping_id, headers) -> dict:
             list_cost = float(shipping_option.get("list_cost") or data.get("base_cost") or 0)
             seller_cost = list_cost * (1.0 - float(discount.get("rate", 0)))
     else:
-        # 2. Sumar items[] (pueden incluir ítems negativos de descuento)
         items = data.get("items") or []
         if items:
             seller_cost = max(0.0, sum(float(i.get("amount", 0)) for i in items))
         else:
             seller_cost = float(data.get("base_cost") or 0)
-
-        # 3. Colecta y Full tienen 50% de descuento en Argentina que no siempre
-        #    aparece en items[] ni en discount. Flex (home_delivery) no tiene descuento.
-        logistic_type = data.get("logistic_type") or ""
+        # Colecta y Full tienen 50% de descuento en Argentina
         if logistic_type in {"xd_drop_off", "drop_off", "fulfillment", "cross_docking"}:
             seller_cost *= 0.5
 
-    buyer_cost = float(shipping_option.get("cost") or 0)
+    if logistic_type == "home_delivery":
+        # Flex: list_cost = pago comprador + bonificación ML combinados
+        buyer_cost = float(shipping_option.get("list_cost") or shipping_option.get("cost") or 0)
+    elif logistic_type in {"xd_drop_off", "drop_off", "fulfillment", "cross_docking"}:
+        # Colecta/Full: envío gratis para el comprador
+        buyer_cost = 0.0
+    else:
+        buyer_cost = float(shipping_option.get("cost") or 0)
+
     return {
         "seller": round(seller_cost, 2),
         "buyer": round(buyer_cost, 2),
@@ -446,7 +451,7 @@ async def api_orders(request: Request, account_id: int,
             "monto": round(a, 2),
             "comision": comision,
             "envio": ship_info["seller"],
-            "shipping_buyer": round(ship_info["buyer"] + (ship_info["seller"] * 0.10 if ship_info.get("logistic_type") == "home_delivery" else 0.0), 2),
+            "shipping_buyer": round(ship_info["buyer"], 2),
             "coupon_amt": round(float((o.get("coupon") or {}).get("amount", 0)), 2),
             "estado": estado,
             "items": items,
@@ -525,23 +530,6 @@ async def api_orders(request: Request, account_id: int,
         "top_products": [{"nombre": k, **v} for k, v in top],
         "ultima_actualizacion": datetime.utcnow().isoformat(),
     }
-
-
-# ── Debug (temporal) ────────────────────────────────────────────
-
-@app.get("/api/debug/shipment/{account_id}/{shipping_id}")
-async def debug_shipment(request: Request, account_id: int, shipping_id: int):
-    user_id = get_session_user_id(request)
-    if not user_id:
-        raise HTTPException(401)
-    acc = db_fetchone("SELECT * FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
-    if not acc:
-        raise HTTPException(404)
-    token = await refresh_ml_token(account_id)
-    headers = {"Authorization": f"Bearer {token}"}
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.get(f"{ML_API_URL}/shipments/{shipping_id}", headers=headers)
-    return r.json()
 
 
 # ── Admin ────────────────────────────────────────────────────────
