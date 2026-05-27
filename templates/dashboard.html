@@ -188,6 +188,7 @@
   let ordersCache = [];
   let currentPage = 1;
   const PAGE_SIZE = 25;
+  let loadSeq = 0;
 
   // Fecha en timezone Argentina (UTC-3)
   function todayStr() { return new Intl.DateTimeFormat('sv', {timeZone:'America/Argentina/Buenos_Aires'}).format(new Date()); }
@@ -240,6 +241,7 @@
 
   async function loadData() {
     if(!currentAccountId) return;
+    const seq = ++loadSeq;
     document.getElementById('spinner').style.display='inline-block';
     document.getElementById('error-box').style.display='none';
 
@@ -250,25 +252,44 @@
     });
 
     const params = getParams();
+    params.set('fast', '1');
     try {
       const r = await fetch(`/api/orders/${currentAccountId}?${params}`);
       if(!r.ok) throw new Error('Error al obtener ventas.');
       const data = await r.json();
-      renderBasic(data);
+      if(seq !== loadSeq) return;
+      renderBasic(data, true);
       document.getElementById('page-loading').style.display='none';
       document.getElementById('content').style.display='block';
       const ts = new Date(data.ultima_actualizacion+'Z').toLocaleString('es-AR',{dateStyle:'short',timeStyle:'short'});
       document.getElementById('last-update').textContent = `Actualizado: ${ts}`;
+      loadDetails(seq);
     } catch(e) {
+      if(seq !== loadSeq) return;
       document.getElementById('error-box').textContent = e.message;
       document.getElementById('error-box').style.display='block';
       document.getElementById('page-loading').style.display='none';
     } finally {
-      document.getElementById('spinner').style.display='none';
+      if(seq === loadSeq) document.getElementById('spinner').style.display='none';
     }
   }
 
-  function renderBasic(data) {
+  async function loadDetails(seq) {
+    const params = getParams();
+    try {
+      const r = await fetch(`/api/orders/${currentAccountId}?${params}`);
+      if(!r.ok) throw new Error('No se pudieron cargar cargos y envíos.');
+      const data = await r.json();
+      if(seq !== loadSeq) return;
+      renderBasic(data, false);
+    } catch(e) {
+      if(seq !== loadSeq) return;
+      document.getElementById('update-footer').style.color = '#c0392b';
+      document.getElementById('update-footer').textContent = e.message;
+    }
+  }
+
+  function renderBasic(data, loadingDetails=false) {
     const paidOrders = data.orders.filter(o => o.estado === 'paid');
     const ingresos = paidOrders.reduce((s, o) => s + o.monto, 0);
     const ingresos_envio = paidOrders.reduce((s, o) => s + (o.ingreso_envio || 0), 0);
@@ -286,16 +307,18 @@
     const pctCom = ingresos_total > 0 ? (comisiones/ingresos_total*100).toFixed(1) : '0.0';
     const pctEnv = ingresos_total > 0 ? (envios/ingresos_total*100).toFixed(1) : '0.0';
     const pctNet = ingresos_total > 0 ? (neta/ingresos_total*100).toFixed(1) : '0.0';
-    document.getElementById('m-comisiones').innerHTML = `${fmt(comisiones)} <span style="font-size:11px;font-weight:400;">(${pctCom}%)</span>`;
-    document.getElementById('m-comisiones').className = 'value red';
-    document.getElementById('m-envios').innerHTML = `${fmt(envios)} <span style="font-size:11px;font-weight:400;">(${pctEnv}%)</span>`;
-    document.getElementById('m-envios').className = 'value orange';
-    document.getElementById('m-neta').innerHTML = `${fmt(neta)} <span style="font-size:11px;font-weight:400;">(${pctNet}%)</span>`;
-    document.getElementById('m-neta').className = 'value ' + (neta >= 0 ? 'green' : 'red');
+    if(!loadingDetails) {
+      document.getElementById('m-comisiones').innerHTML = `${fmt(comisiones)} <span style="font-size:11px;font-weight:400;">(${pctCom}%)</span>`;
+      document.getElementById('m-comisiones').className = 'value red';
+      document.getElementById('m-envios').innerHTML = `${fmt(envios)} <span style="font-size:11px;font-weight:400;">(${pctEnv}%)</span>`;
+      document.getElementById('m-envios').className = 'value orange';
+      document.getElementById('m-neta').innerHTML = `${fmt(neta)} <span style="font-size:11px;font-weight:400;">(${pctNet}%)</span>`;
+      document.getElementById('m-neta').className = 'value ' + (neta >= 0 ? 'green' : 'red');
 
-    ['comisiones','envios','neta'].forEach(id => {
-      document.getElementById(`lb-${id}`).style.display='none';
-    });
+      ['comisiones','envios','neta'].forEach(id => {
+        document.getElementById(`lb-${id}`).style.display='none';
+      });
+    }
 
     currentPage = 1;
     ordersCache = data.orders;
@@ -306,8 +329,14 @@
     document.getElementById('orders-count').textContent = canceladas > 0
       ? `${total} ventas (${paidOrders.length} pagadas · ${canceladas} cancelada${canceladas>1?'s':''})`
       : `${total} ventas`;
-    const ts = new Date().toLocaleString('es-AR',{dateStyle:'short',timeStyle:'short'});
-    document.getElementById('update-footer').textContent = `Última actualización completa: ${ts}`;
+    if(loadingDetails) {
+      document.getElementById('update-footer').style.color = '#aaa';
+      document.getElementById('update-footer').textContent = 'Calculando cargos, envíos y bonificaciones...';
+    } else {
+      const ts = new Date().toLocaleString('es-AR',{dateStyle:'short',timeStyle:'short'});
+      document.getElementById('update-footer').style.color = '#aaa';
+      document.getElementById('update-footer').textContent = `Última actualización completa: ${ts}`;
+    }
   }
 
   function renderCharts(data) {

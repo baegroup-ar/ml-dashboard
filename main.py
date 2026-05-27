@@ -654,7 +654,8 @@ async def ml_disconnect(request: Request, account_id: int):
 
 @app.get("/api/orders/{account_id}")
 async def api_orders(request: Request, account_id: int,
-                     date_from: Optional[str] = None, date_to: Optional[str] = None):
+                     date_from: Optional[str] = None, date_to: Optional[str] = None,
+                     fast: bool = False):
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
@@ -712,26 +713,30 @@ async def api_orders(request: Request, account_id: int,
 
         # Costos de envío: primero desde cache, luego API solo para los que faltan
         all_sids = [(o.get("shipping") or {}).get("id") for o in all_results]
-        unique_sids = [sid for sid in dict.fromkeys(s for s in all_sids if s)]
-        cost_cache = db_get_cached_shipping(unique_sids)
+        cost_cache = {}
+        billing_by_order = {}
+        flex_billing_by_order = {}
+        if not fast:
+            unique_sids = [sid for sid in dict.fromkeys(s for s in all_sids if s)]
+            cost_cache = db_get_cached_shipping(unique_sids)
 
-        uncached = [sid for sid in unique_sids if sid not in cost_cache]
-        if uncached:
-            ship_sem = asyncio.Semaphore(15)
-            async def fetch_ship(sid):
-                async with ship_sem:
-                    return sid, await get_shipping_cost(client, sid, headers)
-            new_costs = dict(await asyncio.gather(*[fetch_ship(sid) for sid in uncached]))
-            db_save_shipping_costs(new_costs)
-            cost_cache.update(new_costs)
-        billing_by_order = await fetch_billing_by_order(
-            client, headers, acc["ml_user_id"], [str(o.get("id")) for o in all_results if o.get("id")]
-        )
-        flex_billing_by_order = await fetch_flex_billing_by_order(client, headers, {
-            str(o.get("id")): period_key_from_ml_date(o.get("date_created", ""))
-            for o in all_results
-            if o.get("id")
-        })
+            uncached = [sid for sid in unique_sids if sid not in cost_cache]
+            if uncached:
+                ship_sem = asyncio.Semaphore(15)
+                async def fetch_ship(sid):
+                    async with ship_sem:
+                        return sid, await get_shipping_cost(client, sid, headers)
+                new_costs = dict(await asyncio.gather(*[fetch_ship(sid) for sid in uncached]))
+                db_save_shipping_costs(new_costs)
+                cost_cache.update(new_costs)
+            billing_by_order = await fetch_billing_by_order(
+                client, headers, acc["ml_user_id"], [str(o.get("id")) for o in all_results if o.get("id")]
+            )
+            flex_billing_by_order = await fetch_flex_billing_by_order(client, headers, {
+                str(o.get("id")): period_key_from_ml_date(o.get("date_created", ""))
+                for o in all_results
+                if o.get("id")
+            })
 
     empty_ship = {"seller": 0.0, "buyer": 0.0, "bonificacion": 0.0}
 
@@ -880,6 +885,7 @@ async def api_orders(request: Request, account_id: int,
         "orders": orders,
         "daily": dict(sorted(daily.items())),
         "top_products": [{"nombre": k, **v} for k, v in top],
+        "details_complete": not fast,
         "ultima_actualizacion": datetime.utcnow().isoformat(),
     }
 
