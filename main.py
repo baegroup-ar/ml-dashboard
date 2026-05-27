@@ -27,7 +27,7 @@ ADMIN_PASSWORD = os.environ["ADMIN_PASSWORD"]
 ML_AUTH_URL = "https://auth.mercadolibre.com.ar/authorization"
 ML_TOKEN_URL = "https://api.mercadolibre.com/oauth/token"
 ML_API_URL = "https://api.mercadolibre.com"
-SHIPPING_LOGIC_VERSION = "v13-bonif-envio-gratis"
+SHIPPING_LOGIC_VERSION = "v14-bonus-not-shipping"
 
 serializer = URLSafeTimedSerializer(SECRET_KEY)
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -357,15 +357,20 @@ def apply_billing_row(target: dict, row: dict):
     amount_without_discount = abs(amount_value(discount.get("charge_amount_without_discount")))
     discount_amount = abs(amount_value(discount.get("discount_amount")))
 
-    is_shipping = (
+    # Una fila BONUS NUNCA se suma a "envio" — sólo a "bonificacion".
+    # Si no excluimos BONUS de is_shipping, su detail_amount se sumaba
+    # también a envio y duplicaba el costo (ej. #2000016639025652).
+    is_bonus = detail_type == "BONUS"
+    is_shipping_concept = (
         concept_type == "SHIPPING"
         or sub_type in {"CXD", "CFF", "BXD", "BFF"}
         or "envío" in transaction_detail
         or "envio" in transaction_detail
         or "shipping" in transaction_detail
     )
+    is_shipping = (not is_bonus) and is_shipping_concept
     is_sale_charge = (
-        not is_shipping
+        (not is_shipping) and (not is_bonus)
         and detail_type == "CHARGE"
         and (sub_type.startswith("CV") or "cargo por venta" in transaction_detail or "cargo por vender" in transaction_detail)
     )
@@ -379,7 +384,7 @@ def apply_billing_row(target: dict, row: dict):
         receiver_cost = amount_value(shipping.get("receiver_shipping_cost"))
         if receiver_cost > 0:
             target["ingreso_envio"] = max(target["ingreso_envio"], receiver_cost)
-    elif detail_type == "BONUS" and ("envío" in transaction_detail or "envio" in transaction_detail or "shipping" in transaction_detail):
+    elif is_bonus and is_shipping_concept:
         target["bonificacion"] += detail_amount
         target["has_shipping"] = True
 
@@ -909,6 +914,11 @@ async def api_orders(request: Request, account_id: int,
                 envio = 0.0
         if billing.get("has_comision"):
             comision = billing.get("comision", comision)
+        # Fallback envío gratis: cuando el comprador no pagó envío y nos quedó
+        # un costo de envío sin bonificación identificada, ML bonifica al
+        # vendedor el mismo monto (ej. #2000013189550281 → Bonif = $6.490).
+        if ingreso_envio == 0 and envio > 0 and bonificacion == 0:
+            bonificacion = envio
         items = []
         for i in o.get("order_items", []):
             sku = (i.get("item", {}).get("seller_sku") or "").strip()
