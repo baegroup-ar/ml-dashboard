@@ -26,6 +26,7 @@ ADMIN_PASSWORD = os.environ["ADMIN_PASSWORD"]
 ML_AUTH_URL = "https://auth.mercadolibre.com.ar/authorization"
 ML_TOKEN_URL = "https://api.mercadolibre.com/oauth/token"
 ML_API_URL = "https://api.mercadolibre.com"
+SHIPPING_LOGIC_VERSION = "v7-flex-self-service-bonif"
 
 serializer = URLSafeTimedSerializer(SECRET_KEY)
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -77,7 +78,6 @@ def init_db():
             )
         """))
         # Invalida el caché cuando cambia la lógica de cálculo de envío.
-        SHIPPING_LOGIC_VERSION = "v6-bonif-fallback"
         current = conn.execute(text("SELECT value FROM app_meta WHERE key='shipping_logic_version'")).fetchone()
         if not current or current[0] != SHIPPING_LOGIC_VERSION:
             conn.execute(text("DELETE FROM shipment_cost_cache"))
@@ -200,6 +200,24 @@ def db_save_shipping_costs(costs: dict):
         )
 
 
+def amount_value(value) -> float:
+    if value is None:
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, dict):
+        for key in ("amount", "value", "cost"):
+            if value.get(key) is not None:
+                return amount_value(value.get(key))
+        return 0.0
+    if isinstance(value, list):
+        return sum(amount_value(v) for v in value)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def to_ar(dt_str: str) -> tuple:
     """Convierte datetime ISO de ML a fecha/hora Argentina (UTC-3).
     ML puede devolver -03:00 (ya local) o +00:00 (UTC) según el endpoint."""
@@ -252,10 +270,18 @@ async def get_shipping_cost(client, shipping_id, headers) -> dict:
 
     ship = r_ship.json()
     so = ship.get("shipping_option") or {}
-    logistic_type = ship.get("logistic_type") or ""
-    cost = float(so.get("cost") or 0)
-    list_cost = float(so.get("list_cost") or 0)
-    base_cost = float(ship.get("base_cost") or 0)
+    logistic = ship.get("logistic") or {}
+    logistic_type = ship.get("logistic_type") or logistic.get("type") or ""
+    mode = ship.get("mode") or logistic.get("mode") or ""
+    option_name = str(so.get("name") or so.get("shipping_method_type") or "").lower()
+    cost = amount_value(so.get("cost"))
+    list_cost = amount_value(so.get("list_cost"))
+    base_cost = amount_value(so.get("base_cost") or ship.get("base_cost"))
+    is_flex = (
+        logistic_type in {"self_service", "home_delivery"}
+        or mode == "self_service"
+        or "flex" in option_name
+    )
 
     # Extraer datos del endpoint /costs si está disponible
     costs_sender_cost = 0.0
@@ -265,27 +291,23 @@ async def get_shipping_cost(client, shipping_id, headers) -> dict:
         senders = cd.get("senders") or []
         if senders:
             s0 = senders[0]
-            costs_sender_cost = float(s0.get("cost") or 0)
-            comp_raw = s0.get("compensation")
-            if isinstance(comp_raw, dict):
-                compensation = float(comp_raw.get("amount") or 0)
-            else:
-                compensation = float(comp_raw or 0)
+            costs_sender_cost = amount_value(s0.get("cost"))
+            compensation = amount_value(s0.get("compensation"))
 
     def derive_bonif() -> float:
         # /costs si la expone, sino list_cost - cost (lo que ML bonifica
         # por encima de lo que paga el comprador en flex).
         if compensation > 0:
             return compensation
-        if list_cost > cost and cost > 0:
+        if list_cost > cost:
             return list_cost - cost
         return 0.0
 
-    if logistic_type == "home_delivery":
+    if is_flex:
         # Flex: ML descuenta el list_cost y compensa con la bonificación.
         buyer_cost = cost
-        seller_cost = list_cost or base_cost or cost
-        bonificacion = derive_bonif()
+        seller_cost = list_cost or costs_sender_cost or base_cost or cost
+        bonificacion = compensation if compensation > 0 else max(seller_cost - buyer_cost, 0)
     elif logistic_type in {"xd_drop_off", "drop_off", "cross_docking", "fulfillment"}:
         # Colecta / Full
         if cost > 0:
