@@ -72,10 +72,9 @@ def init_db():
         conn.execute(text("""
             ALTER TABLE shipment_cost_cache ALTER COLUMN buyer_cost DROP NOT NULL
         """))
-        # Registros viejos tienen buyer_cost=0 por DEFAULT; marcarlos NULL para que se re-fetcheen
-        conn.execute(text("""
-            UPDATE shipment_cost_cache SET buyer_cost = NULL WHERE buyer_cost = 0
-        """))
+        # Limpiar cache completo: la lógica de cálculo cambió (items[] para colecta/full).
+        # El próximo load re-fetchea todo con datos correctos.
+        conn.execute(text("DELETE FROM shipment_cost_cache"))
         existing = conn.execute(text("SELECT id FROM users WHERE email=:e"), {"e": ADMIN_EMAIL}).fetchone()
         if not existing:
             hashed = bcrypt.hashpw(ADMIN_PASSWORD.encode(), bcrypt.gensalt()).decode()
@@ -211,11 +210,17 @@ async def get_shipping_cost(client, shipping_id, headers) -> dict:
     if r.status_code != 200:
         return {"seller": 0.0, "buyer": 0.0}
     data = r.json()
-    seller_cost = data.get("base_cost") or 0
-    buyer_cost = (data.get("shipping_option") or {}).get("cost") or 0
+    # items[] incluye cargos y descuentos detallados (colecta/full tienen ítem de descuento 50%).
+    # Sumarlos da el costo neto real que paga el vendedor.
+    items = data.get("items") or []
+    if items:
+        seller_cost = max(0.0, sum(float(i.get("amount", 0)) for i in items))
+    else:
+        seller_cost = float(data.get("base_cost") or 0)
+    buyer_cost = float((data.get("shipping_option") or {}).get("cost") or 0)
     return {
-        "seller": round(float(seller_cost), 2),
-        "buyer": round(float(buyer_cost), 2),
+        "seller": round(seller_cost, 2),
+        "buyer": round(buyer_cost, 2),
     }
 
 
