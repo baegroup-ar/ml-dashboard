@@ -26,7 +26,7 @@ ADMIN_PASSWORD = os.environ["ADMIN_PASSWORD"]
 ML_AUTH_URL = "https://auth.mercadolibre.com.ar/authorization"
 ML_TOKEN_URL = "https://api.mercadolibre.com/oauth/token"
 ML_API_URL = "https://api.mercadolibre.com"
-SHIPPING_LOGIC_VERSION = "v9-option-discount-bonif"
+SHIPPING_LOGIC_VERSION = "v11-billing-order-details"
 
 serializer = URLSafeTimedSerializer(SECRET_KEY)
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -225,6 +225,98 @@ def discount_total(discounts) -> float:
     return total
 
 
+def order_ids_from_sales_info(row: dict) -> list:
+    ids = []
+    for sale in row.get("sales_info") or []:
+        oid = sale.get("order_id")
+        if oid is not None:
+            ids.append(str(oid))
+    if row.get("order_id") is not None:
+        ids.append(str(row.get("order_id")))
+    return ids
+
+
+def billing_amount(row: dict, key: str, default=0.0) -> float:
+    charge = row.get("charge_info") or {}
+    return amount_value(charge.get(key, row.get(key, default)))
+
+
+def billing_text(row: dict, key: str) -> str:
+    charge = row.get("charge_info") or {}
+    return str(charge.get(key, row.get(key, "")) or "").lower()
+
+
+def apply_billing_row(target: dict, row: dict):
+    charge = row.get("charge_info") or {}
+    discount = row.get("discount_info") or {}
+    shipping = row.get("shipping_info") or {}
+    detail_type = billing_text(row, "detail_type").upper()
+    sub_type = billing_text(row, "detail_sub_type").upper()
+    concept_type = billing_text(row, "concept_type").upper()
+    transaction_detail = billing_text(row, "transaction_detail")
+    detail_amount = abs(billing_amount(row, "detail_amount"))
+    amount_without_discount = abs(amount_value(discount.get("charge_amount_without_discount")))
+    discount_amount = abs(amount_value(discount.get("discount_amount")))
+
+    is_shipping = (
+        concept_type == "SHIPPING"
+        or sub_type in {"CXD", "CFF", "BXD", "BFF"}
+        or "envío" in transaction_detail
+        or "envio" in transaction_detail
+        or "shipping" in transaction_detail
+    )
+    is_sale_charge = (
+        not is_shipping
+        and detail_type == "CHARGE"
+        and (sub_type.startswith("CV") or "cargo por venta" in transaction_detail or "cargo por vender" in transaction_detail)
+    )
+    if is_sale_charge:
+        target["comision"] += detail_amount
+        target["has_comision"] = True
+    if is_shipping:
+        target["envio"] += amount_without_discount or detail_amount
+        target["bonificacion"] += discount_amount
+        target["has_shipping"] = True
+        receiver_cost = amount_value(shipping.get("receiver_shipping_cost"))
+        if receiver_cost > 0:
+            target["ingreso_envio"] = max(target["ingreso_envio"], receiver_cost)
+    elif detail_type == "BONUS" and ("envío" in transaction_detail or "envio" in transaction_detail or "shipping" in transaction_detail):
+        target["bonificacion"] += detail_amount
+        target["has_shipping"] = True
+
+
+async def fetch_billing_by_order(client, headers, seller_id, order_ids: list) -> dict:
+    if not order_ids:
+        return {}
+    parsed = {}
+    unique_ids = list(dict.fromkeys(str(oid) for oid in order_ids if oid))
+    for i in range(0, len(unique_ids), 100):
+        batch = unique_ids[i:i+100]
+        params = {
+            "order_ids": ",".join(batch),
+            "seller_id": seller_id,
+            "limit": 150,
+        }
+        r = await client.get(f"{ML_API_URL}/billing/integration/group/ML/order/details", headers=headers, params=params)
+        if r.status_code not in (200, 206):
+            continue
+        data = r.json()
+        for row in data.get("results", []):
+            for oid in order_ids_from_sales_info(row):
+                parsed.setdefault(oid, {
+                    "comision": 0.0, "envio": 0.0, "bonificacion": 0.0, "ingreso_envio": 0.0,
+                    "has_comision": False, "has_shipping": False,
+                })
+                apply_billing_row(parsed[oid], row)
+    return {
+        oid: {
+            k: (round(v, 2) if isinstance(v, (int, float)) else v)
+            for k, v in values.items()
+        }
+        for oid, values in parsed.items()
+    }
+
+
 def to_ar(dt_str: str) -> tuple:
     """Convierte datetime ISO de ML a fecha/hora Argentina (UTC-3).
     ML puede devolver -03:00 (ya local) o +00:00 (UTC) según el endpoint."""
@@ -345,8 +437,8 @@ async def get_shipping_cost(client, shipping_id, headers) -> dict:
         seller_cost = gross_candidate(seller_net_cost, compensation or sender_discount)
         bonificacion = derive_bonif(seller_net_cost, seller_cost)
         if bonificacion == 0 and buyer_cost == 0 and seller_net_cost > 0 and seller_cost == seller_net_cost:
-            seller_cost = round(seller_net_cost / 0.9, 2)
-            bonificacion = seller_cost - seller_net_cost
+            bonificacion = seller_cost
+            seller_cost = 0.0
     elif logistic_type in {"xd_drop_off", "drop_off", "cross_docking", "fulfillment"}:
         # Colecta / Full
         if cost > 0:
@@ -553,6 +645,9 @@ async def api_orders(request: Request, account_id: int,
             new_costs = dict(await asyncio.gather(*[fetch_ship(sid) for sid in uncached]))
             db_save_shipping_costs(new_costs)
             cost_cache.update(new_costs)
+        billing_by_order = await fetch_billing_by_order(
+            client, headers, acc["ml_user_id"], [str(o.get("id")) for o in all_results if o.get("id")]
+        )
 
     empty_ship = {"seller": 0.0, "buyer": 0.0, "bonificacion": 0.0}
 
@@ -568,8 +663,23 @@ async def api_orders(request: Request, account_id: int,
         fecha, hora = to_ar(pay_str if pay_str else o.get("date_created", ""))
         if fecha and not (df <= fecha <= dt):
             continue
-        comision = round(sum(float(i.get("sale_fee", 0)) for i in o.get("order_items", [])), 2)
+        order_id = str(o.get("id"))
+        billing = billing_by_order.get(order_id, {})
+        comision = round(sum(
+            float(i.get("sale_fee", 0)) * int(i.get("quantity", 1))
+            for i in o.get("order_items", [])
+        ), 2)
         ship_info = cost_cache.get(sid, empty_ship) if sid else empty_ship
+        if billing.get("has_shipping"):
+            envio = billing.get("envio", 0)
+            ingreso_envio = billing.get("ingreso_envio", 0)
+            bonificacion = billing.get("bonificacion", 0)
+        else:
+            envio = ship_info["seller"]
+            ingreso_envio = ship_info["buyer"]
+            bonificacion = ship_info.get("bonificacion", 0)
+        if billing.get("has_comision"):
+            comision = billing.get("comision", comision)
         items = []
         for i in o.get("order_items", []):
             sku = (i.get("item", {}).get("seller_sku") or "").strip()
@@ -578,7 +688,7 @@ async def api_orders(request: Request, account_id: int,
                 "sku": sku,
                 "titulo": i.get("item", {}).get("title", "?"),
                 "monto": round(float(i.get("unit_price", 0)) * qty, 2),
-                "comision": round(float(i.get("sale_fee", 0)), 2),
+                "comision": round(float(i.get("sale_fee", 0)) * qty, 2),
                 "cantidad": qty,
             })
         raw_list.append({
@@ -588,9 +698,9 @@ async def api_orders(request: Request, account_id: int,
             "hora": hora,
             "monto": round(a, 2),
             "comision": comision,
-            "envio": ship_info["seller"],
-            "shipping_buyer": round(ship_info["buyer"], 2),
-            "bonificacion": round(ship_info.get("bonificacion", 0), 2),
+            "envio": round(envio, 2),
+            "shipping_buyer": round(ingreso_envio, 2),
+            "bonificacion": round(bonificacion, 2),
             "coupon_amt": round(float((o.get("coupon") or {}).get("amount", 0)), 2),
             "estado": estado,
             "items": items,
