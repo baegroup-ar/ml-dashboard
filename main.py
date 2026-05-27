@@ -26,7 +26,7 @@ ADMIN_PASSWORD = os.environ["ADMIN_PASSWORD"]
 ML_AUTH_URL = "https://auth.mercadolibre.com.ar/authorization"
 ML_TOKEN_URL = "https://api.mercadolibre.com/oauth/token"
 ML_API_URL = "https://api.mercadolibre.com"
-SHIPPING_LOGIC_VERSION = "v7-flex-self-service-bonif"
+SHIPPING_LOGIC_VERSION = "v8-gross-shipping-bonif"
 
 serializer = URLSafeTimedSerializer(SECRET_KEY)
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -218,6 +218,13 @@ def amount_value(value) -> float:
         return 0.0
 
 
+def discount_total(discounts) -> float:
+    total = 0.0
+    for discount in discounts or []:
+        total += amount_value(discount.get("promoted_amount"))
+    return total
+
+
 def to_ar(dt_str: str) -> tuple:
     """Convierte datetime ISO de ML a fecha/hora Argentina (UTC-3).
     ML puede devolver -03:00 (ya local) o +00:00 (UTC) según el endpoint."""
@@ -259,8 +266,9 @@ async def get_shipping_cost(client, shipping_id, headers) -> dict:
     r_ship_task = asyncio.create_task(
         client.get(f"{ML_API_URL}/shipments/{shipping_id}", headers=headers)
     )
+    costs_headers = {**headers, "X-Costs-New": "true", "x-format-new": "true"}
     r_costs_task = asyncio.create_task(
-        client.get(f"{ML_API_URL}/shipments/{shipping_id}/costs", headers=headers)
+        client.get(f"{ML_API_URL}/shipments/{shipping_id}/costs", headers=costs_headers)
     )
     r_ship = await r_ship_task
     r_costs = await r_costs_task
@@ -285,52 +293,82 @@ async def get_shipping_cost(client, shipping_id, headers) -> dict:
 
     # Extraer datos del endpoint /costs si está disponible
     costs_sender_cost = 0.0
+    costs_gross_amount = 0.0
+    receiver_cost = 0.0
+    sender_discount = 0.0
     compensation = 0.0
     if r_costs.status_code == 200:
         cd = r_costs.json()
+        costs_gross_amount = amount_value(cd.get("gross_amount"))
+        receiver = cd.get("receiver") or {}
+        receiver_cost = amount_value(receiver.get("cost"))
         senders = cd.get("senders") or []
         if senders:
             s0 = senders[0]
             costs_sender_cost = amount_value(s0.get("cost"))
+            sender_discount = discount_total(s0.get("discounts"))
             compensation = amount_value(s0.get("compensation"))
 
-    def derive_bonif() -> float:
-        # /costs si la expone, sino list_cost - cost (lo que ML bonifica
-        # por encima de lo que paga el comprador en flex).
+    buyer_cost_from_costs = receiver_cost if receiver_cost > 0 else cost
+
+    def gross_candidate(net_cost: float, bonif: float = 0.0) -> float:
+        if net_cost > 0 and bonif > 0:
+            return net_cost + bonif
+        if costs_gross_amount > 0:
+            return costs_gross_amount
+        if list_cost > 0:
+            return list_cost
+        if base_cost > 0:
+            return base_cost
+        return net_cost or cost
+
+    def derive_bonif(net_cost: float, gross_cost: float) -> float:
         if compensation > 0:
             return compensation
-        if list_cost > cost:
-            return list_cost - cost
+        if sender_discount > 0:
+            return sender_discount
+        if gross_cost > net_cost > 0:
+            return gross_cost - net_cost
         return 0.0
 
     if is_flex:
         # Flex: ML descuenta el list_cost y compensa con la bonificación.
-        buyer_cost = cost
-        seller_cost = list_cost or costs_sender_cost or base_cost or cost
-        bonificacion = compensation if compensation > 0 else max(seller_cost - buyer_cost, 0)
+        buyer_cost = buyer_cost_from_costs
+        seller_net_cost = costs_sender_cost or list_cost or base_cost or cost
+        seller_cost = gross_candidate(seller_net_cost, compensation or sender_discount)
+        bonificacion = derive_bonif(seller_net_cost, seller_cost)
+        if bonificacion == 0 and buyer_cost == 0 and seller_net_cost > 0 and seller_cost == seller_net_cost:
+            seller_cost = round(seller_net_cost / 0.9, 2)
+            bonificacion = seller_cost - seller_net_cost
     elif logistic_type in {"xd_drop_off", "drop_off", "cross_docking", "fulfillment"}:
         # Colecta / Full
         if cost > 0:
             buyer_cost = cost
             seller_cost = cost
+            bonificacion = 0.0
         else:
             buyer_cost = 0.0
+            seller_net_cost = costs_sender_cost
             if costs_sender_cost > 0:
-                seller_cost = costs_sender_cost
+                seller_cost = gross_candidate(seller_net_cost, compensation or sender_discount)
             else:
                 discount = so.get("discount") or {}
                 if discount.get("promoted_amount") is not None:
-                    seller_cost = float(discount["promoted_amount"])
+                    seller_net_cost = amount_value(discount["promoted_amount"])
+                    seller_cost = gross_candidate(seller_net_cost, compensation or sender_discount)
                 elif discount.get("rate"):
-                    seller_cost = list_cost * (1.0 - float(discount["rate"]))
+                    seller_net_cost = list_cost * (1.0 - amount_value(discount["rate"]))
+                    seller_cost = list_cost
                 else:
-                    seller_cost = (list_cost or base_cost) * 0.5
-        bonificacion = compensation
+                    seller_net_cost = (list_cost or base_cost) * 0.5
+                    seller_cost = list_cost or base_cost or seller_net_cost
+            bonificacion = derive_bonif(seller_net_cost, seller_cost)
     else:
         # logistic_type vacío o desconocido (común en ventas canceladas).
-        buyer_cost = cost
-        seller_cost = costs_sender_cost or base_cost
-        bonificacion = derive_bonif()
+        buyer_cost = buyer_cost_from_costs
+        seller_net_cost = costs_sender_cost or base_cost or list_cost or cost
+        seller_cost = gross_candidate(seller_net_cost, compensation or sender_discount)
+        bonificacion = derive_bonif(seller_net_cost, seller_cost)
 
     return {
         "seller": round(seller_cost, 2),
