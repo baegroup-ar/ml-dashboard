@@ -77,7 +77,7 @@ def init_db():
             )
         """))
         # Invalida el caché cuando cambia la lógica de cálculo de envío.
-        SHIPPING_LOGIC_VERSION = "v4-costs-endpoint"
+        SHIPPING_LOGIC_VERSION = "v5-hybrid-shipments-costs"
         current = conn.execute(text("SELECT value FROM app_meta WHERE key='shipping_logic_version'")).fetchone()
         if not current or current[0] != SHIPPING_LOGIC_VERSION:
             conn.execute(text("DELETE FROM shipment_cost_cache"))
@@ -222,37 +222,97 @@ def to_ar(dt_str: str) -> tuple:
 
 
 async def get_shipping_cost(client, shipping_id, headers) -> dict:
-    """Obtiene el desglose REAL del envío desde /shipments/{id}/costs.
+    """Lee el desglose de envío combinando /shipments/{id} y /shipments/{id}/costs.
 
-    La respuesta de ML tiene la estructura:
-      - receiver.cost           → lo que efectivamente paga el comprador
-      - senders[0].cost         → lo que ML descuenta al vendedor (Costo Envío)
-      - senders[0].compensation → bonificación que ML le otorga al vendedor
-      - senders[0].discounts[]  → lista de descuentos aplicados
-    Si /costs no responde, cae al endpoint básico /shipments/{id}.
+    /costs sólo expone el costo NETO del vendedor (0 cuando el comprador paga),
+    así que para que el panel coincida con lo que muestra ML para cada venta
+    usamos /shipments para Ing./Costo Envío y /costs únicamente para la
+    bonificación que ML otorga al vendedor.
+
+    Reglas:
+      - Flex (home_delivery): Ing. = cost del comprador, Costo = 0,
+        Bonif. = senders[0].compensation o, si no viene, list_cost − cost.
+      - Colecta/Full con comprador pagando envío (cost > 0):
+        Ing. = Costo = cost (ML descuenta al vendedor el mismo monto).
+      - Colecta/Full con Envío Gratis (cost = 0):
+        Ing. = 0, Costo = senders[0].cost (descuento ya aplicado) o,
+        si /costs no responde, 50% del list_cost.
     """
-    r = await client.get(f"{ML_API_URL}/shipments/{shipping_id}/costs", headers=headers)
-    if r.status_code == 200:
-        data = r.json()
-        receiver = data.get("receiver") or {}
-        senders = data.get("senders") or []
-        sender = senders[0] if senders else {}
-        return {
-            "seller": round(float(sender.get("cost") or 0), 2),
-            "buyer": round(float(receiver.get("cost") or 0), 2),
-            "bonificacion": round(float(sender.get("compensation") or 0), 2),
-        }
+    r_ship_task = asyncio.create_task(
+        client.get(f"{ML_API_URL}/shipments/{shipping_id}", headers=headers)
+    )
+    r_costs_task = asyncio.create_task(
+        client.get(f"{ML_API_URL}/shipments/{shipping_id}/costs", headers=headers)
+    )
+    r_ship = await r_ship_task
+    r_costs = await r_costs_task
 
-    # Fallback: usar /shipments/{id} si /costs no está disponible
-    r2 = await client.get(f"{ML_API_URL}/shipments/{shipping_id}", headers=headers)
-    if r2.status_code != 200:
+    if r_ship.status_code != 200:
         return {"seller": 0.0, "buyer": 0.0, "bonificacion": 0.0}
-    d = r2.json()
-    so = d.get("shipping_option") or {}
+
+    ship = r_ship.json()
+    so = ship.get("shipping_option") or {}
+    logistic_type = ship.get("logistic_type") or ""
+    cost = float(so.get("cost") or 0)
+    list_cost = float(so.get("list_cost") or 0)
+    base_cost = float(ship.get("base_cost") or 0)
+
+    # Extraer datos del endpoint /costs si está disponible
+    costs_sender_cost = 0.0
+    compensation = 0.0
+    if r_costs.status_code == 200:
+        cd = r_costs.json()
+        senders = cd.get("senders") or []
+        if senders:
+            s0 = senders[0]
+            costs_sender_cost = float(s0.get("cost") or 0)
+            comp_raw = s0.get("compensation")
+            if isinstance(comp_raw, dict):
+                compensation = float(comp_raw.get("amount") or 0)
+            else:
+                compensation = float(comp_raw or 0)
+
+    if logistic_type == "home_delivery":
+        # Flex
+        buyer_cost = cost
+        seller_cost = 0.0
+        # Bonificación: /costs si la expone, sino list_cost − cost (lo que ML
+        # bonifica por encima de lo que paga el comprador).
+        if compensation > 0:
+            bonificacion = compensation
+        elif list_cost > cost:
+            bonificacion = list_cost - cost
+        else:
+            bonificacion = 0.0
+    elif logistic_type in {"xd_drop_off", "drop_off", "cross_docking", "fulfillment"}:
+        # Colecta / Full
+        if cost > 0:
+            # Comprador paga; ML descuenta al vendedor el mismo monto.
+            buyer_cost = cost
+            seller_cost = cost
+        else:
+            # Envío Gratis: vendedor paga con descuento.
+            buyer_cost = 0.0
+            if costs_sender_cost > 0:
+                seller_cost = costs_sender_cost
+            else:
+                discount = so.get("discount") or {}
+                if discount.get("promoted_amount") is not None:
+                    seller_cost = float(discount["promoted_amount"])
+                elif discount.get("rate"):
+                    seller_cost = list_cost * (1.0 - float(discount["rate"]))
+                else:
+                    seller_cost = (list_cost or base_cost) * 0.5
+        bonificacion = compensation
+    else:
+        buyer_cost = cost
+        seller_cost = costs_sender_cost or base_cost
+        bonificacion = compensation
+
     return {
-        "seller": round(float(d.get("base_cost") or 0), 2),
-        "buyer": round(float(so.get("cost") or 0), 2),
-        "bonificacion": 0.0,
+        "seller": round(seller_cost, 2),
+        "buyer": round(buyer_cost, 2),
+        "bonificacion": round(bonificacion, 2),
     }
 
 
@@ -493,9 +553,13 @@ async def api_orders(request: Request, account_id: int,
             p["coupon_total"] = round(p["coupon_total"] + raw["coupon_amt"], 2)
             p["items"].extend(raw["items"])
         else:
-            ingreso_envio = round(raw["shipping_buyer"] + raw["coupon_amt"], 2)
+            # Ing. Envío = sólo lo que paga el comprador por envío (sin cupones).
+            ingreso_envio = raw["shipping_buyer"]
             sku_col = " / ".join(i["sku"] or i["titulo"] for i in raw["items"])
-            ganancia = round(raw["monto"] + ingreso_envio + raw["bonificacion"] - raw["comision"] - raw["envio"], 2)
+            ganancia = round(
+                raw["monto"] + ingreso_envio + raw["bonificacion"]
+                + raw["coupon_amt"] - raw["comision"] - raw["envio"], 2
+            )
             orders.append({
                 "id": raw["id"], "venta_id": raw["id"],
                 "fecha": raw["fecha"], "hora": raw["hora"],
@@ -510,9 +574,12 @@ async def api_orders(request: Request, account_id: int,
             })
 
     for pid, p in pack_map.items():
-        ingreso_envio = round(p["shipping_buyer"] + p["coupon_total"], 2)
+        ingreso_envio = p["shipping_buyer"]
         p["ingreso_envio"] = ingreso_envio
-        p["ganancia"] = round(p["monto"] + ingreso_envio + p["bonificacion"] - p["comision"] - p["envio"], 2)
+        p["ganancia"] = round(
+            p["monto"] + ingreso_envio + p["bonificacion"]
+            + p["coupon_total"] - p["comision"] - p["envio"], 2
+        )
         if len(p["items"]) == 1:
             p["is_pack"] = False
             p["producto"] = p["items"][0]["sku"] or p["items"][0]["titulo"]
