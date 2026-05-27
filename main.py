@@ -1052,6 +1052,95 @@ async def admin_create_user(request: Request, name: str = Form(...), email: str 
         return templates.TemplateResponse("admin.html", {"request": request, "users": users, "error": "El email ya existe", "success": None})
 
 
+# ── Debug ───────────────────────────────────────────────────────
+
+@app.get("/api/debug/order/{order_id}")
+async def debug_order(request: Request, order_id: str):
+    """Devuelve TODA la data cruda que devuelve ML para una orden puntual.
+
+    Probá todos los endpoints relevantes para entender de dónde sacar
+    la bonificación cuando no aparece en el panel:
+      - /orders/{id}
+      - /shipments/{shipping_id}
+      - /shipments/{shipping_id}/costs
+      - /billing/integration/group/ML/order/details (por seller_id)
+      - /billing/integration/periods/key/{period}/group/ML/flex/details
+      - /orders/{id}/discounts
+      - /orders/{id}/feedback
+    """
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    accs = db_fetchall("SELECT * FROM ml_accounts WHERE user_id=:uid ORDER BY id", {"uid": user_id})
+    if not accs:
+        raise HTTPException(404, "No tenés cuentas de ML conectadas")
+
+    out: dict = {"order_id": order_id, "tries": []}
+    for acc in accs:
+        token = await refresh_ml_token(acc["id"])
+        if not token:
+            continue
+        headers = {"Authorization": f"Bearer {token}"}
+        costs_headers = {**headers, "X-Costs-New": "true", "x-format-new": "true"}
+        async with httpx.AsyncClient(timeout=30) as client:
+            entry: dict = {"account": acc["nickname"], "account_id": acc["id"]}
+            r_order = await client.get(f"{ML_API_URL}/orders/{order_id}", headers=headers)
+            entry["order_status"] = r_order.status_code
+            if r_order.status_code != 200:
+                entry["order_error"] = r_order.text[:500]
+                out["tries"].append(entry)
+                continue
+            order = r_order.json()
+            entry["order"] = order
+            shipping_id = (order.get("shipping") or {}).get("id")
+            entry["shipping_id"] = shipping_id
+
+            tasks = {}
+            if shipping_id:
+                tasks["shipment"] = client.get(f"{ML_API_URL}/shipments/{shipping_id}", headers=headers)
+                tasks["shipment_costs"] = client.get(f"{ML_API_URL}/shipments/{shipping_id}/costs", headers=costs_headers)
+            tasks["billing"] = client.get(
+                f"{ML_API_URL}/billing/integration/group/ML/order/details",
+                headers=headers,
+                params={"order_ids": order_id, "seller_id": acc["ml_user_id"], "limit": 150},
+            )
+            period_key = period_key_from_ml_date(order.get("date_created", ""))
+            if period_key:
+                tasks["flex_billing_BILL"] = client.get(
+                    f"{ML_API_URL}/billing/integration/periods/key/{period_key}/group/ML/flex/details",
+                    headers=headers,
+                    params={"document_type": "BILL", "order_ids": order_id, "limit": 1000},
+                )
+                tasks["flex_billing_CREDIT"] = client.get(
+                    f"{ML_API_URL}/billing/integration/periods/key/{period_key}/group/ML/flex/details",
+                    headers=headers,
+                    params={"document_type": "CREDIT_NOTE", "order_ids": order_id, "limit": 1000},
+                )
+                # También probar SIN document_type
+                tasks["flex_billing_NO_TYPE"] = client.get(
+                    f"{ML_API_URL}/billing/integration/periods/key/{period_key}/group/ML/flex/details",
+                    headers=headers,
+                    params={"order_ids": order_id, "limit": 1000},
+                )
+            tasks["discounts"] = client.get(f"{ML_API_URL}/orders/{order_id}/discounts", headers=headers)
+            tasks["feedback"] = client.get(f"{ML_API_URL}/orders/{order_id}/feedback", headers=headers)
+
+            results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+            for name, res in zip(tasks.keys(), results):
+                if isinstance(res, Exception):
+                    entry[name] = {"error": str(res)}
+                else:
+                    try:
+                        entry[f"{name}_status"] = res.status_code
+                        entry[name] = res.json() if res.status_code in (200, 206) else res.text[:1000]
+                    except Exception as e:
+                        entry[name] = {"parse_error": str(e), "text": res.text[:500]}
+
+            out["tries"].append(entry)
+            return out
+    return out
+
+
 @app.post("/admin/users/delete/{target_id}")
 async def admin_delete_user(request: Request, target_id: int):
     user_id = get_session_user_id(request)
