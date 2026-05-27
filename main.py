@@ -26,7 +26,7 @@ ADMIN_PASSWORD = os.environ["ADMIN_PASSWORD"]
 ML_AUTH_URL = "https://auth.mercadolibre.com.ar/authorization"
 ML_TOKEN_URL = "https://api.mercadolibre.com/oauth/token"
 ML_API_URL = "https://api.mercadolibre.com"
-SHIPPING_LOGIC_VERSION = "v8-gross-shipping-bonif"
+SHIPPING_LOGIC_VERSION = "v9-option-discount-bonif"
 
 serializer = URLSafeTimedSerializer(SECRET_KEY)
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -285,6 +285,9 @@ async def get_shipping_cost(client, shipping_id, headers) -> dict:
     cost = amount_value(so.get("cost"))
     list_cost = amount_value(so.get("list_cost"))
     base_cost = amount_value(so.get("base_cost") or ship.get("base_cost"))
+    option_discount = so.get("discount") or {}
+    option_discount_amount = amount_value(option_discount.get("promoted_amount"))
+    option_discount_rate = amount_value(option_discount.get("rate"))
     is_flex = (
         logistic_type in {"self_service", "home_delivery"}
         or mode == "self_service"
@@ -320,6 +323,8 @@ async def get_shipping_cost(client, shipping_id, headers) -> dict:
             return list_cost
         if base_cost > 0:
             return base_cost
+        if option_discount_amount > 0:
+            return option_discount_amount
         return net_cost or cost
 
     def derive_bonif(net_cost: float, gross_cost: float) -> float:
@@ -327,6 +332,8 @@ async def get_shipping_cost(client, shipping_id, headers) -> dict:
             return compensation
         if sender_discount > 0:
             return sender_discount
+        if option_discount_amount > 0:
+            return option_discount_amount
         if gross_cost > net_cost > 0:
             return gross_cost - net_cost
         return 0.0
@@ -352,12 +359,11 @@ async def get_shipping_cost(client, shipping_id, headers) -> dict:
             if costs_sender_cost > 0:
                 seller_cost = gross_candidate(seller_net_cost, compensation or sender_discount)
             else:
-                discount = so.get("discount") or {}
-                if discount.get("promoted_amount") is not None:
-                    seller_net_cost = amount_value(discount["promoted_amount"])
-                    seller_cost = gross_candidate(seller_net_cost, compensation or sender_discount)
-                elif discount.get("rate"):
-                    seller_net_cost = list_cost * (1.0 - amount_value(discount["rate"]))
+                if option_discount_amount > 0:
+                    seller_net_cost = max(gross_candidate(0, option_discount_amount) - option_discount_amount, 0)
+                    seller_cost = gross_candidate(seller_net_cost, option_discount_amount)
+                elif option_discount_rate:
+                    seller_net_cost = list_cost * (1.0 - option_discount_rate)
                     seller_cost = list_cost
                 else:
                     seller_net_cost = (list_cost or base_cost) * 0.5
