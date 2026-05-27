@@ -523,6 +523,23 @@ async def api_orders(request: Request, account_id: int,
     }
 
 
+# ── Debug (temporal) ────────────────────────────────────────────
+
+@app.get("/api/debug/shipment/{account_id}/{shipping_id}")
+async def debug_shipment(request: Request, account_id: int, shipping_id: int):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = db_fetchone("SELECT * FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
+    if not acc:
+        raise HTTPException(404)
+    token = await refresh_ml_token(account_id)
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get(f"{ML_API_URL}/shipments/{shipping_id}", headers=headers)
+    return r.json()
+
+
 # ── Admin ────────────────────────────────────────────────────────
 
 @app.get("/admin", response_class=HTMLResponse)
