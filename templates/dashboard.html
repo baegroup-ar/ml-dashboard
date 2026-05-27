@@ -162,7 +162,7 @@
       </div>
       <div style="overflow-x:auto;">
         <table>
-          <thead><tr><th>Fecha</th><th>Hora</th><th>N° Venta</th><th>Producto</th><th>Unid.</th><th>Monto</th><th>Comisión</th><th>Ing. Envío</th><th>Costo Envío</th><th>Ganancia neta</th><th>Margen</th></tr></thead>
+          <thead><tr><th>Fecha</th><th>Hora</th><th>N° Venta</th><th>Producto</th><th>Unid.</th><th>Monto</th><th>Comisión</th><th>Ing. Envío</th><th>Bonif.</th><th>Costo Envío</th><th>Ganancia neta</th><th>Margen</th></tr></thead>
           <tbody id="orders-tbody"></tbody>
         </table>
       </div>
@@ -272,9 +272,10 @@
     const paidOrders = data.orders.filter(o => o.estado === 'paid');
     const ingresos = paidOrders.reduce((s, o) => s + o.monto, 0);
     const ingresos_envio = paidOrders.reduce((s, o) => s + (o.ingreso_envio || 0), 0);
+    const bonificaciones = paidOrders.reduce((s, o) => s + (o.bonificacion || 0), 0);
     const comisiones = paidOrders.reduce((s, o) => s + (o.comision || 0), 0);
     const envios = paidOrders.reduce((s, o) => s + (o.envio || 0), 0);
-    const ingresos_total = ingresos + ingresos_envio;
+    const ingresos_total = ingresos + ingresos_envio + bonificaciones;
     const neta = ingresos_total - comisiones - envios;
     const unidades = paidOrders.reduce((s, o) => s + (o.items||[]).reduce((si, i) => si + (i.cantidad||1), 0), 0);
 
@@ -345,7 +346,7 @@
   function renderOrders(orders) {
     const tbody = document.getElementById('orders-tbody');
     if(!orders.length){
-      tbody.innerHTML='<tr><td colspan="11" style="text-align:center;color:#aaa;padding:2rem;">Sin ventas en este período.</td></tr>';
+      tbody.innerHTML='<tr><td colspan="12" style="text-align:center;color:#aaa;padding:2rem;">Sin ventas en este período.</td></tr>';
       document.getElementById('pagination').innerHTML='';
       return;
     }
@@ -359,7 +360,7 @@
       const units = (o.items||[]).reduce((s,i)=>s+(i.cantidad||1), 0);
       const g = o.ganancia || 0;
       const gc = isCancel ? '#a0524d' : (g >= 0 ? '#1a8a5a' : '#c0392b');
-      const base = o.monto + (o.ingreso_envio || 0);
+      const base = o.monto + (o.ingreso_envio || 0) + (o.bonificacion || 0);
       const pct = base > 0 ? ((g/base)*100).toFixed(1) : '0.0';
       const cancelPill = isCancel ? `<span class="pill red" style="margin-left:6px;font-size:10px;">${o.estado === 'cancelled' ? 'Cancelada' : o.estado}</span>` : '';
       const commonCells = `
@@ -367,6 +368,7 @@
         <td>${fmt(o.monto)}</td>
         <td style="color:${isCancel?'#a0524d':'#c0392b'};">${fmt(o.comision)}</td>
         <td style="color:${isCancel?'#a0524d':'#1a8a5a'};">${fmt(o.ingreso_envio || 0)}</td>
+        <td style="color:${isCancel?'#a0524d':'#1a8a5a'};">${fmt(o.bonificacion || 0)}</td>
         <td style="color:${isCancel?'#a0524d':'#c47a1e'};">${fmt(o.envio)}</td>
         <td style="color:${gc};font-weight:500;">${fmt(g)}</td>
         <td style="color:${gc};font-size:13px;font-weight:600;">${pct}%</td>`;
@@ -389,7 +391,7 @@
             <td style="font-size:12px;text-align:center;">${item.cantidad||1}</td>
             <td style="font-size:12px;">${fmt(item.monto)}</td>
             <td style="font-size:12px;color:#c0392b;">${fmt(item.comision)}</td>
-            <td colspan="4"></td>
+            <td colspan="5"></td>
           </tr>`);
         });
       } else {
