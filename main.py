@@ -752,17 +752,13 @@ async def ml_disconnect(request: Request, account_id: int):
 @app.get("/api/orders/{account_id}")
 async def api_orders(request: Request, account_id: int,
                      date_from: Optional[str] = None, date_to: Optional[str] = None,
-                     fast: bool = False):
+                     refresh: bool = False, fast: bool = False):
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
     acc = db_fetchone("SELECT * FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
     if not acc:
         raise HTTPException(404)
-    token = await refresh_ml_token(account_id)
-    if not token:
-        raise HTTPException(502)
-    headers = {"Authorization": f"Bearer {token}"}
 
     today = datetime.utcnow().date()
     df = date_from or str(today - timedelta(days=365))
@@ -771,12 +767,19 @@ async def api_orders(request: Request, account_id: int,
     if (datetime.strptime(dt, "%Y-%m-%d") - datetime.strptime(df, "%Y-%m-%d")).days > 365:
         df = str(datetime.strptime(dt, "%Y-%m-%d").date() - timedelta(days=365))
 
-    # Convertir fechas AR (UTC-3) a UTC para el filtro: medianoche AR = 03:00 UTC del mismo día
-    # Se resta 24h al inicio para capturar órdenes cuyo date_created fue el día anterior
-    # pero cuyo pago (date_approved) cayó dentro del rango solicitado.
+    # Si hay caché en Postgres, devolverlo INMEDIATAMENTE (lectura local <100ms).
+    # Sólo se va contra la API de ML cuando se pide refresh explícito o no hay caché.
     cached_orders = db_fetch_order_snapshots(account_id, df, dt)
-    if fast and cached_orders:
+    if cached_orders and not refresh:
         return build_dashboard_payload(cached_orders, details_complete=True)
+
+    token = await refresh_ml_token(account_id)
+    if not token:
+        # Si tenemos caché pero no token, igual servimos el caché.
+        if cached_orders:
+            return build_dashboard_payload(cached_orders, details_complete=True)
+        raise HTTPException(502)
+    headers = {"Authorization": f"Bearer {token}"}
 
     from_utc = datetime.strptime(df, "%Y-%m-%d") + timedelta(hours=3) - timedelta(hours=24)
     to_utc   = datetime.strptime(dt, "%Y-%m-%d") + timedelta(hours=27)  # 23:59:59 AR = ~03:00 UTC día siguiente
@@ -788,7 +791,7 @@ async def api_orders(request: Request, account_id: int,
         "order.date_created.to":   to_utc.strftime("%Y-%m-%dT%H:%M:%S.000-00:00"),
     }
 
-    async with httpx.AsyncClient(timeout=60) as client:
+    async with httpx.AsyncClient(timeout=90) as client:
         # Primera página para saber el total
         r = await client.get(f"{ML_API_URL}/orders/search", headers=headers, params={**search_params, "offset": 0})
         if r.status_code != 200:
@@ -841,11 +844,17 @@ async def api_orders(request: Request, account_id: int,
                 if o.get("id")
             }
 
-            new_shipping_costs, billing_by_order, flex_billing_by_order = await asyncio.gather(
+            # Si alguno de los billing endpoints falla, no rompemos la respuesta;
+            # caemos al cálculo desde /shipments + /shipments/.../costs.
+            results = await asyncio.gather(
                 gather_ships(),
                 fetch_billing_by_order(client, headers, acc["ml_user_id"], order_ids_for_billing),
                 fetch_flex_billing_by_order(client, headers, order_period_map),
+                return_exceptions=True,
             )
+            new_shipping_costs = results[0] if not isinstance(results[0], Exception) else {}
+            billing_by_order = results[1] if not isinstance(results[1], Exception) else {}
+            flex_billing_by_order = results[2] if not isinstance(results[2], Exception) else {}
             cost_cache.update(new_shipping_costs)
 
     empty_ship = {"seller": 0.0, "buyer": 0.0, "bonificacion": 0.0}
