@@ -154,8 +154,22 @@ def db_fetch_order_snapshots(account_id: int, date_from: str, date_to: str) -> l
 
 
 def db_save_order_snapshots(account_id: int, orders: list, details_complete: bool):
-    for order in orders:
-        db_execute("""
+    if not orders:
+        return
+    params_list = [
+        {
+            "aid": account_id,
+            "oid": str(order["id"]),
+            "paid_date": order["fecha"],
+            "paid_time": order.get("hora") or "",
+            "payload": json.dumps(order),
+            "complete": details_complete,
+        }
+        for order in orders
+    ]
+    # Una sola conexión + executemany en vez de N conexiones.
+    with engine.connect() as conn:
+        conn.execute(text("""
             INSERT INTO order_snapshot_cache
                 (account_id, order_id, paid_date, paid_time, payload, details_complete, updated_at)
             VALUES (:aid, :oid, :paid_date, :paid_time, CAST(:payload AS JSONB), :complete, NOW())
@@ -165,14 +179,8 @@ def db_save_order_snapshots(account_id: int, orders: list, details_complete: boo
                 payload=EXCLUDED.payload,
                 details_complete=EXCLUDED.details_complete,
                 updated_at=NOW()
-        """, {
-            "aid": account_id,
-            "oid": str(order["id"]),
-            "paid_date": order["fecha"],
-            "paid_time": order.get("hora") or "",
-            "payload": json.dumps(order),
-            "complete": details_complete,
-        })
+        """), params_list)
+        conn.commit()
 
 
 def build_dashboard_payload(orders: list, details_complete: bool):
@@ -267,17 +275,26 @@ def db_get_cached_shipping(shipping_ids: list) -> dict:
 
 
 def db_save_shipping_costs(costs: dict):
-    for sid, c in costs.items():
-        seller = float(c.get("seller", 0))
-        buyer = float(c.get("buyer", 0))
-        bonif = float(c.get("bonificacion", 0))
-        db_execute(
+    if not costs:
+        return
+    params_list = [
+        {
+            "sid": sid,
+            "cost": float(c.get("seller", 0)),
+            "buyer_cost": float(c.get("buyer", 0)),
+            "bonif": float(c.get("bonificacion", 0)),
+        }
+        for sid, c in costs.items()
+    ]
+    # Una sola conexión + executemany en vez de N conexiones.
+    with engine.connect() as conn:
+        conn.execute(text(
             "INSERT INTO shipment_cost_cache (shipping_id, cost, buyer_cost, bonificacion)"
             " VALUES (:sid, :cost, :buyer_cost, :bonif)"
             " ON CONFLICT (shipping_id) DO UPDATE SET"
-            " cost = EXCLUDED.cost, buyer_cost = EXCLUDED.buyer_cost, bonificacion = EXCLUDED.bonificacion",
-            {"sid": sid, "cost": seller, "buyer_cost": buyer, "bonif": bonif},
-        )
+            " cost = EXCLUDED.cost, buyer_cost = EXCLUDED.buyer_cost, bonificacion = EXCLUDED.bonificacion"
+        ), params_list)
+        conn.commit()
 
 
 def amount_value(value) -> float:
@@ -800,27 +817,36 @@ async def api_orders(request: Request, account_id: int,
         cost_cache = {}
         billing_by_order = {}
         flex_billing_by_order = {}
+        new_shipping_costs: dict = {}
         if not fast:
             unique_sids = [sid for sid in dict.fromkeys(s for s in all_sids if s)]
             cost_cache = db_get_cached_shipping(unique_sids)
-
             uncached = [sid for sid in unique_sids if sid not in cost_cache]
-            if uncached:
-                ship_sem = asyncio.Semaphore(15)
-                async def fetch_ship(sid):
-                    async with ship_sem:
-                        return sid, await get_shipping_cost(client, sid, headers)
-                new_costs = dict(await asyncio.gather(*[fetch_ship(sid) for sid in uncached]))
-                db_save_shipping_costs(new_costs)
-                cost_cache.update(new_costs)
-            billing_by_order = await fetch_billing_by_order(
-                client, headers, acc["ml_user_id"], [str(o.get("id")) for o in all_results if o.get("id")]
-            )
-            flex_billing_by_order = await fetch_flex_billing_by_order(client, headers, {
+
+            # Bajar envíos faltantes, billing normal y billing flex en paralelo.
+            ship_sem = asyncio.Semaphore(25)
+            async def fetch_ship(sid):
+                async with ship_sem:
+                    return sid, await get_shipping_cost(client, sid, headers)
+
+            async def gather_ships():
+                if not uncached:
+                    return {}
+                return dict(await asyncio.gather(*[fetch_ship(sid) for sid in uncached]))
+
+            order_ids_for_billing = [str(o.get("id")) for o in all_results if o.get("id")]
+            order_period_map = {
                 str(o.get("id")): period_key_from_ml_date(o.get("date_created", ""))
                 for o in all_results
                 if o.get("id")
-            })
+            }
+
+            new_shipping_costs, billing_by_order, flex_billing_by_order = await asyncio.gather(
+                gather_ships(),
+                fetch_billing_by_order(client, headers, acc["ml_user_id"], order_ids_for_billing),
+                fetch_flex_billing_by_order(client, headers, order_period_map),
+            )
+            cost_cache.update(new_shipping_costs)
 
     empty_ship = {"seller": 0.0, "buyer": 0.0, "bonificacion": 0.0}
 
@@ -948,7 +974,12 @@ async def api_orders(request: Request, account_id: int,
 
     orders.sort(key=lambda x: (x.get("fecha") or "", x.get("hora") or ""), reverse=True)
     if not fast:
-        db_save_order_snapshots(account_id, orders, details_complete=True)
+        # Persistir caches en background para no demorar la respuesta al cliente.
+        if new_shipping_costs:
+            asyncio.create_task(asyncio.to_thread(db_save_shipping_costs, new_shipping_costs))
+        asyncio.create_task(
+            asyncio.to_thread(db_save_order_snapshots, account_id, orders, True)
+        )
     return build_dashboard_payload(orders, details_complete=not fast)
 
 
