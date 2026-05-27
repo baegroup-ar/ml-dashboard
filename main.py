@@ -77,7 +77,7 @@ def init_db():
             )
         """))
         # Invalida el caché cuando cambia la lógica de cálculo de envío.
-        SHIPPING_LOGIC_VERSION = "v5-hybrid-shipments-costs"
+        SHIPPING_LOGIC_VERSION = "v6-bonif-fallback"
         current = conn.execute(text("SELECT value FROM app_meta WHERE key='shipping_logic_version'")).fetchone()
         if not current or current[0] != SHIPPING_LOGIC_VERSION:
             conn.execute(text("DELETE FROM shipment_cost_cache"))
@@ -272,26 +272,26 @@ async def get_shipping_cost(client, shipping_id, headers) -> dict:
             else:
                 compensation = float(comp_raw or 0)
 
-    if logistic_type == "home_delivery":
-        # Flex
-        buyer_cost = cost
-        seller_cost = 0.0
-        # Bonificación: /costs si la expone, sino list_cost − cost (lo que ML
-        # bonifica por encima de lo que paga el comprador).
+    def derive_bonif() -> float:
+        # /costs si la expone, sino list_cost - cost (lo que ML bonifica
+        # por encima de lo que paga el comprador en flex).
         if compensation > 0:
-            bonificacion = compensation
-        elif list_cost > cost:
-            bonificacion = list_cost - cost
-        else:
-            bonificacion = 0.0
+            return compensation
+        if list_cost > cost and cost > 0:
+            return list_cost - cost
+        return 0.0
+
+    if logistic_type == "home_delivery":
+        # Flex: ML descuenta el list_cost y compensa con la bonificación.
+        buyer_cost = cost
+        seller_cost = list_cost or base_cost or cost
+        bonificacion = derive_bonif()
     elif logistic_type in {"xd_drop_off", "drop_off", "cross_docking", "fulfillment"}:
         # Colecta / Full
         if cost > 0:
-            # Comprador paga; ML descuenta al vendedor el mismo monto.
             buyer_cost = cost
             seller_cost = cost
         else:
-            # Envío Gratis: vendedor paga con descuento.
             buyer_cost = 0.0
             if costs_sender_cost > 0:
                 seller_cost = costs_sender_cost
@@ -305,9 +305,10 @@ async def get_shipping_cost(client, shipping_id, headers) -> dict:
                     seller_cost = (list_cost or base_cost) * 0.5
         bonificacion = compensation
     else:
+        # logistic_type vacío o desconocido (común en ventas canceladas).
         buyer_cost = cost
         seller_cost = costs_sender_cost or base_cost
-        bonificacion = compensation
+        bonificacion = derive_bonif()
 
     return {
         "seller": round(seller_cost, 2),

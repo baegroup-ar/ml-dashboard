@@ -362,7 +362,7 @@
       const gc = isCancel ? '#a0524d' : (g >= 0 ? '#1a8a5a' : '#c0392b');
       const base = o.monto + (o.ingreso_envio || 0) + (o.bonificacion || 0);
       const pct = base > 0 ? ((g/base)*100).toFixed(1) : '0.0';
-      const cancelPill = isCancel ? `<span class="pill red" style="margin-left:6px;font-size:10px;">${o.estado === 'cancelled' ? 'Cancelada' : o.estado}</span>` : '';
+      const cancelPill = '';
       const commonCells = `
         <td style="text-align:center;">${units}</td>
         <td>${fmt(o.monto)}</td>
