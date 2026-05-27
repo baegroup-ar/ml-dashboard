@@ -27,7 +27,7 @@ ADMIN_PASSWORD = os.environ["ADMIN_PASSWORD"]
 ML_AUTH_URL = "https://auth.mercadolibre.com.ar/authorization"
 ML_TOKEN_URL = "https://api.mercadolibre.com/oauth/token"
 ML_API_URL = "https://api.mercadolibre.com"
-SHIPPING_LOGIC_VERSION = "v14-bonus-not-shipping"
+SHIPPING_LOGIC_VERSION = "v15-net-cost-envio-gratis"
 
 serializer = URLSafeTimedSerializer(SECRET_KEY)
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -629,27 +629,22 @@ async def get_shipping_cost(client, shipping_id, headers) -> dict:
             seller_cost = cost
             bonificacion = 0.0
         else:
+            # Envío Gratis: el Costo Envío que muestra ML es el monto NETO que
+            # le descuenta al vendedor (senders[0].cost en /shipments/{id}/costs),
+            # NO el gross_amount (precio de lista antes del descuento).
             buyer_cost = 0.0
-            seller_net_cost = costs_sender_cost
             if costs_sender_cost > 0:
-                seller_cost = gross_candidate(seller_net_cost, compensation or sender_discount)
+                seller_cost = costs_sender_cost
+            elif option_discount_amount > 0:
+                seller_cost = option_discount_amount
+            elif option_discount_rate:
+                seller_cost = list_cost * (1.0 - option_discount_rate)
             else:
-                if option_discount_amount > 0:
-                    seller_net_cost = max(gross_candidate(0, option_discount_amount) - option_discount_amount, 0)
-                    seller_cost = gross_candidate(seller_net_cost, option_discount_amount)
-                elif option_discount_rate:
-                    seller_net_cost = list_cost * (1.0 - option_discount_rate)
-                    seller_cost = list_cost
-                else:
-                    seller_net_cost = (list_cost or base_cost) * 0.5
-                    seller_cost = list_cost or base_cost or seller_net_cost
-            bonificacion = derive_bonif(seller_net_cost, seller_cost)
-            # Envío Gratis colecta: ML bonifica al vendedor el mismo monto del
-            # envío (lo que en el panel aparece como "Bonificación por envío").
-            # Si /costs no expuso compensation explícita, la inferimos del
-            # costo gross que aplica al envío.
-            if bonificacion == 0 and seller_cost > 0:
-                bonificacion = seller_cost
+                seller_cost = (list_cost or base_cost) * 0.5
+            # Bonificación: la que expone /costs si está; si no, asumimos que
+            # ML bonifica al vendedor el mismo monto que le cobra (envío
+            # gratis netea a $0 igual que en el panel de ML).
+            bonificacion = compensation if compensation > 0 else seller_cost
     else:
         # logistic_type vacío o desconocido (común en ventas canceladas).
         buyer_cost = buyer_cost_from_costs
@@ -784,11 +779,12 @@ async def api_orders(request: Request, account_id: int,
     if (datetime.strptime(dt, "%Y-%m-%d") - datetime.strptime(df, "%Y-%m-%d")).days > 365:
         df = str(datetime.strptime(dt, "%Y-%m-%d").date() - timedelta(days=365))
 
-    # Si el rango incluye HOY, los datos pueden cambiar con ventas nuevas:
-    # siempre vamos a ML y no servimos caché potencialmente incompleto.
-    includes_today = dt >= str(today)
+    # Siempre servimos el caché de Postgres si existe (lectura local <100ms).
+    # Sólo vamos contra la API de ML cuando se pide refresh explícito o no
+    # hay caché. El auto-refresh del modo Hoy ya manda refresh=1 cada 2 min,
+    # y el botón Actualizar también lo fuerza.
     cached_orders = db_fetch_order_snapshots(account_id, df, dt)
-    if cached_orders and not refresh and not includes_today:
+    if cached_orders and not refresh:
         return build_dashboard_payload(cached_orders, details_complete=True)
 
     token = await refresh_ml_token(account_id)
