@@ -411,51 +411,109 @@ async def api_orders(request: Request, account_id: int,
             db_save_shipping_costs(new_costs)
             cost_cache.update(new_costs)
 
-    orders = []
-    daily: dict = {}
-    products: dict = {}
     empty_ship = {"seller": 0.0, "buyer": 0.0}
+
+    # ── Paso 1: construir lista raw por orden individual ──────────
+    raw_list = []
     for o, sid in zip(all_results, all_sids):
-        a = o.get("total_amount", 0)
+        a = float(o.get("total_amount", 0))
         estado = o.get("status", "")
-        # Usar fecha de pago aprobado para mostrar; caer en date_created si no hay pago
         payments = o.get("payments", [])
         pay_str = ""
         if payments:
             pay_str = payments[0].get("date_approved", "") or payments[0].get("date_created", "")
         fecha, hora = to_ar(pay_str if pay_str else o.get("date_created", ""))
-        # Filtro client-side sobre fecha de pago: solo dentro del rango AR solicitado
         if fecha and not (df <= fecha <= dt):
             continue
-        comision = round(sum(item.get("sale_fee", 0) for item in o.get("order_items", [])), 2)
+        comision = round(sum(float(i.get("sale_fee", 0)) for i in o.get("order_items", [])), 2)
         ship_info = cost_cache.get(sid, empty_ship) if sid else empty_ship
-        envio = ship_info["seller"]
-        # buyer paga envío + cupón/bonificación que ML subsidia al vendedor
-        ingreso_envio = round(ship_info["buyer"] + float((o.get("coupon") or {}).get("amount", 0)), 2)
-        ganancia = round(a + ingreso_envio - comision - envio, 2)
-        orders.append({
+        items = []
+        for i in o.get("order_items", []):
+            sku = (i.get("item", {}).get("seller_sku") or "").strip()
+            qty = int(i.get("quantity", 1))
+            items.append({
+                "sku": sku,
+                "titulo": i.get("item", {}).get("title", "?"),
+                "monto": round(float(i.get("unit_price", 0)) * qty, 2),
+                "comision": round(float(i.get("sale_fee", 0)), 2),
+                "cantidad": qty,
+            })
+        raw_list.append({
             "id": o.get("id"),
-            "venta_id": o.get("pack_id") or o.get("id"),
+            "pack_id": o.get("pack_id"),
             "fecha": fecha,
             "hora": hora,
-            "producto": ", ".join(i.get("item", {}).get("title", "?") for i in o.get("order_items", [])),
             "monto": round(a, 2),
             "comision": comision,
-            "ingreso_envio": ingreso_envio,
-            "envio": envio,
-            "ganancia": ganancia,
+            "envio": ship_info["seller"],
+            "shipping_buyer": ship_info["buyer"],
+            "coupon_amt": round(float((o.get("coupon") or {}).get("amount", 0)), 2),
             "estado": estado,
+            "items": items,
         })
-        if fecha and estado == "paid":
-            daily.setdefault(fecha, {"ventas": 0, "ingresos": 0, "ganancia": 0})
-            daily[fecha]["ventas"] += 1
-            daily[fecha]["ingresos"] += a
-            daily[fecha]["ganancia"] += ganancia
-            for item in o.get("order_items", []):
-                t = item.get("item", {}).get("title", "Sin título")
+
+    # ── Paso 2: agrupar packs (mismo pack_id → un solo envío) ─────
+    orders = []
+    pack_map: dict = {}
+    for raw in raw_list:
+        pid = raw["pack_id"]
+        if pid:
+            if pid not in pack_map:
+                pack_map[pid] = {
+                    "id": pid, "venta_id": pid,
+                    "fecha": raw["fecha"], "hora": raw["hora"],
+                    "monto": 0.0, "comision": 0.0,
+                    "envio": raw["envio"],           # un envío por pack
+                    "shipping_buyer": raw["shipping_buyer"],
+                    "coupon_total": 0.0,
+                    "estado": raw["estado"],
+                    "is_pack": True, "items": [],
+                }
+            p = pack_map[pid]
+            p["monto"] = round(p["monto"] + raw["monto"], 2)
+            p["comision"] = round(p["comision"] + raw["comision"], 2)
+            p["coupon_total"] = round(p["coupon_total"] + raw["coupon_amt"], 2)
+            p["items"].extend(raw["items"])
+        else:
+            ingreso_envio = round(raw["shipping_buyer"] + raw["coupon_amt"], 2)
+            sku_col = " / ".join(i["sku"] or i["titulo"] for i in raw["items"])
+            orders.append({
+                "id": raw["id"], "venta_id": raw["id"],
+                "fecha": raw["fecha"], "hora": raw["hora"],
+                "producto": sku_col,
+                "monto": raw["monto"], "comision": raw["comision"],
+                "ingreso_envio": ingreso_envio, "envio": raw["envio"],
+                "ganancia": round(raw["monto"] + ingreso_envio - raw["comision"] - raw["envio"], 2),
+                "estado": raw["estado"],
+                "is_pack": False, "items": raw["items"],
+            })
+
+    for pid, p in pack_map.items():
+        ingreso_envio = round(p["shipping_buyer"] + p["coupon_total"], 2)
+        p["ingreso_envio"] = ingreso_envio
+        p["ganancia"] = round(p["monto"] + ingreso_envio - p["comision"] - p["envio"], 2)
+        p["producto"] = f"Paquete ({len(p['items'])} productos)"
+        del p["shipping_buyer"], p["coupon_total"]
+        orders.append(p)
+
+    orders.sort(key=lambda x: (x.get("fecha") or "", x.get("hora") or ""), reverse=True)
+
+    # ── Paso 3: agregados diarios y top productos ─────────────────
+    daily: dict = {}
+    products: dict = {}
+    for order in orders:
+        if order.get("fecha") and order.get("estado") == "paid":
+            f = order["fecha"]
+            daily.setdefault(f, {"ventas": 0, "ingresos": 0, "ganancia": 0})
+            daily[f]["ventas"] += 1
+            daily[f]["ingresos"] += order["monto"]
+            daily[f]["ganancia"] += order["ganancia"]
+            for item in order.get("items", []):
+                t = item.get("sku") or item.get("titulo", "Sin título")
                 products.setdefault(t, {"cantidad": 0, "ingresos": 0})
-                products[t]["cantidad"] += item.get("quantity", 1)
-                products[t]["ingresos"] += item.get("unit_price", 0) * item.get("quantity", 1)
+                products[t]["cantidad"] += item.get("cantidad", 1)
+                products[t]["ingresos"] += item.get("monto", 0)
+
     top = sorted(products.items(), key=lambda x: x[1]["ingresos"], reverse=True)[:5]
     return {
         "orders": orders,

@@ -345,25 +345,62 @@
     const totalPages = Math.ceil(orders.length / PAGE_SIZE);
     if(currentPage > totalPages) currentPage = totalPages;
     const slice = orders.slice((currentPage-1)*PAGE_SIZE, currentPage*PAGE_SIZE);
-    tbody.innerHTML = slice.map(o => {
+    const rows = [];
+    slice.forEach(o => {
       const g = o.ganancia || 0;
       const gc = g >= 0 ? '#1a8a5a' : '#c0392b';
       const base = o.monto + (o.ingreso_envio || 0);
       const pct = base > 0 ? ((g/base)*100).toFixed(1) : '0.0';
-      return `<tr data-id="${o.id}">
-        <td>${o.fecha}</td>
-        <td style="color:#888;">${o.hora||'—'}</td>
-        <td style="font-size:11px;color:#aaa;white-space:nowrap;">#${o.venta_id||o.id}</td>
-        <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${o.producto}">${o.producto}</td>
+      const commonCells = `
         <td>${fmt(o.monto)}</td>
         <td style="color:#c0392b;">${fmt(o.comision)}</td>
         <td style="color:#1a8a5a;">${fmt(o.ingreso_envio || 0)}</td>
         <td style="color:#c47a1e;">${fmt(o.envio)}</td>
         <td style="color:${gc};font-weight:500;">${fmt(g)}</td>
-        <td style="color:${gc};font-size:13px;font-weight:600;">${pct}%</td>
-      </tr>`;
-    }).join('');
+        <td style="color:${gc};font-size:13px;font-weight:600;">${pct}%</td>`;
+      if(o.is_pack) {
+        rows.push(`<tr data-id="${o.id}" style="background:#fafaf8;">
+          <td>${o.fecha}</td>
+          <td style="color:#888;">${o.hora||'—'}</td>
+          <td style="font-size:11px;color:#aaa;white-space:nowrap;">#${o.venta_id||o.id}</td>
+          <td>
+            <button id="btn-pack-${o.id}" onclick="togglePack('${o.id}')" style="background:none;border:none;cursor:pointer;font-size:11px;color:#3483FA;padding:0 4px 0 0;line-height:1;">▶</button>
+            <span style="font-weight:500;">Paquete (${o.items.length} productos)</span>
+          </td>
+          ${commonCells}
+        </tr>`);
+        o.items.forEach(item => {
+          const label = item.sku ? `<b style="color:#333;">${item.sku}</b> — ${item.titulo}` : item.titulo;
+          const qty = item.cantidad > 1 ? ` <span style="color:#aaa;font-size:11px;">x${item.cantidad}</span>` : '';
+          rows.push(`<tr class="pack-items-${o.id}" style="display:none;background:#f5f5f3;">
+            <td colspan="3" style="border-bottom:1px solid #f0f0ee;"></td>
+            <td style="padding-left:2rem;font-size:12px;color:#555;">${label}${qty}</td>
+            <td style="font-size:12px;">${fmt(item.monto)}</td>
+            <td style="font-size:12px;color:#c0392b;">${fmt(item.comision)}</td>
+            <td colspan="4"></td>
+          </tr>`);
+        });
+      } else {
+        const prod = o.producto || '';
+        rows.push(`<tr data-id="${o.id}">
+          <td>${o.fecha}</td>
+          <td style="color:#888;">${o.hora||'—'}</td>
+          <td style="font-size:11px;color:#aaa;white-space:nowrap;">#${o.venta_id||o.id}</td>
+          <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${prod}">${prod}</td>
+          ${commonCells}
+        </tr>`);
+      }
+    });
+    tbody.innerHTML = rows.join('');
     renderPagination(orders.length, totalPages);
+  }
+
+  function togglePack(id) {
+    const rows = document.querySelectorAll(`.pack-items-${id}`);
+    const btn = document.getElementById(`btn-pack-${id}`);
+    const open = rows[0]?.style.display !== 'none';
+    rows.forEach(r => r.style.display = open ? 'none' : '');
+    if(btn) btn.textContent = open ? '▶' : '▼';
   }
 
   function renderPagination(total, totalPages) {
