@@ -409,7 +409,8 @@ async def api_orders(request: Request, account_id: int,
         comision = round(sum(item.get("sale_fee", 0) for item in o.get("order_items", [])), 2)
         ship_info = cost_cache.get(sid, empty_ship) if sid else empty_ship
         envio = ship_info["seller"]
-        ingreso_envio = ship_info["buyer"]
+        # buyer paga envío + cupón/bonificación que ML subsidia al vendedor
+        ingreso_envio = round(ship_info["buyer"] + float((o.get("coupon") or {}).get("amount", 0)), 2)
         ganancia = round(a + ingreso_envio - comision - envio, 2)
         orders.append({
             "id": o.get("id"),
