@@ -60,12 +60,17 @@ def init_db():
             CREATE TABLE IF NOT EXISTS shipment_cost_cache (
                 shipping_id BIGINT PRIMARY KEY,
                 cost NUMERIC(10,2) NOT NULL,
-                buyer_cost NUMERIC(10,2) NOT NULL DEFAULT 0,
+                buyer_cost NUMERIC(10,2) DEFAULT NULL,
                 cached_at TIMESTAMP DEFAULT NOW()
             )
         """))
+        # Migraciones para bases existentes
         conn.execute(text("""
-            ALTER TABLE shipment_cost_cache ADD COLUMN IF NOT EXISTS buyer_cost NUMERIC(10,2) NOT NULL DEFAULT 0
+            ALTER TABLE shipment_cost_cache ADD COLUMN IF NOT EXISTS buyer_cost NUMERIC(10,2) DEFAULT NULL
+        """))
+        # Registros viejos tienen buyer_cost=0 por DEFAULT; marcarlos NULL para que se re-fetcheen
+        conn.execute(text("""
+            UPDATE shipment_cost_cache SET buyer_cost = NULL WHERE buyer_cost = 0
         """))
         existing = conn.execute(text("SELECT id FROM users WHERE email=:e"), {"e": ADMIN_EMAIL}).fetchone()
         if not existing:
@@ -158,7 +163,10 @@ def db_get_cached_shipping(shipping_ids: list) -> dict:
             f"SELECT shipping_id, cost, buyer_cost FROM shipment_cost_cache WHERE shipping_id IN ({placeholders})",
             params,
         )
-        result.update({row["shipping_id"]: {"seller": float(row["cost"]), "buyer": float(row["buyer_cost"])} for row in rows})
+        for row in rows:
+            # Solo se considera "en cache" si ya tiene buyer_cost (no NULL)
+            if row["buyer_cost"] is not None:
+                result[row["shipping_id"]] = {"seller": float(row["cost"]), "buyer": float(row["buyer_cost"])}
     return result
 
 
@@ -168,7 +176,7 @@ def db_save_shipping_costs(costs: dict):
         buyer = c["buyer"] if isinstance(c, dict) else 0.0
         db_execute(
             "INSERT INTO shipment_cost_cache (shipping_id, cost, buyer_cost) VALUES (:sid, :cost, :buyer_cost)"
-            " ON CONFLICT (shipping_id) DO NOTHING",
+            " ON CONFLICT (shipping_id) DO UPDATE SET buyer_cost = EXCLUDED.buyer_cost",
             {"sid": sid, "cost": seller, "buyer_cost": buyer},
         )
 
@@ -401,6 +409,7 @@ async def api_orders(request: Request, account_id: int,
         ganancia = round(a + ingreso_envio - comision - envio, 2)
         orders.append({
             "id": o.get("id"),
+            "venta_id": o.get("pack_id") or o.get("id"),
             "fecha": fecha,
             "hora": hora,
             "producto": ", ".join(i.get("item", {}).get("title", "?") for i in o.get("order_items", [])),

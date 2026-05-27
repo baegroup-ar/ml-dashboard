@@ -165,6 +165,7 @@
           <tbody id="orders-tbody"></tbody>
         </table>
       </div>
+      <div id="pagination"></div>
     </div>
     <p class="last-update" id="update-footer"></p>
   </div>
@@ -184,6 +185,8 @@
   let currentAccountId = document.getElementById('account-select')?.value;
   let autoRefresh = null;
   let ordersCache = [];
+  let currentPage = 1;
+  const PAGE_SIZE = 25;
 
   // Fecha en timezone Argentina (UTC-3)
   function todayStr() { return new Intl.DateTimeFormat('sv', {timeZone:'America/Argentina/Buenos_Aires'}).format(new Date()); }
@@ -291,6 +294,7 @@
       document.getElementById(`lb-${id}`).style.display='none';
     });
 
+    currentPage = 1;
     renderCharts(data);
     renderOrders(data.orders);
     document.getElementById('orders-count').textContent = `${data.orders.length} ventas`;
@@ -333,8 +337,15 @@
 
   function renderOrders(orders) {
     const tbody = document.getElementById('orders-tbody');
-    if(!orders.length){ tbody.innerHTML='<tr><td colspan="10" style="text-align:center;color:#aaa;padding:2rem;">Sin ventas en este período.</td></tr>'; return; }
-    tbody.innerHTML = orders.map(o => {
+    if(!orders.length){
+      tbody.innerHTML='<tr><td colspan="10" style="text-align:center;color:#aaa;padding:2rem;">Sin ventas en este período.</td></tr>';
+      document.getElementById('pagination').innerHTML='';
+      return;
+    }
+    const totalPages = Math.ceil(orders.length / PAGE_SIZE);
+    if(currentPage > totalPages) currentPage = totalPages;
+    const slice = orders.slice((currentPage-1)*PAGE_SIZE, currentPage*PAGE_SIZE);
+    tbody.innerHTML = slice.map(o => {
       const g = o.ganancia || 0;
       const gc = g >= 0 ? '#1a8a5a' : '#c0392b';
       const base = o.monto + (o.ingreso_envio || 0);
@@ -342,7 +353,7 @@
       return `<tr data-id="${o.id}">
         <td>${o.fecha}</td>
         <td style="color:#888;">${o.hora||'—'}</td>
-        <td style="font-size:11px;color:#aaa;white-space:nowrap;">#${o.id}</td>
+        <td style="font-size:11px;color:#aaa;white-space:nowrap;">#${o.venta_id||o.id}</td>
         <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${o.producto}">${o.producto}</td>
         <td>${fmt(o.monto)}</td>
         <td style="color:#c0392b;">${fmt(o.comision)}</td>
@@ -352,6 +363,27 @@
         <td style="color:${gc};font-size:13px;font-weight:600;">${pct}%</td>
       </tr>`;
     }).join('');
+    renderPagination(orders.length, totalPages);
+  }
+
+  function renderPagination(total, totalPages) {
+    const pg = document.getElementById('pagination');
+    if(totalPages <= 1){ pg.innerHTML=''; return; }
+    const from = (currentPage-1)*PAGE_SIZE + 1;
+    const to = Math.min(currentPage*PAGE_SIZE, total);
+    pg.innerHTML = `
+      <div style="display:flex;align-items:center;gap:8px;justify-content:flex-end;padding:12px 14px;border-top:1px solid #f0f0ee;font-size:13px;color:#555;">
+        <span style="color:#aaa;margin-right:4px;">${from}–${to} de ${total}</span>
+        <button onclick="goPage(${currentPage-1})" ${currentPage===1?'disabled':''} style="padding:5px 12px;border:1px solid #ddd;border-radius:8px;background:#fff;cursor:pointer;font-size:13px;color:${currentPage===1?'#ccc':'#333'};">← Anterior</button>
+        <span style="padding:5px 10px;font-weight:500;">Página ${currentPage} de ${totalPages}</span>
+        <button onclick="goPage(${currentPage+1})" ${currentPage===totalPages?'disabled':''} style="padding:5px 12px;border:1px solid #ddd;border-radius:8px;background:#fff;cursor:pointer;font-size:13px;color:${currentPage===totalPages?'#ccc':'#333'};">Siguiente →</button>
+      </div>`;
+  }
+
+  function goPage(p) {
+    currentPage = p;
+    renderOrders(ordersCache);
+    document.getElementById('orders-tbody').closest('.table-card').scrollIntoView({behavior:'smooth', block:'start'});
   }
 
   // Init
