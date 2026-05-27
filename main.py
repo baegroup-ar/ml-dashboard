@@ -68,6 +68,10 @@ def init_db():
         conn.execute(text("""
             ALTER TABLE shipment_cost_cache ADD COLUMN IF NOT EXISTS buyer_cost NUMERIC(10,2) DEFAULT NULL
         """))
+        # Quitar NOT NULL si quedó de deploy anterior (necesario para poder setear NULL)
+        conn.execute(text("""
+            ALTER TABLE shipment_cost_cache ALTER COLUMN buyer_cost DROP NOT NULL
+        """))
         # Registros viejos tienen buyer_cost=0 por DEFAULT; marcarlos NULL para que se re-fetcheen
         conn.execute(text("""
             UPDATE shipment_cost_cache SET buyer_cost = NULL WHERE buyer_cost = 0
