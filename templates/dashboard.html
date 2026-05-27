@@ -112,7 +112,7 @@
     <button class="period-btn" onclick="setPeriod('today',this)">Hoy</button>
     <button class="period-btn" onclick="setPeriod('yesterday',this)">Ayer</button>
     <button class="period-btn" onclick="setPeriod('7d',this)">7 días</button>
-    <button class="period-btn active" onclick="setPeriod('30d',this)">30 días</button>
+    <button class="period-btn" onclick="setPeriod('30d',this)">30 días</button>
     <button class="period-btn" onclick="setPeriod('90d',this)">90 días</button>
     <button class="period-btn" onclick="setPeriod('365d',this)">1 año</button>
     <span style="color:#ddd;">|</span>
@@ -132,6 +132,7 @@
   <div id="content" style="display:none;">
     <div class="cards-grid">
       <div class="metric-card"><div class="label">Ventas pagadas</div><div class="value" id="m-ventas">—</div></div>
+      <div class="metric-card"><div class="label">Unidades vendidas</div><div class="value" id="m-unidades">—</div></div>
       <div class="metric-card"><div class="label">Ingresos brutos</div><div class="value" id="m-bruto">—</div></div>
       <div class="metric-card" id="card-comisiones">
         <div class="label">Comisiones ML</div>
@@ -253,7 +254,6 @@
       const r = await fetch(`/api/orders/${currentAccountId}?${params}`);
       if(!r.ok) throw new Error('Error al obtener ventas.');
       const data = await r.json();
-      ordersCache = data.orders;
       renderBasic(data);
       document.getElementById('page-loading').style.display='none';
       document.getElementById('content').style.display='block';
@@ -276,8 +276,10 @@
     const envios = paidOrders.reduce((s, o) => s + (o.envio || 0), 0);
     const ingresos_total = ingresos + ingresos_envio;
     const neta = ingresos_total - comisiones - envios;
+    const unidades = paidOrders.reduce((s, o) => s + (o.items||[]).reduce((si, i) => si + (i.cantidad||1), 0), 0);
 
     document.getElementById('m-ventas').textContent = paidOrders.length;
+    document.getElementById('m-unidades').textContent = unidades;
     document.getElementById('m-bruto').textContent = fmt(ingresos);
 
     const pctCom = ingresos_total > 0 ? (comisiones/ingresos_total*100).toFixed(1) : '0.0';
@@ -295,9 +297,10 @@
     });
 
     currentPage = 1;
+    ordersCache = paidOrders;
     renderCharts(data);
-    renderOrders(data.orders);
-    document.getElementById('orders-count').textContent = `${data.orders.length} ventas`;
+    renderOrders(paidOrders);
+    document.getElementById('orders-count').textContent = `${paidOrders.length} ventas`;
     const ts = new Date().toLocaleString('es-AR',{dateStyle:'short',timeStyle:'short'});
     document.getElementById('update-footer').textContent = `Última actualización completa: ${ts}`;
   }
@@ -425,10 +428,7 @@
 
   // Init
   if(currentAccountId) {
-    const today = todayStr();
-    document.getElementById('date-from').value = addDays(today,-29);
-    document.getElementById('date-to').value = today;
-    loadData();
+    setPeriod('today', document.querySelector('[onclick*="today"]'));
   }
 </script>
 </body>
