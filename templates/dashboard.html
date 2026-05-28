@@ -135,6 +135,8 @@
       <div class="metric-card"><div class="label">Ventas pagadas</div><div class="value" id="m-ventas">—</div></div>
       <div class="metric-card"><div class="label">Unidades vendidas</div><div class="value" id="m-unidades">—</div></div>
       <div class="metric-card"><div class="label">Ingresos brutos</div><div class="value" id="m-bruto">—</div></div>
+      <div class="metric-card"><div class="label">Ingresos por envío</div><div class="value green" id="m-ing-envio">—</div></div>
+      <div class="metric-card"><div class="label">Bonificaciones</div><div class="value green" id="m-bonif">—</div></div>
       <div class="metric-card" id="card-comisiones">
         <div class="label">Comisiones ML</div>
         <div class="value red" id="m-comisiones">—</div>
@@ -300,11 +302,15 @@
     document.getElementById('m-ventas').textContent = paidOrders.length;
     document.getElementById('m-unidades').textContent = unidades;
     document.getElementById('m-bruto').textContent = fmt(ingresos);
+    document.getElementById('m-ing-envio').textContent = fmt(ingresos_envio);
+    document.getElementById('m-bonif').textContent = fmt(bonificaciones);
 
-    const pctCom = ingresos_total > 0 ? (comisiones/ingresos_total*100).toFixed(1) : '0.0';
-    const pctEnv = ingresos_total > 0 ? (envios/ingresos_total*100).toFixed(1) : '0.0';
-    const pctCmv = ingresos_total > 0 ? (cmv_total/ingresos_total*100).toFixed(1) : '0.0';
-    const pctNet = ingresos_total > 0 ? (neta/ingresos_total*100).toFixed(1) : '0.0';
+    // Porcentajes calculados sobre el monto (ingreso bruto), alineado con
+    // el criterio de la columna Margen de la tabla (ganancia / monto).
+    const pctCom = ingresos > 0 ? (comisiones/ingresos*100).toFixed(1) : '0.0';
+    const pctEnv = ingresos > 0 ? (envios/ingresos*100).toFixed(1) : '0.0';
+    const pctCmv = ingresos > 0 ? (cmv_total/ingresos*100).toFixed(1) : '0.0';
+    const pctNet = ingresos > 0 ? (neta/ingresos*100).toFixed(1) : '0.0';
     if(!loadingDetails) {
       document.getElementById('m-comisiones').innerHTML = `${fmt(comisiones)} <span style="font-size:11px;font-weight:400;">(${pctCom}%)</span>`;
       document.getElementById('m-comisiones').className = 'value red';
@@ -355,8 +361,8 @@
       const units = (o.items||[]).reduce((s,i)=>s+(i.cantidad||1), 0);
       const g = o.ganancia || 0;
       const gc = isCancel ? '#a0524d' : (g >= 0 ? '#1a8a5a' : '#c0392b');
-      const base = o.monto + (o.ingreso_envio || 0) + (o.bonificacion || 0);
-      const pct = base > 0 ? ((g/base)*100).toFixed(1) : '0.0';
+      // Margen = ganancia / monto
+      const pct = o.monto > 0 ? ((g/o.monto)*100).toFixed(1) : '0.0';
       const cancelPill = '';
       const commonCells = `
         <td style="text-align:center;">${units}</td>
