@@ -5,7 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Panel ML</title>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: 'Inter', sans-serif; background: #f5f5f3; color: #111; }
@@ -151,10 +150,6 @@
       </div>
     </div>
 
-    <div class="charts-row">
-      <div class="chart-card"><h3>Ingresos diarios</h3><div class="chart-wrap"><canvas id="chart-ingresos"></canvas></div></div>
-      <div class="chart-card"><h3>Top 5 productos</h3><div class="chart-wrap"><canvas id="chart-productos"></canvas></div></div>
-    </div>
     <div class="table-card">
       <div class="table-header">
         <h3>Ventas del período</h3>
@@ -182,13 +177,14 @@
 
 <script>
   const fmt = n => n == null ? '...' : '$' + Number(n).toLocaleString('es-AR', {minimumFractionDigits:2, maximumFractionDigits:2});
-  let chartIngresos = null, chartProductos = null;
   let currentAccountId = document.getElementById('account-select')?.value;
   let autoRefresh = null;
   let ordersCache = [];
   let currentPage = 1;
-  const PAGE_SIZE = 25;
+  const PAGE_SIZE = 50;
   let loadSeq = 0;
+  // Períodos que ya se refrescaron contra ML en esta sesión.
+  const refreshedRanges = new Set();
 
   // Fecha en timezone Argentina (UTC-3)
   function todayStr() { return new Intl.DateTimeFormat('sv', {timeZone:'America/Argentina/Buenos_Aires'}).format(new Date()); }
@@ -209,7 +205,12 @@
     else if(p==='30d'){ df.value=addDays(today,-29); dt.value=today; lb.style.display='none'; stopAutoRefresh(); }
     else if(p==='90d'){ df.value=addDays(today,-89); dt.value=today; lb.style.display='none'; stopAutoRefresh(); }
     else if(p==='365d'){ df.value=addDays(today,-364); dt.value=today; lb.style.display='none'; stopAutoRefresh(); }
-    loadData();
+    // Primera vez que se selecciona este rango en la sesión: refrescar
+    // contra ML para asegurar que el caché está completo.
+    const key = `${df.value}|${dt.value}`;
+    const firstTime = !refreshedRanges.has(key);
+    refreshedRanges.add(key);
+    loadData(firstTime);
   }
 
   function onDateChange() {
@@ -217,7 +218,12 @@
     document.getElementById('live-badge').style.display='none';
     stopAutoRefresh();
     document.getElementById('period-title').textContent = 'Período personalizado';
-    loadData();
+    const df = document.getElementById('date-from').value;
+    const dt = document.getElementById('date-to').value;
+    const key = `${df}|${dt}`;
+    const firstTime = !refreshedRanges.has(key);
+    refreshedRanges.add(key);
+    loadData(firstTime);
   }
 
   function startAutoRefresh(ms) { stopAutoRefresh(); autoRefresh = setInterval(() => loadData(true), ms); }
@@ -306,7 +312,6 @@
 
     currentPage = 1;
     ordersCache = data.orders;
-    renderCharts(data);
     renderOrders(data.orders);
     const total = data.orders.length;
     const canceladas = total - paidOrders.length;
@@ -321,39 +326,6 @@
       document.getElementById('update-footer').style.color = '#aaa';
       document.getElementById('update-footer').textContent = `Última actualización completa: ${ts}`;
     }
-  }
-
-  function renderCharts(data) {
-    const daily = data.daily;
-    const keys = Object.keys(daily);
-    const labels = keys.map(d => { const [,m,day]=d.split('-'); return `${day}/${m}`; });
-    if(chartIngresos) chartIngresos.destroy();
-    chartIngresos = new Chart(document.getElementById('chart-ingresos'), {
-      type: 'bar',
-      data: { labels, datasets: [
-        { label:'Ingresos', data:keys.map(k=>daily[k].ingresos), backgroundColor:'#B5D4F4', borderRadius:5 },
-        { label:'Ganancia aprox.', data:keys.map(k=>daily[k].ganancia), backgroundColor:'#9FE1CB', borderRadius:5 },
-      ]},
-      options: { responsive:true, maintainAspectRatio:false,
-        plugins:{ legend:{ labels:{ font:{family:'Inter',size:12}, boxWidth:12 } } },
-        scales: {
-          x:{ grid:{display:false}, ticks:{font:{family:'Inter',size:11}, maxTicksLimit:15} },
-          y:{ ticks:{font:{family:'Inter',size:11}, callback:v=>'$'+v.toLocaleString('es-AR')} }
-        }
-      }
-    });
-    const products = data.top_products;
-    if(chartProductos) chartProductos.destroy();
-    chartProductos = new Chart(document.getElementById('chart-productos'), {
-      type:'doughnut',
-      data:{
-        labels:products.map(p=>p.nombre.length>22?p.nombre.slice(0,22)+'…':p.nombre),
-        datasets:[{data:products.map(p=>p.ingresos), backgroundColor:['#378ADD','#1D9E75','#EF9F27','#D4537E','#7F77DD'], borderWidth:0}]
-      },
-      options:{responsive:true, maintainAspectRatio:false,
-        plugins:{legend:{position:'bottom', labels:{font:{family:'Inter',size:11}, boxWidth:12, padding:8}}}
-      }
-    });
   }
 
   function renderOrders(orders) {
