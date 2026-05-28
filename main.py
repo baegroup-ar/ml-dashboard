@@ -27,7 +27,7 @@ ADMIN_PASSWORD = os.environ["ADMIN_PASSWORD"]
 ML_AUTH_URL = "https://auth.mercadolibre.com.ar/authorization"
 ML_TOKEN_URL = "https://api.mercadolibre.com/oauth/token"
 ML_API_URL = "https://api.mercadolibre.com"
-SHIPPING_LOGIC_VERSION = "v21-flex-tariff-match"
+SHIPPING_LOGIC_VERSION = "v22-no-fake-bonif-sku-fallback"
 
 serializer = URLSafeTimedSerializer(SECRET_KEY)
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -701,32 +701,30 @@ async def get_shipping_cost(client, shipping_id, headers) -> dict:
                 seller_cost = cost
             bonificacion = compensation
         else:
-            # Envío Gratis: el Costo Envío que muestra ML es el monto NETO que
-            # le descuenta al vendedor (senders[0].cost en /shipments/{id}/costs),
-            # NO el gross_amount (precio de lista antes del descuento).
+            # Envío Gratis: el comprador paga 0. Confiamos en lo que devuelve
+            # /costs — NO inferimos bonificaciones cuando la API no las expone.
+            #   - senders[0].cost > 0 → ese es el cargo real al vendedor.
+            #   - compensation/discounts > 0 → bonificación explícita de ML.
+            # Ej. #2000013189550281 (Bonif $6.490) → la API expone discount/compensation.
+            # Ej. #2000013213985241 (Envíos -$10.760, sin bonif) → la API expone sólo sender.cost.
+            # No "neteamos" automáticamente: el panel de ML muestra distinta
+            # info según el caso y replicamos eso.
             buyer_cost = 0.0
-            if costs_sender_cost > 0:
-                seller_cost = costs_sender_cost
-            elif option_discount_amount > 0:
-                seller_cost = option_discount_amount
-            elif option_discount_rate:
-                seller_cost = list_cost * (1.0 - option_discount_rate)
-            else:
-                seller_cost = (list_cost or base_cost) * 0.5
-            # Bonificación: la que expone /costs si está; si no, asumimos que
-            # ML bonifica al vendedor el mismo monto que le cobra (envío
-            # gratis netea a $0 igual que en el panel de ML).
-            bonificacion = compensation if compensation > 0 else seller_cost
+            seller_cost = costs_sender_cost
+            bonificacion = max(compensation, sender_discount, option_discount_amount)
+            # Si /costs no devolvió data útil (sender=0 y sin bonif), aplicar
+            # el fallback Argentina (50% del list_cost) sólo como aproximación.
+            if seller_cost == 0 and bonificacion == 0:
+                if option_discount_rate and list_cost > 0:
+                    seller_cost = list_cost * (1.0 - option_discount_rate)
+                elif list_cost > 0 or base_cost > 0:
+                    seller_cost = (list_cost or base_cost) * 0.5
     else:
         # logistic_type vacío o desconocido (común en ventas canceladas).
+        # Confiamos en lo que devuelve /costs sin inferir bonificaciones.
         buyer_cost = buyer_cost_from_costs
-        seller_net_cost = costs_sender_cost or base_cost or list_cost or cost
-        seller_cost = gross_candidate(seller_net_cost, compensation or sender_discount)
-        bonificacion = derive_bonif(seller_net_cost, seller_cost)
-        # Envío gratis sin tipo identificado: tratar como colecta envío gratis
-        # y reflejar la bonificación equivalente al costo de envío.
-        if bonificacion == 0 and buyer_cost == 0 and seller_cost > 0:
-            bonificacion = seller_cost
+        seller_cost = costs_sender_cost or base_cost or list_cost or cost
+        bonificacion = max(compensation, sender_discount, option_discount_amount)
 
     return {
         "seller": round(seller_cost, 2),
@@ -858,11 +856,38 @@ def db_get_product_costs(account_id: int) -> dict:
     return out
 
 
+import re as _re_costs
+_CUOTA_SUFFIX_RE = _re_costs.compile(r"^(\d+C|CE|SI|SIN|\d+CE)$")
+
+
+def _sku_fallbacks(sku: str):
+    """Genera variantes del SKU stripeando sufijos típicos de cuotas
+    (-3C, -6C, -12C, -CE, -SI, etc.) un segmento a la vez. Permite que
+    SOP78-446-3C herede el costo de SOP78-446 si el primero no está cargado.
+    """
+    parts = sku.split("-")
+    yielded = set()
+    while len(parts) > 1 and _CUOTA_SUFFIX_RE.match(parts[-1]):
+        parts = parts[:-1]
+        candidate = "-".join(parts)
+        if candidate not in yielded:
+            yielded.add(candidate)
+            yield candidate
+
+
 def find_cost_for_date(versioned: dict, sku: str, sale_date: str) -> dict:
-    """Devuelve la entry de costo más reciente con valid_from <= sale_date."""
+    """Devuelve la entry de costo más reciente con valid_from <= sale_date.
+    Si el SKU exacto no está cargado, intenta con SKUs base (stripeando
+    sufijos como -3C, -CE) — útil para variantes por cuotas."""
     if not sku or not sale_date:
         return None
-    entries = versioned.get(sku.strip().upper())
+    sku_norm = sku.strip().upper()
+    entries = versioned.get(sku_norm)
+    if not entries:
+        for fallback in _sku_fallbacks(sku_norm):
+            entries = versioned.get(fallback)
+            if entries:
+                break
     if not entries:
         return None
     selected = None
@@ -1952,17 +1977,12 @@ async def api_orders(request: Request, account_id: int,
                 envio = 0.0
         if billing.get("has_comision"):
             comision = billing.get("comision", comision)
-        # Fallback envío gratis: cuando el comprador no pagó envío y nos quedó
-        # un costo de envío sin bonificación identificada, ML bonifica al
-        # vendedor el mismo monto (ej. #2000013189550281 → Bonif = $6.490).
-        if ingreso_envio == 0 and envio > 0 and bonificacion == 0:
-            bonificacion = envio
         # Override Flex: si la venta es Flex y tenemos tarifa propia cargada
         # que matchea con la tarifa ML del shipment, usamos la tarifa propia
         # como Costo Envío (lo que el vendedor le paga a su mensajería).
         logistic_type = ship_info.get("logistic_type", "") if isinstance(ship_info, dict) else ""
         list_cost = ship_info.get("list_cost", 0) if isinstance(ship_info, dict) else 0
-        if logistic_type == "home_delivery" and list_cost > 0 and flex_tariffs:
+        if logistic_type in {"home_delivery", "self_service"} and list_cost > 0 and flex_tariffs:
             matched = match_flex_tariff(flex_tariffs, list_cost, fecha)
             if matched:
                 envio = flex_cost_with_iva(matched)
