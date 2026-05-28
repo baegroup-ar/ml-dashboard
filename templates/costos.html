@@ -72,11 +72,10 @@
 <main>
   <h1>Costos de mercadería (CMV)</h1>
   <p class="lead">
-    Cargá el costo de cada SKU con la <b>fecha desde la cual aplica</b>. Cada venta toma
-    el costo vigente al momento de la venta (la entry más reciente con fecha ≤ fecha de la venta),
-    así se respeta el costo histórico ponderado.
-    Si el costo es <b>sin IVA</b>, el sistema le aplica 21% automáticamente para compararlo con
-    Monto/Comisión/Envío que vienen con IVA incluido.
+    Cargá el costo de cada SKU <b>sin IVA</b>, con la <b>fecha de vigencia</b> y la <b>tasa de IVA</b> que
+    le corresponde (21%, 10.5%, 0 si está exento, etc.). Cada venta toma el costo vigente al momento
+    de la venta y el sistema aplica la tasa automáticamente para que sea comparable con
+    monto/comisión/envío de ML, que vienen con IVA incluido.
   </p>
 
   {% if accounts %}
@@ -99,10 +98,10 @@
       <button onclick="uploadFile()" id="btn-upload">Subir archivo</button>
     </div>
     <div class="help-box">
-      Columnas esperadas: <code>SKU</code>, <code>Costo</code>, opcionalmente <code>Fecha</code>
-      (vigencia desde, formato <code>YYYY-MM-DD</code> o <code>DD/MM/YYYY</code>; si falta, hoy)
-      y <code>IVA</code> (<code>Sí</code>/<code>No</code> — si el costo ya incluye IVA; por defecto <b>sin IVA</b>).
-      Cada combinación SKU+Fecha es una versión histórica de costo.
+      Columnas esperadas: <code>SKU</code>, <code>Costo</code> (sin IVA), opcionalmente
+      <code>Fecha</code> (vigencia desde, <code>YYYY-MM-DD</code> o <code>DD/MM/YYYY</code>; si falta, hoy)
+      y <code>IVA</code> (tasa: <code>21</code>, <code>10.5</code>, <code>0</code> o <code>Exento</code>;
+      default <b>21%</b>). Cada combinación SKU+Fecha es una versión histórica.
     </div>
     <div id="upload-msg"></div>
   </div>
@@ -111,15 +110,13 @@
     <h3>Agregar / actualizar manualmente</h3>
     <div class="add-row">
       <input type="text" id="manual-sku" class="sku" placeholder="SKU (ej. SOP68-443)" />
-      <input type="number" id="manual-cost" class="cost" placeholder="Costo" step="0.01" min="0" />
+      <input type="number" id="manual-cost" class="cost" placeholder="Costo sin IVA" step="0.01" min="0" />
       <input type="date" id="manual-fecha" title="Vigente desde" />
-      <label style="font-size:12px;color:#555;display:flex;align-items:center;gap:4px;">
-        <input type="checkbox" id="manual-iva" /> Costo con IVA
-      </label>
+      <input type="number" id="manual-iva" class="cost" placeholder="IVA %" step="0.5" min="0" max="100" value="21" title="Tasa de IVA (21, 10.5, 0 = exento)" />
       <button onclick="addCost()">Guardar</button>
     </div>
     <div style="font-size:11px;color:#888;margin-top:6px;">
-      Si dejás la fecha vacía toma hoy. Si el costo no tiene IVA, dejá el checkbox sin marcar.
+      Si dejás la fecha vacía toma hoy. Tasa por defecto 21%, escribí <code>10.5</code> o <code>0</code> según corresponda.
     </div>
     <div id="add-msg"></div>
   </div>
@@ -132,10 +129,10 @@
     <div style="overflow-x:auto;">
       <table>
         <thead><tr>
-          <th>SKU</th><th>Costo</th><th>IVA</th><th>Vigente desde</th><th>Actualizado</th><th class="actions">Acciones</th>
+          <th>SKU</th><th>Costo sin IVA</th><th>IVA</th><th>Costo con IVA</th><th>Vigente desde</th><th>Actualizado</th><th class="actions">Acciones</th>
         </tr></thead>
         <tbody id="costs-tbody">
-          <tr><td colspan="6" class="empty">Cargando...</td></tr>
+          <tr><td colspan="7" class="empty">Cargando...</td></tr>
         </tbody>
       </table>
     </div>
@@ -161,7 +158,7 @@
   async function loadCosts() {
     if(!currentAccountId) return;
     const tbody = document.getElementById('costs-tbody');
-    tbody.innerHTML = '<tr><td colspan="6" class="empty">Cargando...</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" class="empty">Cargando...</td></tr>';
     try {
       const r = await fetch(`/api/costos/${currentAccountId}`);
       if(!r.ok) throw new Error('Error al cargar');
@@ -169,7 +166,7 @@
       allItems = data.items || [];
       renderTable();
     } catch(e) {
-      tbody.innerHTML = `<tr><td colspan="6" class="empty">Error: ${e.message}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="7" class="empty">Error: ${e.message}</td></tr>`;
     }
   }
 
@@ -183,19 +180,25 @@
     document.getElementById('count-label').textContent =
       `${uniqueSkus} SKU${uniqueSkus===1?'':'s'} · ${allItems.length} entrada${allItems.length===1?'':'s'}`;
     if(!items.length) {
-      tbody.innerHTML = `<tr><td colspan="6" class="empty">${filter ? 'Sin resultados.' : 'Todavía no hay costos cargados.'}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="7" class="empty">${filter ? 'Sin resultados.' : 'Todavía no hay costos cargados.'}</td></tr>`;
       return;
     }
-    tbody.innerHTML = items.map(it => `
-      <tr>
-        <td><b>${it.sku}</b></td>
-        <td>${fmt(it.cost)}</td>
-        <td style="font-size:12px;color:${it.iva_included ? '#1a8a5a' : '#c47a1e'};">${it.iva_included ? 'Con IVA' : 'Sin IVA (+21%)'}</td>
-        <td style="font-size:12px;">${it.valid_from || '—'}</td>
-        <td style="color:#888;font-size:12px;">${it.updated_at ? new Date(it.updated_at + 'Z').toLocaleString('es-AR', {dateStyle:'short', timeStyle:'short'}) : ''}</td>
-        <td class="actions"><button class="btn-delete" onclick="deleteCost('${it.sku.replace(/'/g, "\\'")}', '${it.valid_from}')">Eliminar</button></td>
-      </tr>
-    `).join('');
+    tbody.innerHTML = items.map(it => {
+      const rate = Number(it.iva_rate || 0);
+      const costoConIva = it.cost * (1 + rate / 100);
+      const ivaLabel = rate === 0 ? 'Exento' : `${rate}%`;
+      return `
+        <tr>
+          <td><b>${it.sku}</b></td>
+          <td>${fmt(it.cost)}</td>
+          <td style="font-size:12px;color:#555;">${ivaLabel}</td>
+          <td style="font-size:12px;color:#1a8a5a;">${fmt(costoConIva)}</td>
+          <td style="font-size:12px;">${it.valid_from || '—'}</td>
+          <td style="color:#888;font-size:12px;">${it.updated_at ? new Date(it.updated_at + 'Z').toLocaleString('es-AR', {dateStyle:'short', timeStyle:'short'}) : ''}</td>
+          <td class="actions"><button class="btn-delete" onclick="deleteCost('${it.sku.replace(/'/g, "\\'")}', '${it.valid_from}')">Eliminar</button></td>
+        </tr>
+      `;
+    }).join('');
   }
 
   async function uploadFile() {
@@ -235,17 +238,22 @@
     const sku = (document.getElementById('manual-sku').value || '').trim();
     const cost = parseFloat(document.getElementById('manual-cost').value);
     const fecha = document.getElementById('manual-fecha').value || '';
-    const ivaChecked = document.getElementById('manual-iva').checked;
+    const ivaRaw = document.getElementById('manual-iva').value;
+    const ivaRate = ivaRaw === '' ? 21 : parseFloat(ivaRaw);
     const msg = document.getElementById('add-msg');
     if(!sku || isNaN(cost) || cost <= 0) {
       msg.innerHTML = '<div class="msg err">SKU y costo válido son obligatorios.</div>';
+      return;
+    }
+    if(isNaN(ivaRate) || ivaRate < 0 || ivaRate > 100) {
+      msg.innerHTML = '<div class="msg err">Tasa de IVA inválida (0 a 100).</div>';
       return;
     }
     const form = new FormData();
     form.append('sku', sku);
     form.append('cost', String(cost));
     if(fecha) form.append('valid_from', fecha);
-    form.append('iva_included', ivaChecked ? '1' : '0');
+    form.append('iva_rate', String(ivaRate));
     try {
       const r = await fetch(`/api/costos/${currentAccountId}`, { method: 'POST', body: form });
       if(!r.ok) throw new Error('Error al guardar');
@@ -253,7 +261,7 @@
       document.getElementById('manual-sku').value = '';
       document.getElementById('manual-cost').value = '';
       document.getElementById('manual-fecha').value = '';
-      document.getElementById('manual-iva').checked = false;
+      document.getElementById('manual-iva').value = '21';
       await loadCosts();
     } catch(e) {
       msg.innerHTML = `<div class="msg err">${e.message}</div>`;

@@ -27,7 +27,7 @@ ADMIN_PASSWORD = os.environ["ADMIN_PASSWORD"]
 ML_AUTH_URL = "https://auth.mercadolibre.com.ar/authorization"
 ML_TOKEN_URL = "https://api.mercadolibre.com/oauth/token"
 ML_API_URL = "https://api.mercadolibre.com"
-SHIPPING_LOGIC_VERSION = "v19-cmv-versioned-iva-gross"
+SHIPPING_LOGIC_VERSION = "v20-iva-rate-envio-net-plus-buyer"
 
 serializer = URLSafeTimedSerializer(SECRET_KEY)
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -100,9 +100,10 @@ def init_db():
                 PRIMARY KEY (account_id, sku)
             )
         """))
-        # Migración a costos versionados (fecha de vigencia + IVA).
+        # Migración a costos versionados (fecha de vigencia + tasa de IVA).
         conn.execute(text("ALTER TABLE product_costs ADD COLUMN IF NOT EXISTS valid_from DATE"))
         conn.execute(text("ALTER TABLE product_costs ADD COLUMN IF NOT EXISTS iva_included BOOLEAN DEFAULT FALSE"))
+        conn.execute(text("ALTER TABLE product_costs ADD COLUMN IF NOT EXISTS iva_rate NUMERIC(5,2) DEFAULT 21"))
         conn.execute(text("UPDATE product_costs SET valid_from = CAST(updated_at AS DATE) WHERE valid_from IS NULL"))
         conn.execute(text("ALTER TABLE product_costs ALTER COLUMN valid_from SET NOT NULL"))
         # Cambiar PK a (account_id, sku, valid_from) si todavía no lo es.
@@ -115,6 +116,19 @@ def init_db():
         if pk_cols and pk_cols[0] != "account_id,sku,valid_from":
             conn.execute(text("ALTER TABLE product_costs DROP CONSTRAINT product_costs_pkey"))
             conn.execute(text("ALTER TABLE product_costs ADD PRIMARY KEY (account_id, sku, valid_from)"))
+        # Migrar iva_included → iva_rate UNA VEZ (controlado por app_meta).
+        iva_migrated = conn.execute(text(
+            "SELECT 1 FROM app_meta WHERE key='iva_rate_migrated'"
+        )).fetchone()
+        if not iva_migrated:
+            conn.execute(text("""
+                UPDATE product_costs
+                SET iva_rate = CASE WHEN COALESCE(iva_included, FALSE) THEN 0 ELSE 21 END
+            """))
+            conn.execute(text(
+                "INSERT INTO app_meta (key, value) VALUES ('iva_rate_migrated', '1')"
+                " ON CONFLICT (key) DO NOTHING"
+            ))
         # Invalida el caché cuando cambia la lógica de cálculo de envío.
         current = conn.execute(text("SELECT value FROM app_meta WHERE key='shipping_logic_version'")).fetchone()
         if not current or current[0] != SHIPPING_LOGIC_VERSION:
@@ -650,19 +664,15 @@ async def get_shipping_cost(client, shipping_id, headers) -> dict:
         # Colecta / Full
         if cost > 0:
             buyer_cost = cost
-            # En colecta paga, senders[0].cost de /shipments/{id}/costs es
-            # el NETO que el vendedor absorbe (después de descontar lo que
-            # pagó el comprador). El panel de ML muestra el GROSS ("Cargo
-            # por Envíos de Mercado Libre"). Para reconstruirlo:
-            #   gross = gross_amount (si /costs lo expone)
-            #         = senders[0].cost + receiver.cost (suma del neto +
-            #           lo que aportó el comprador)
+            # En colecta paga, senders[0].cost de /shipments/{id}/costs
+            # es el NETO que el vendedor absorbe (después de descontar
+            # lo que pagó el comprador). Para mostrar el "Cargo por
+            # Envíos" GROSS del panel de ML, reconstruimos:
+            #   gross = senders[0].cost (neto) + receiver.cost (buyer)
             # Ej: #2000016645537442 → buyer $5.331,48 + net $7.470 = $12.801,48.
-            if costs_gross_amount > 0:
-                seller_cost = costs_gross_amount
-            elif costs_sender_cost > 0 or receiver_cost > 0:
-                seller_cost = costs_sender_cost + (receiver_cost or buyer_cost)
-            else:
+            # Ej: #2000016628948574 → buyer $14.180 + net $0 = $14.180.
+            seller_cost = costs_sender_cost + (receiver_cost or buyer_cost)
+            if seller_cost <= 0:
                 seller_cost = cost
             bonificacion = compensation
         else:
@@ -798,15 +808,12 @@ async def ml_disconnect(request: Request, account_id: int):
 
 # ── Costos de mercadería (CMV) ──────────────────────────────────
 
-IVA_RATE = 1.21  # 21% IVA Argentina
-
-
 def db_get_product_costs(account_id: int) -> dict:
     """Devuelve {sku_uppercase: [entries sorted by valid_from asc]}.
-    Cada entry: {cost, iva_included, valid_from (str ISO)}.
+    Cada entry: {cost (sin IVA), iva_rate, valid_from (str ISO)}.
     """
     rows = db_fetchall(
-        "SELECT sku, cost, iva_included, valid_from FROM product_costs"
+        "SELECT sku, cost, iva_rate, valid_from FROM product_costs"
         " WHERE account_id = :aid ORDER BY sku, valid_from",
         {"aid": account_id},
     )
@@ -818,7 +825,7 @@ def db_get_product_costs(account_id: int) -> dict:
         vf = r["valid_from"]
         out.setdefault(key, []).append({
             "cost": float(r["cost"]),
-            "iva_included": bool(r["iva_included"]),
+            "iva_rate": float(r["iva_rate"] if r["iva_rate"] is not None else 21),
             "valid_from": vf.isoformat() if hasattr(vf, "isoformat") else str(vf),
         })
     return out
@@ -841,18 +848,18 @@ def find_cost_for_date(versioned: dict, sku: str, sale_date: str) -> dict:
 
 
 def cost_with_iva(entry: dict) -> float:
-    """Convierte la entry de costo a un valor con IVA incluido (comparable
-    con monto/comisión/envío que ya vienen con IVA en ML)."""
+    """Convierte el costo (sin IVA) al equivalente con IVA aplicado según la
+    tasa cargada (21%, 10.5%, 0 = exento, etc). El resultado es comparable
+    con monto/comisión/envío que ya vienen con IVA en ML."""
     if not entry:
         return 0.0
     cost = float(entry.get("cost") or 0)
-    if entry.get("iva_included"):
-        return cost
-    return cost * IVA_RATE
+    rate = float(entry.get("iva_rate") or 0)
+    return cost * (1 + rate / 100.0)
 
 
 def db_save_product_costs(account_id: int, items: list):
-    """Inserta/actualiza lista de {sku, cost, iva_included, valid_from}."""
+    """Inserta/actualiza lista de {sku, cost, iva_rate, valid_from}."""
     if not items:
         return 0
     params = []
@@ -870,38 +877,53 @@ def db_save_product_costs(account_id: int, items: list):
         vf = it.get("valid_from") or today_iso
         if hasattr(vf, "isoformat"):
             vf = vf.isoformat()
+        try:
+            iva_rate = float(it.get("iva_rate") if it.get("iva_rate") is not None else 21)
+        except (TypeError, ValueError):
+            iva_rate = 21.0
         params.append({
             "aid": account_id, "sku": sku, "cost": cost,
-            "iva": bool(it.get("iva_included")),
-            "vf": vf,
+            "iva_rate": iva_rate, "vf": vf,
         })
     if not params:
         return 0
     with engine.connect() as conn:
         conn.execute(text(
-            "INSERT INTO product_costs (account_id, sku, cost, iva_included, valid_from, updated_at)"
-            " VALUES (:aid, :sku, :cost, :iva, :vf, NOW())"
+            "INSERT INTO product_costs (account_id, sku, cost, iva_rate, valid_from, updated_at)"
+            " VALUES (:aid, :sku, :cost, :iva_rate, :vf, NOW())"
             " ON CONFLICT (account_id, sku, valid_from) DO UPDATE SET"
             " cost = EXCLUDED.cost,"
-            " iva_included = EXCLUDED.iva_included,"
+            " iva_rate = EXCLUDED.iva_rate,"
             " updated_at = NOW()"
         ), params)
         conn.commit()
     return len(params)
 
 
-def _parse_iva_cell(value) -> bool:
-    """Convierte distintas representaciones de IVA a booleano (incluido=True)."""
-    if value is None:
-        return False
+def _parse_iva_rate_cell(value) -> float:
+    """Devuelve la tasa de IVA (21, 10.5, 0, etc.) desde una celda.
+    Acepta numérico, '21%', '10,5', 'Exento', 'No', '21 %', etc.
+    Default si no se reconoce: 21."""
+    if value is None or value == "":
+        return 21.0
     if isinstance(value, bool):
-        return value
-    s = str(value).strip().lower()
+        return 21.0 if value else 0.0
+    if isinstance(value, (int, float)):
+        # Si el valor es 0 o positivo razonable, usarlo directo
+        v = float(value)
+        return v if 0 <= v <= 100 else 21.0
+    s = str(value).strip().lower().replace("%", "").replace(",", ".").strip()
     if not s:
-        return False
-    if s in {"si", "sí", "true", "1", "yes", "y", "con iva", "incluido", "incluye", "con", "21", "21%"}:
-        return True
-    return False
+        return 21.0
+    if s in {"exento", "no", "sin iva", "sin", "0", "no aplica", "n/a"}:
+        return 0.0
+    if s in {"si", "sí", "yes", "y", "incluido"}:
+        return 0.0  # ya incluye, sin agregar más
+    try:
+        v = float(s)
+        return v if 0 <= v <= 100 else 21.0
+    except ValueError:
+        return 21.0
 
 
 def _parse_date_cell(value):
@@ -970,12 +992,12 @@ def parse_excel_costs(content: bytes) -> list:
         if sku is None or cost is None:
             continue
         fecha = _parse_date_cell(row[fecha_idx]) if fecha_idx is not None and len(row) > fecha_idx else None
-        iva = _parse_iva_cell(row[iva_idx]) if iva_idx is not None and len(row) > iva_idx else False
+        iva_rate = _parse_iva_rate_cell(row[iva_idx]) if iva_idx is not None and len(row) > iva_idx else 21.0
         items.append({
             "sku": str(sku).strip(),
             "cost": cost,
             "valid_from": fecha or today_iso,
-            "iva_included": iva,
+            "iva_rate": iva_rate,
         })
     return items
 
@@ -1015,11 +1037,11 @@ def parse_csv_costs(content: bytes) -> list:
         except ValueError:
             continue
         fecha = _parse_date_cell(row[fecha_idx]) if fecha_idx is not None and len(row) > fecha_idx else None
-        iva = _parse_iva_cell(row[iva_idx]) if iva_idx is not None and len(row) > iva_idx else False
+        iva_rate = _parse_iva_rate_cell(row[iva_idx]) if iva_idx is not None and len(row) > iva_idx else 21.0
         items.append({
             "sku": sku, "cost": cost,
             "valid_from": fecha or today_iso,
-            "iva_included": iva,
+            "iva_rate": iva_rate,
         })
     return items
 
@@ -1046,7 +1068,7 @@ async def api_costos_list(request: Request, account_id: int):
     if not acc:
         raise HTTPException(404)
     rows = db_fetchall(
-        "SELECT sku, cost, iva_included, valid_from, updated_at FROM product_costs"
+        "SELECT sku, cost, iva_rate, valid_from, updated_at FROM product_costs"
         " WHERE account_id=:aid ORDER BY sku, valid_from DESC",
         {"aid": account_id},
     )
@@ -1055,7 +1077,7 @@ async def api_costos_list(request: Request, account_id: int):
             {
                 "sku": r["sku"],
                 "cost": float(r["cost"]),
-                "iva_included": bool(r["iva_included"]),
+                "iva_rate": float(r["iva_rate"] if r["iva_rate"] is not None else 21),
                 "valid_from": r["valid_from"].isoformat() if hasattr(r["valid_from"], "isoformat") else str(r["valid_from"]),
                 "updated_at": r["updated_at"].isoformat() if r.get("updated_at") else None,
             }
@@ -1070,7 +1092,7 @@ async def api_costos_upsert(
     sku: str = Form(...),
     cost: float = Form(...),
     valid_from: Optional[str] = Form(None),
-    iva_included: Optional[str] = Form(None),
+    iva_rate: Optional[str] = Form(None),
 ):
     user_id = get_session_user_id(request)
     if not user_id:
@@ -1078,11 +1100,14 @@ async def api_costos_upsert(
     acc = db_fetchone("SELECT id FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
     if not acc:
         raise HTTPException(404)
-    iva_flag = str(iva_included or "").lower() in {"1", "true", "on", "yes", "si", "sí"}
+    try:
+        rate_val = float(iva_rate) if iva_rate is not None and iva_rate != "" else 21.0
+    except ValueError:
+        rate_val = 21.0
     saved = db_save_product_costs(account_id, [{
         "sku": sku, "cost": cost,
         "valid_from": valid_from or datetime.utcnow().date().isoformat(),
-        "iva_included": iva_flag,
+        "iva_rate": rate_val,
     }])
     invalidate_orders_cache_for_account(account_id)
     return {"ok": True, "saved": saved}
