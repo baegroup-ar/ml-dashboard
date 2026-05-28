@@ -27,7 +27,7 @@ ADMIN_PASSWORD = os.environ["ADMIN_PASSWORD"]
 ML_AUTH_URL = "https://auth.mercadolibre.com.ar/authorization"
 ML_TOKEN_URL = "https://api.mercadolibre.com/oauth/token"
 ML_API_URL = "https://api.mercadolibre.com"
-SHIPPING_LOGIC_VERSION = "v24-explicit-bonif-only"
+SHIPPING_LOGIC_VERSION = "v25-bonif-discount-semantics"
 
 serializer = URLSafeTimedSerializer(SECRET_KEY)
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -696,7 +696,16 @@ async def get_shipping_cost(client, shipping_id, headers) -> dict:
     else:
         seller_cost = costs_sender_cost
 
-    bonificacion = max(compensation, sender_discount, option_discount_amount)
+    # senders[0].discounts[].promoted_amount tiene semántica distinta según
+    # el caso: cuando el vendedor PAGA el envío (sender.cost > 0) es el
+    # descuento aplicado sobre la tarifa de lista (ej. 50% off colecta),
+    # NO una bonificación al vendedor. Cuando el vendedor NO paga
+    # (sender.cost = 0, env. gratis bonificado), discounts[] sí representa
+    # la bonificación de ML que cubre el envío.
+    if costs_sender_cost > 0:
+        bonificacion = max(compensation, option_discount_amount)
+    else:
+        bonificacion = max(compensation, sender_discount, option_discount_amount)
 
     # Fallback sólo cuando /costs no devolvió data útil para esa venta
     # (ej. shipments cancelados o sin info de costos).
