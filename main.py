@@ -134,9 +134,9 @@ def init_db():
         # comprador). Sirve de referencia para asociar cada shipment Flex
         # con la zona correcta (matcheamos contra shipping_option.list_cost).
         conn.execute(text("ALTER TABLE flex_tariffs ADD COLUMN IF NOT EXISTS tarifa_ml NUMERIC(12,2)"))
-        # Base de descuentos por SKU (lo que el vendedor está dispuesto a
-        # descontar para cualquier promo de ML). El cruce con las
-        # promociones disponibles se hace en runtime.
+        # Base de descuentos por MLA (item_id de Mercado Libre). El usuario
+        # mantiene su mapeo MLA → SKU → descuento en su Excel. El cruce con
+        # las promociones se hace por MLA directamente (sin fallback por SKU).
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS product_discounts (
                 account_id INTEGER NOT NULL REFERENCES ml_accounts(id) ON DELETE CASCADE,
@@ -146,6 +146,24 @@ def init_db():
                 PRIMARY KEY (account_id, sku)
             )
         """))
+        # Migración a MLA: si la tabla todavía no tiene columna mla, la
+        # recreamos (no hay data crítica que conservar).
+        mla_col = conn.execute(text("""
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name='product_discounts' AND column_name='mla'
+        """)).fetchone()
+        if not mla_col:
+            conn.execute(text("DROP TABLE IF EXISTS product_discounts CASCADE"))
+            conn.execute(text("""
+                CREATE TABLE product_discounts (
+                    account_id INTEGER NOT NULL REFERENCES ml_accounts(id) ON DELETE CASCADE,
+                    mla TEXT NOT NULL,
+                    sku TEXT,
+                    discount_pct NUMERIC(5,2) NOT NULL,
+                    updated_at TIMESTAMP DEFAULT NOW(),
+                    PRIMARY KEY (account_id, mla)
+                )
+            """))
         # Migrar iva_included → iva_rate UNA VEZ (controlado por app_meta).
         iva_migrated = conn.execute(text(
             "SELECT 1 FROM app_meta WHERE key='iva_rate_migrated'"
@@ -1833,13 +1851,26 @@ async def descuentos_page(request: Request):
     )
 
 
+def _normalize_mla(value) -> str:
+    """Devuelve el MLA en mayúsculas y sin espacios. Acepta también números
+    sueltos asumiendo prefijo MLA."""
+    if value is None:
+        return ""
+    s = str(value).strip().upper().replace(" ", "")
+    if not s:
+        return ""
+    if s.isdigit():
+        s = "MLA" + s
+    return s
+
+
 def db_save_product_discounts(account_id: int, items: list) -> int:
     if not items:
         return 0
     params = []
     for it in items:
-        sku = (it.get("sku") or "").strip()
-        if not sku:
+        mla = _normalize_mla(it.get("mla"))
+        if not mla:
             continue
         try:
             pct = float(it.get("discount_pct") or 0)
@@ -1847,15 +1878,18 @@ def db_save_product_discounts(account_id: int, items: list) -> int:
             continue
         if pct < 0 or pct > 100:
             continue
-        params.append({"aid": account_id, "sku": sku.upper(), "pct": pct})
+        sku = (it.get("sku") or "").strip().upper() or None
+        params.append({"aid": account_id, "mla": mla, "sku": sku, "pct": pct})
     if not params:
         return 0
     with engine.connect() as conn:
         conn.execute(text(
-            "INSERT INTO product_discounts (account_id, sku, discount_pct, updated_at)"
-            " VALUES (:aid, :sku, :pct, NOW())"
-            " ON CONFLICT (account_id, sku) DO UPDATE SET"
-            " discount_pct = EXCLUDED.discount_pct, updated_at = NOW()"
+            "INSERT INTO product_discounts (account_id, mla, sku, discount_pct, updated_at)"
+            " VALUES (:aid, :mla, :sku, :pct, NOW())"
+            " ON CONFLICT (account_id, mla) DO UPDATE SET"
+            " sku = EXCLUDED.sku,"
+            " discount_pct = EXCLUDED.discount_pct,"
+            " updated_at = NOW()"
         ), params)
         conn.commit()
     return len(params)
@@ -1873,41 +1907,43 @@ async def api_descuentos_template(request: Request):
     wb = Workbook()
     ws = wb.active
     ws.title = "Descuentos"
-    ws.append(["SKU", "Descuento %"])
+    ws.append(["MLA", "SKU", "Descuento %"])
     fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
     font = Font(bold=True)
-    for col in range(1, 3):
+    for col in range(1, 4):
         c = ws.cell(row=1, column=col)
         c.fill = fill
         c.font = font
         c.alignment = Alignment(horizontal="center")
     examples = [
-        ["SOP68-443", 20],
-        ["SOP78-446", 15],
-        ["ART-LAUNDRYBOX", 10],
+        ["MLA1648019734", "SOP78-446", 20],
+        ["MLA1650123456", "SOP78-446-3C", 20],
+        ["MLA1650789012", "SOP68-443", 15],
     ]
     for r in examples:
         ws.append(r)
-    ws.column_dimensions["A"].width = 24
-    ws.column_dimensions["B"].width = 14
+    ws.column_dimensions["A"].width = 18
+    ws.column_dimensions["B"].width = 22
+    ws.column_dimensions["C"].width = 14
     ws2 = wb.create_sheet("Instrucciones")
     rows = [
-        ["Plantilla de base de descuentos por SKU"],
+        ["Plantilla de base de descuentos"],
         [""],
         ["Columnas:"],
-        ["SKU", "Identificador único del producto (coincide con el seller_sku de ML)."],
+        ["MLA", "Identificador de la publicación de Mercado Libre (ej. MLA1648019734)."],
+        ["SKU", "Referencial — sirve para identificar visualmente la publicación. No se usa para matchear."],
         ["Descuento %", "Porcentaje a aplicar (0 a 100). Ej: 20 = 20% off."],
         [""],
         ["Cómo se usa:"],
-        ["", "Esta base es referencial. Al aplicar una promoción de ML, el sistema"],
-        ["", "cruza tus SKUs con los items elegibles y propone los descuentos."],
+        ["", "Al aplicar una promo de ML, el cruce se hace por MLA exacto."],
+        ["", "Cada publicación (sea con cuotas o sin) tiene su propio MLA y su propia entrada."],
         ["", "Si tu descuento es menor al mínimo sugerido por ML, te avisa."],
         ["", "Siempre vas a ver la vista previa antes de aplicar."],
     ]
     for r in rows:
         ws2.append(r)
     ws2.column_dimensions["A"].width = 16
-    ws2.column_dimensions["B"].width = 90
+    ws2.column_dimensions["B"].width = 100
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
@@ -1927,14 +1963,15 @@ async def api_descuentos_list(request: Request, account_id: int):
     if not acc:
         raise HTTPException(404)
     rows = db_fetchall(
-        "SELECT sku, discount_pct, updated_at FROM product_discounts"
-        " WHERE account_id=:aid ORDER BY sku",
+        "SELECT mla, sku, discount_pct, updated_at FROM product_discounts"
+        " WHERE account_id=:aid ORDER BY mla",
         {"aid": account_id},
     )
     return {
         "items": [
             {
-                "sku": r["sku"],
+                "mla": r["mla"],
+                "sku": r["sku"] or "",
                 "discount_pct": float(r["discount_pct"]),
                 "updated_at": r["updated_at"].isoformat() if r.get("updated_at") else None,
             }
@@ -1946,8 +1983,9 @@ async def api_descuentos_list(request: Request, account_id: int):
 @app.post("/api/descuentos/{account_id}")
 async def api_descuentos_upsert(
     request: Request, account_id: int,
-    sku: str = Form(...),
+    mla: str = Form(...),
     discount_pct: float = Form(...),
+    sku: Optional[str] = Form(None),
 ):
     user_id = get_session_user_id(request)
     if not user_id:
@@ -1955,16 +1993,19 @@ async def api_descuentos_upsert(
     acc = db_fetchone("SELECT id FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
     if not acc:
         raise HTTPException(404)
-    saved = db_save_product_discounts(account_id, [{"sku": sku, "discount_pct": discount_pct}])
+    saved = db_save_product_discounts(
+        account_id, [{"mla": mla, "sku": sku or "", "discount_pct": discount_pct}],
+    )
     return {"ok": True, "saved": saved}
 
 
 @app.put("/api/descuentos/{account_id}/edit")
 async def api_descuentos_edit(
     request: Request, account_id: int,
-    old_sku: str = Form(...),
-    sku: str = Form(...),
+    old_mla: str = Form(...),
+    mla: str = Form(...),
     discount_pct: float = Form(...),
+    sku: Optional[str] = Form(None),
 ):
     user_id = get_session_user_id(request)
     if not user_id:
@@ -1973,15 +2014,17 @@ async def api_descuentos_edit(
     if not acc:
         raise HTTPException(404)
     db_execute(
-        "DELETE FROM product_discounts WHERE account_id=:aid AND sku=:sku",
-        {"aid": account_id, "sku": old_sku.upper()},
+        "DELETE FROM product_discounts WHERE account_id=:aid AND mla=:mla",
+        {"aid": account_id, "mla": _normalize_mla(old_mla)},
     )
-    saved = db_save_product_discounts(account_id, [{"sku": sku, "discount_pct": discount_pct}])
+    saved = db_save_product_discounts(
+        account_id, [{"mla": mla, "sku": sku or "", "discount_pct": discount_pct}],
+    )
     return {"ok": True, "saved": saved}
 
 
-@app.delete("/api/descuentos/{account_id}/{sku}")
-async def api_descuentos_delete(request: Request, account_id: int, sku: str):
+@app.delete("/api/descuentos/{account_id}/{mla}")
+async def api_descuentos_delete(request: Request, account_id: int, mla: str):
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
@@ -1989,8 +2032,8 @@ async def api_descuentos_delete(request: Request, account_id: int, sku: str):
     if not acc:
         raise HTTPException(404)
     db_execute(
-        "DELETE FROM product_discounts WHERE account_id=:aid AND sku=:sku",
-        {"aid": account_id, "sku": sku.upper()},
+        "DELETE FROM product_discounts WHERE account_id=:aid AND mla=:mla",
+        {"aid": account_id, "mla": _normalize_mla(mla)},
     )
     return {"ok": True}
 
@@ -2034,29 +2077,33 @@ def _parse_excel_discounts(content: bytes) -> list:
         if row is None:
             continue
         normalized = [str(c).strip().lower() if c is not None else "" for c in row]
-        if any("sku" in n for n in normalized):
+        if any("mla" in n or "publicaci" in n or "item" in n for n in normalized):
             header = normalized
             data_start = idx + 1
             break
     if not header:
         return []
+    mla_idx = _find_col(header, ["mla", "publicaci", "item_id", "item id", "id"])
     sku_idx = _find_col(header, ["sku"])
     pct_idx = _find_col(header, ["descuento", "discount", "off", "%"])
-    if sku_idx is None or pct_idx is None:
+    if mla_idx is None or pct_idx is None:
         return []
     items = []
     for row in rows[data_start:]:
-        if row is None or len(row) <= max(sku_idx, pct_idx):
+        if row is None or len(row) <= max(mla_idx, pct_idx):
             continue
-        sku = row[sku_idx]
+        mla = row[mla_idx]
         pct = row[pct_idx]
-        if sku is None or pct is None:
+        if mla is None or pct is None:
             continue
         try:
             pct_val = float(str(pct).replace("%", "").replace(",", ".").strip())
         except ValueError:
             continue
-        items.append({"sku": str(sku).strip(), "discount_pct": pct_val})
+        sku = ""
+        if sku_idx is not None and len(row) > sku_idx and row[sku_idx] is not None:
+            sku = str(row[sku_idx]).strip()
+        items.append({"mla": str(mla), "sku": sku, "discount_pct": pct_val})
     return items
 
 
@@ -2070,33 +2117,58 @@ def _parse_csv_discounts(content: bytes) -> list:
     if not rows:
         return []
     header = [(c or "").strip().lower() for c in rows[0]]
+    mla_idx = _find_col(header, ["mla", "publicaci", "item_id", "item id", "id"])
     sku_idx = _find_col(header, ["sku"])
     pct_idx = _find_col(header, ["descuento", "discount", "off", "%"])
-    if sku_idx is None or pct_idx is None:
+    if mla_idx is None or pct_idx is None:
         return []
     items = []
     for row in rows[1:]:
-        if len(row) <= max(sku_idx, pct_idx):
+        if len(row) <= max(mla_idx, pct_idx):
             continue
-        sku = (row[sku_idx] or "").strip()
+        mla = (row[mla_idx] or "").strip()
         raw = (row[pct_idx] or "").strip().replace("%", "")
         if sep == ";":
             raw = raw.replace(",", ".")
         else:
             raw = raw.replace(",", ".")
-        if not sku or not raw:
+        if not mla or not raw:
             continue
         try:
             pct = float(raw)
         except ValueError:
             continue
-        items.append({"sku": sku, "discount_pct": pct})
+        sku = ""
+        if sku_idx is not None and len(row) > sku_idx:
+            sku = (row[sku_idx] or "").strip()
+        items.append({"mla": mla, "sku": sku, "discount_pct": pct})
     return items
+
+
+# Tipos de promociones que ML expone. Hay que consultar uno por uno
+# porque /seller-promotions/promotions/search exige promotion_type.
+PROMO_TYPES = [
+    "DEAL",
+    "PRICE_DISCOUNT",
+    "MARKETPLACE_CAMPAIGN",
+    "DOD",
+    "LIGHTNING",
+    "SMART",
+    "VOLUME",
+    "MULTI_BUY",
+    "BANK_DEAL",
+    "PRE_NEGOTIATED",
+    "UNHEALTHY_STOCK",
+    "PRICE_MATCHING",
+    "PRICE_MATCHING_MELI_ALL",
+]
 
 
 @app.get("/api/promociones/{account_id}")
 async def api_promociones_list(request: Request, account_id: int):
-    """Lista las promociones disponibles para la cuenta vía ML API."""
+    """Lista las promociones disponibles para la cuenta vía ML API.
+    El endpoint /seller-promotions/promotions/search exige promotion_type,
+    así que iteramos sobre los tipos conocidos en paralelo y agregamos."""
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
@@ -2107,29 +2179,51 @@ async def api_promociones_list(request: Request, account_id: int):
     if not token:
         raise HTTPException(502)
     headers = {"Authorization": f"Bearer {token}"}
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.get(
-            f"{ML_API_URL}/seller-promotions/promotions/search",
-            headers=headers,
-            params={"app_version": "v2"},
-        )
-        if r.status_code != 200:
-            return {"items": [], "error": f"ML {r.status_code}: {r.text[:200]}"}
-        data = r.json()
-    promos = data.get("results", []) if isinstance(data, dict) else (data or [])
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        async def fetch_type(ptype):
+            try:
+                r = await client.get(
+                    f"{ML_API_URL}/seller-promotions/promotions/search",
+                    headers=headers,
+                    params={"app_version": "v2", "promotion_type": ptype},
+                )
+                if r.status_code != 200:
+                    return (ptype, [], f"{r.status_code}")
+                data = r.json()
+                results = data.get("results", []) if isinstance(data, dict) else (data or [])
+                return (ptype, results, None)
+            except Exception as e:
+                return (ptype, [], str(e)[:60])
+
+        outcomes = await asyncio.gather(*[fetch_type(t) for t in PROMO_TYPES])
+
+    seen = set()
     items = []
-    for p in promos:
-        items.append({
-            "id": p.get("id"),
-            "name": p.get("name") or p.get("id"),
-            "type": p.get("type"),
-            "status": p.get("status"),
-            "start_date": p.get("start_date"),
-            "finish_date": p.get("finish_date"),
-            "deadline_date": p.get("deadline_date"),
-            "benefits": p.get("benefits"),
-        })
-    return {"items": items}
+    errors = []
+    for ptype, results, err in outcomes:
+        if err:
+            errors.append(f"{ptype}: {err}")
+        for p in results:
+            pid = p.get("id")
+            if not pid or pid in seen:
+                continue
+            seen.add(pid)
+            items.append({
+                "id": pid,
+                "name": p.get("name") or pid,
+                # ML devuelve el tipo dentro de la promo pero a veces falta;
+                # usamos el tipo que estábamos consultando como fallback.
+                "type": p.get("type") or ptype,
+                "status": p.get("status"),
+                "start_date": p.get("start_date"),
+                "finish_date": p.get("finish_date"),
+                "deadline_date": p.get("deadline_date"),
+                "benefits": p.get("benefits"),
+            })
+    # Ordenar: started primero, después por nombre
+    items.sort(key=lambda x: (x.get("status") != "started", (x.get("name") or "").lower()))
+    return {"items": items, "errors": errors}
 
 
 @app.get("/api/promociones/{account_id}/{promotion_id}/items")
@@ -2149,12 +2243,15 @@ async def api_promociones_items(
     if not token:
         raise HTTPException(502)
     headers = {"Authorization": f"Bearer {token}"}
-    # Cargar base de descuentos local
+    # Cargar base de descuentos local (mapeada por MLA, sin fallback)
     discount_rows = db_fetchall(
-        "SELECT sku, discount_pct FROM product_discounts WHERE account_id=:aid",
+        "SELECT mla, sku, discount_pct FROM product_discounts WHERE account_id=:aid",
         {"aid": account_id},
     )
-    discount_map = {r["sku"].upper(): float(r["discount_pct"]) for r in discount_rows}
+    discount_map = {
+        r["mla"].upper(): {"pct": float(r["discount_pct"]), "sku": r["sku"] or ""}
+        for r in discount_rows
+    }
 
     params = {"app_version": "v2", "status": status, "limit": 50}
     if promotion_type:
@@ -2217,19 +2314,16 @@ async def api_promociones_items(
                 min_discount_pct = round((1 - float(suggested_price) / float(original_price)) * 100, 2)
             except Exception:
                 min_discount_pct = None
-        sku = ""
         title = ""
+        sku_from_ml = ""
         if info:
-            sku = (info.get("seller_sku") or "").strip()
+            sku_from_ml = (info.get("seller_sku") or "").strip()
             title = info.get("title") or ""
-        sku_up = sku.upper()
-        # Buscar en base local. Si no está, intentar con fallback de cuotas.
-        loaded_pct = discount_map.get(sku_up)
-        if loaded_pct is None and sku_up:
-            for fb in _sku_fallbacks(sku_up):
-                if fb in discount_map:
-                    loaded_pct = discount_map[fb]
-                    break
+        # Cruce DIRECTO por MLA (item_id). Sin fallback de SKU/cuotas.
+        match = discount_map.get((item_id or "").upper())
+        loaded_pct = match["pct"] if match else None
+        sku_base = match["sku"] if match else ""
+        sku = sku_base or sku_from_ml
         final_pct = loaded_pct if loaded_pct is not None else 0.0
         # Validar contra mínimo
         below_min = False
@@ -2245,6 +2339,7 @@ async def api_promociones_items(
         ml_contribution = promo_item.get("meli_percentage") or promo_item.get("meli_amount")
         items_out.append({
             "item_id": item_id,
+            "mla": item_id,
             "sku": sku,
             "title": title,
             "original_price": float(original_price) if original_price else None,

@@ -109,13 +109,15 @@
       </a>
     </div>
     <div class="help-box">
-      Columnas esperadas: <code>SKU</code> y <code>Descuento %</code> (0 a 100).
+      Columnas esperadas: <code>MLA</code>, <code>SKU</code> (referencial) y <code>Descuento %</code> (0 a 100).
+      El cruce con las promociones se hace por MLA exacto — cada publicación es una entrada separada.
     </div>
     <div id="upload-msg"></div>
 
     <div style="margin-top:1rem;border-top:1px solid #f0f0ee;padding-top:1rem;">
       <div class="row">
-        <input type="text" id="manual-sku" placeholder="SKU" style="width:200px;text-transform:uppercase;" />
+        <input type="text" id="manual-mla" placeholder="MLA1234567890" style="width:200px;text-transform:uppercase;" />
+        <input type="text" id="manual-sku" placeholder="SKU (referencial)" style="width:200px;text-transform:uppercase;" />
         <input type="number" id="manual-pct" placeholder="% descuento" step="0.5" min="0" max="100" style="width:120px;" />
         <button onclick="addDescuento()">Agregar / actualizar</button>
       </div>
@@ -123,14 +125,14 @@
     </div>
 
     <div style="margin-top:1rem;">
-      <input type="text" id="filter-input" placeholder="Filtrar por SKU..." oninput="renderBase()" style="padding:6px 10px;border:1px solid #ddd;border-radius:8px;font-size:13px;width:300px;" />
+      <input type="text" id="filter-input" placeholder="Filtrar por MLA o SKU..." oninput="renderBase()" style="padding:6px 10px;border:1px solid #ddd;border-radius:8px;font-size:13px;width:300px;" />
       <div style="overflow-x:auto;margin-top:8px;">
         <table>
           <thead><tr>
-            <th>SKU</th><th>Descuento %</th><th>Actualizado</th><th style="text-align:right;">Acciones</th>
+            <th>MLA</th><th>SKU</th><th>Descuento %</th><th>Actualizado</th><th style="text-align:right;">Acciones</th>
           </tr></thead>
           <tbody id="base-tbody">
-            <tr><td colspan="4" class="empty">Cargando...</td></tr>
+            <tr><td colspan="5" class="empty">Cargando...</td></tr>
           </tbody>
         </table>
       </div>
@@ -169,6 +171,7 @@
       <table class="preview-table">
         <thead><tr>
           <th style="width:30px;"><input type="checkbox" id="select-all" onchange="toggleAll(this)" /></th>
+          <th>MLA</th>
           <th>SKU</th>
           <th>Título</th>
           <th class="num">Precio actual</th>
@@ -179,7 +182,7 @@
           <th>Estado</th>
         </tr></thead>
         <tbody id="preview-tbody">
-          <tr><td colspan="9" class="empty">Seleccioná una promo para ver los items.</td></tr>
+          <tr><td colspan="10" class="empty">Seleccioná una promo para ver los items.</td></tr>
         </tbody>
       </table>
     </div>
@@ -232,7 +235,7 @@
   async function loadBase() {
     if(!currentAccountId) return;
     const tbody = document.getElementById('base-tbody');
-    tbody.innerHTML = `<tr><td colspan="4" class="empty">Cargando...</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="5" class="empty">Cargando...</td></tr>`;
     try {
       const r = await fetch(`/api/descuentos/${currentAccountId}`);
       if(!r.ok) throw new Error('Error al cargar');
@@ -240,39 +243,44 @@
       baseItems = data.items || [];
       renderBase();
     } catch(e) {
-      tbody.innerHTML = `<tr><td colspan="4" class="empty">Error: ${e.message}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="5" class="empty">Error: ${e.message}</td></tr>`;
     }
   }
 
   function renderBase() {
     const tbody = document.getElementById('base-tbody');
     const filter = (document.getElementById('filter-input').value || '').trim().toUpperCase();
-    const items = filter ? baseItems.filter(it => it.sku.toUpperCase().includes(filter)) : baseItems;
-    document.getElementById('count-label').textContent = `${baseItems.length} SKU${baseItems.length===1?'':'s'} cargados`;
+    const items = filter
+      ? baseItems.filter(it => (it.mla||'').toUpperCase().includes(filter) || (it.sku||'').toUpperCase().includes(filter))
+      : baseItems;
+    document.getElementById('count-label').textContent = `${baseItems.length} MLA${baseItems.length===1?'':'s'} cargados`;
     if(!items.length) {
-      tbody.innerHTML = `<tr><td colspan="4" class="empty">${filter ? 'Sin resultados.' : 'Todavía no hay descuentos cargados.'}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="5" class="empty">${filter ? 'Sin resultados.' : 'Todavía no hay descuentos cargados.'}</td></tr>`;
       return;
     }
     tbody.innerHTML = items.map(it => {
-      const skuEsc = it.sku.replace(/'/g, "\\'");
-      const rowId = it.sku.replace(/[^a-zA-Z0-9_]/g, '_');
+      const mlaEsc = (it.mla||'').replace(/'/g, "\\'");
+      const skuEsc = (it.sku||'').replace(/'/g, "\\'");
+      const rowId = (it.mla||'').replace(/[^a-zA-Z0-9_]/g, '_');
       return `
-        <tr data-row-id="${rowId}" data-old-sku="${it.sku}">
-          <td class="c-sku"><b>${it.sku}</b></td>
+        <tr data-row-id="${rowId}" data-old-mla="${it.mla}">
+          <td class="c-mla"><b>${it.mla}</b></td>
+          <td class="c-sku" style="color:#666;">${it.sku || '—'}</td>
           <td class="c-pct">${it.discount_pct}%</td>
           <td style="color:#888;font-size:12px;">${it.updated_at ? new Date(it.updated_at + 'Z').toLocaleString('es-AR', {dateStyle:'short', timeStyle:'short'}) : ''}</td>
           <td style="text-align:right;">
-            <button class="btn-edit" onclick="startEdit('${rowId}', '${skuEsc}', ${it.discount_pct})">Editar</button>
-            <button class="btn-delete" onclick="deleteDescuento('${skuEsc}')">Eliminar</button>
+            <button class="btn-edit" onclick="startEdit('${rowId}', '${mlaEsc}', '${skuEsc}', ${it.discount_pct})">Editar</button>
+            <button class="btn-delete" onclick="deleteDescuento('${mlaEsc}')">Eliminar</button>
           </td>
         </tr>`;
     }).join('');
   }
 
-  function startEdit(rowId, sku, pct) {
+  function startEdit(rowId, mla, sku, pct) {
     const tr = document.querySelector(`tr[data-row-id="${rowId}"]`);
     if(!tr) return;
-    tr.querySelector('.c-sku').innerHTML = `<input type="text" id="edit-sku" value="${sku}" />`;
+    tr.querySelector('.c-mla').innerHTML = `<input type="text" id="edit-mla" value="${mla}" />`;
+    tr.querySelector('.c-sku').innerHTML = `<input type="text" id="edit-sku" value="${sku || ''}" placeholder="(opcional)" />`;
     tr.querySelector('.c-pct').innerHTML = `<input type="number" id="edit-pct" value="${pct}" step="0.5" min="0" max="100" />`;
     tr.querySelector('td[style*="text-align:right"]').innerHTML = `
       <button class="btn-save" onclick="saveEdit('${rowId}')">Guardar</button>
@@ -284,7 +292,8 @@
     const tr = document.querySelector(`tr[data-row-id="${rowId}"]`);
     if(!tr) return;
     const form = new FormData();
-    form.append('old_sku', tr.dataset.oldSku);
+    form.append('old_mla', tr.dataset.oldMla);
+    form.append('mla', document.getElementById('edit-mla').value.trim());
     form.append('sku', document.getElementById('edit-sku').value.trim());
     form.append('discount_pct', String(parseFloat(document.getElementById('edit-pct').value)));
     try {
@@ -295,20 +304,23 @@
   }
 
   async function addDescuento() {
+    const mla = (document.getElementById('manual-mla').value || '').trim();
     const sku = (document.getElementById('manual-sku').value || '').trim();
     const pct = parseFloat(document.getElementById('manual-pct').value);
     const msg = document.getElementById('add-msg');
-    if(!sku || isNaN(pct) || pct < 0 || pct > 100) {
-      msg.innerHTML = '<div class="msg err">SKU y % válido son obligatorios.</div>';
+    if(!mla || isNaN(pct) || pct < 0 || pct > 100) {
+      msg.innerHTML = '<div class="msg err">MLA y % válido son obligatorios.</div>';
       return;
     }
     const form = new FormData();
+    form.append('mla', mla);
     form.append('sku', sku);
     form.append('discount_pct', String(pct));
     try {
       const r = await fetch(`/api/descuentos/${currentAccountId}`, { method: 'POST', body: form });
       if(!r.ok) throw new Error('Error al guardar');
       msg.innerHTML = '<div class="msg ok">Guardado.</div>';
+      document.getElementById('manual-mla').value = '';
       document.getElementById('manual-sku').value = '';
       document.getElementById('manual-pct').value = '';
       await loadBase();
@@ -317,10 +329,10 @@
     }
   }
 
-  async function deleteDescuento(sku) {
-    if(!confirm(`¿Eliminar el descuento de ${sku}?`)) return;
+  async function deleteDescuento(mla) {
+    if(!confirm(`¿Eliminar el descuento de ${mla}?`)) return;
     try {
-      const r = await fetch(`/api/descuentos/${currentAccountId}/${encodeURIComponent(sku)}`, { method: 'DELETE' });
+      const r = await fetch(`/api/descuentos/${currentAccountId}/${encodeURIComponent(mla)}`, { method: 'DELETE' });
       if(!r.ok) throw new Error('Error');
       await loadBase();
     } catch(e) { alert(e.message); }
@@ -405,7 +417,7 @@
     currentStatus = status;
     const tbody = document.getElementById('preview-tbody');
     const statusEl = document.getElementById('preview-status');
-    tbody.innerHTML = '<tr><td colspan="9" class="empty">Cargando items...</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="10" class="empty">Cargando items...</td></tr>';
     statusEl.textContent = '';
     try {
       const params = new URLSearchParams({ status });
@@ -424,7 +436,7 @@
   function renderPreview() {
     const tbody = document.getElementById('preview-tbody');
     if(!currentItems.length) {
-      tbody.innerHTML = `<tr><td colspan="9" class="empty">No hay items en este estado.</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="10" class="empty">No hay items en este estado.</td></tr>`;
       document.getElementById('preview-summary').innerHTML = '';
       document.getElementById('btn-apply').disabled = true;
       return;
@@ -446,6 +458,7 @@
       return `
         <tr class="${rowCls}" data-idx="${idx}">
           <td><input type="checkbox" class="row-check" ${checked} onchange="updateSelectedCount()" /></td>
+          <td style="font-family:monospace;font-size:12px;">${it.mla || '—'}</td>
           <td><b>${it.sku || '—'}</b></td>
           <td style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${it.title || ''}">${it.title || '—'}</td>
           <td class="num">${fmt(it.original_price)}</td>
