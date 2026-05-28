@@ -27,7 +27,7 @@ ADMIN_PASSWORD = os.environ["ADMIN_PASSWORD"]
 ML_AUTH_URL = "https://auth.mercadolibre.com.ar/authorization"
 ML_TOKEN_URL = "https://api.mercadolibre.com/oauth/token"
 ML_API_URL = "https://api.mercadolibre.com"
-SHIPPING_LOGIC_VERSION = "v18-colecta-seller-gross"
+SHIPPING_LOGIC_VERSION = "v19-cmv-versioned-iva-gross"
 
 serializer = URLSafeTimedSerializer(SECRET_KEY)
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -100,6 +100,21 @@ def init_db():
                 PRIMARY KEY (account_id, sku)
             )
         """))
+        # Migración a costos versionados (fecha de vigencia + IVA).
+        conn.execute(text("ALTER TABLE product_costs ADD COLUMN IF NOT EXISTS valid_from DATE"))
+        conn.execute(text("ALTER TABLE product_costs ADD COLUMN IF NOT EXISTS iva_included BOOLEAN DEFAULT FALSE"))
+        conn.execute(text("UPDATE product_costs SET valid_from = CAST(updated_at AS DATE) WHERE valid_from IS NULL"))
+        conn.execute(text("ALTER TABLE product_costs ALTER COLUMN valid_from SET NOT NULL"))
+        # Cambiar PK a (account_id, sku, valid_from) si todavía no lo es.
+        pk_cols = conn.execute(text("""
+            SELECT string_agg(a.attname, ',' ORDER BY array_position(i.indkey, a.attnum))
+            FROM pg_index i
+            JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+            WHERE i.indrelid = 'product_costs'::regclass AND i.indisprimary
+        """)).fetchone()
+        if pk_cols and pk_cols[0] != "account_id,sku,valid_from":
+            conn.execute(text("ALTER TABLE product_costs DROP CONSTRAINT product_costs_pkey"))
+            conn.execute(text("ALTER TABLE product_costs ADD PRIMARY KEY (account_id, sku, valid_from)"))
         # Invalida el caché cuando cambia la lógica de cálculo de envío.
         current = conn.execute(text("SELECT value FROM app_meta WHERE key='shipping_logic_version'")).fetchone()
         if not current or current[0] != SHIPPING_LOGIC_VERSION:
@@ -635,12 +650,20 @@ async def get_shipping_cost(client, shipping_id, headers) -> dict:
         # Colecta / Full
         if cost > 0:
             buyer_cost = cost
-            # ML puede descontarle al vendedor un monto MAYOR a lo que pagó
-            # el comprador (el vendedor absorbe la diferencia). Ej:
-            # #2000016645537442 — comprador paga $5.331,48, ML cobra al
-            # vendedor $12.801,48 → neto envío −$7.470. Por eso usamos
-            # senders[0].cost (gross real del descuento), no cost del comprador.
-            seller_cost = costs_sender_cost if costs_sender_cost > 0 else cost
+            # En colecta paga, senders[0].cost de /shipments/{id}/costs es
+            # el NETO que el vendedor absorbe (después de descontar lo que
+            # pagó el comprador). El panel de ML muestra el GROSS ("Cargo
+            # por Envíos de Mercado Libre"). Para reconstruirlo:
+            #   gross = gross_amount (si /costs lo expone)
+            #         = senders[0].cost + receiver.cost (suma del neto +
+            #           lo que aportó el comprador)
+            # Ej: #2000016645537442 → buyer $5.331,48 + net $7.470 = $12.801,48.
+            if costs_gross_amount > 0:
+                seller_cost = costs_gross_amount
+            elif costs_sender_cost > 0 or receiver_cost > 0:
+                seller_cost = costs_sender_cost + (receiver_cost or buyer_cost)
+            else:
+                seller_cost = cost
             bonificacion = compensation
         else:
             # Envío Gratis: el Costo Envío que muestra ML es el monto NETO que
@@ -775,20 +798,65 @@ async def ml_disconnect(request: Request, account_id: int):
 
 # ── Costos de mercadería (CMV) ──────────────────────────────────
 
+IVA_RATE = 1.21  # 21% IVA Argentina
+
+
 def db_get_product_costs(account_id: int) -> dict:
-    """Devuelve {sku_uppercase: float_cost} para una cuenta."""
+    """Devuelve {sku_uppercase: [entries sorted by valid_from asc]}.
+    Cada entry: {cost, iva_included, valid_from (str ISO)}.
+    """
     rows = db_fetchall(
-        "SELECT sku, cost FROM product_costs WHERE account_id = :aid",
+        "SELECT sku, cost, iva_included, valid_from FROM product_costs"
+        " WHERE account_id = :aid ORDER BY sku, valid_from",
         {"aid": account_id},
     )
-    return {(r["sku"] or "").strip().upper(): float(r["cost"]) for r in rows if r.get("sku")}
+    out: dict = {}
+    for r in rows:
+        if not r.get("sku"):
+            continue
+        key = (r["sku"] or "").strip().upper()
+        vf = r["valid_from"]
+        out.setdefault(key, []).append({
+            "cost": float(r["cost"]),
+            "iva_included": bool(r["iva_included"]),
+            "valid_from": vf.isoformat() if hasattr(vf, "isoformat") else str(vf),
+        })
+    return out
+
+
+def find_cost_for_date(versioned: dict, sku: str, sale_date: str) -> dict:
+    """Devuelve la entry de costo más reciente con valid_from <= sale_date."""
+    if not sku or not sale_date:
+        return None
+    entries = versioned.get(sku.strip().upper())
+    if not entries:
+        return None
+    selected = None
+    for e in entries:
+        if e["valid_from"] <= sale_date:
+            selected = e
+        else:
+            break
+    return selected
+
+
+def cost_with_iva(entry: dict) -> float:
+    """Convierte la entry de costo a un valor con IVA incluido (comparable
+    con monto/comisión/envío que ya vienen con IVA en ML)."""
+    if not entry:
+        return 0.0
+    cost = float(entry.get("cost") or 0)
+    if entry.get("iva_included"):
+        return cost
+    return cost * IVA_RATE
 
 
 def db_save_product_costs(account_id: int, items: list):
-    """Inserta/actualiza una lista de {sku, cost} en una sola transacción."""
+    """Inserta/actualiza lista de {sku, cost, iva_included, valid_from}."""
     if not items:
         return 0
     params = []
+    today_iso = datetime.utcnow().date().isoformat()
     for it in items:
         sku = (it.get("sku") or "").strip()
         if not sku:
@@ -799,22 +867,74 @@ def db_save_product_costs(account_id: int, items: list):
             continue
         if cost <= 0:
             continue
-        params.append({"aid": account_id, "sku": sku, "cost": cost})
+        vf = it.get("valid_from") or today_iso
+        if hasattr(vf, "isoformat"):
+            vf = vf.isoformat()
+        params.append({
+            "aid": account_id, "sku": sku, "cost": cost,
+            "iva": bool(it.get("iva_included")),
+            "vf": vf,
+        })
     if not params:
         return 0
     with engine.connect() as conn:
         conn.execute(text(
-            "INSERT INTO product_costs (account_id, sku, cost, updated_at)"
-            " VALUES (:aid, :sku, :cost, NOW())"
-            " ON CONFLICT (account_id, sku) DO UPDATE SET"
-            " cost = EXCLUDED.cost, updated_at = NOW()"
+            "INSERT INTO product_costs (account_id, sku, cost, iva_included, valid_from, updated_at)"
+            " VALUES (:aid, :sku, :cost, :iva, :vf, NOW())"
+            " ON CONFLICT (account_id, sku, valid_from) DO UPDATE SET"
+            " cost = EXCLUDED.cost,"
+            " iva_included = EXCLUDED.iva_included,"
+            " updated_at = NOW()"
         ), params)
         conn.commit()
     return len(params)
 
 
+def _parse_iva_cell(value) -> bool:
+    """Convierte distintas representaciones de IVA a booleano (incluido=True)."""
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    s = str(value).strip().lower()
+    if not s:
+        return False
+    if s in {"si", "sí", "true", "1", "yes", "y", "con iva", "incluido", "incluye", "con", "21", "21%"}:
+        return True
+    return False
+
+
+def _parse_date_cell(value):
+    """Devuelve un string ISO (YYYY-MM-DD) o None."""
+    if value is None or value == "":
+        return None
+    if hasattr(value, "isoformat"):
+        try:
+            return value.date().isoformat() if hasattr(value, "date") else value.isoformat()
+        except Exception:
+            pass
+    s = str(value).strip()
+    if not s:
+        return None
+    # Probar formatos comunes
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d/%m/%y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(s, fmt).date().isoformat()
+        except ValueError:
+            continue
+    return None
+
+
+def _find_col(header: list, keywords: list) -> Optional[int]:
+    for i, n in enumerate(header):
+        for k in keywords:
+            if k in n:
+                return i
+    return None
+
+
 def parse_excel_costs(content: bytes) -> list:
-    """Devuelve [{sku, cost}, ...] leyendo un xlsx en bytes."""
+    """Devuelve [{sku, cost, iva_included, valid_from}, ...] desde xlsx."""
     import io
     from openpyxl import load_workbook
     wb = load_workbook(io.BytesIO(content), data_only=True, read_only=True)
@@ -822,7 +942,6 @@ def parse_excel_costs(content: bytes) -> list:
     rows = list(ws.iter_rows(values_only=True))
     if not rows:
         return []
-    # Detectar header: buscar 'sku' y 'costo'/'cost' en la primera fila no vacía.
     header = None
     data_start = 0
     for idx, row in enumerate(rows[:5]):
@@ -835,14 +954,14 @@ def parse_excel_costs(content: bytes) -> list:
             break
     if not header:
         return []
-    sku_idx = next((i for i, n in enumerate(header) if "sku" in n), None)
-    cost_idx = next(
-        (i for i, n in enumerate(header) if n in {"costo", "cost", "precio", "precio_costo"} or "costo" in n or "cost" in n),
-        None,
-    )
+    sku_idx = _find_col(header, ["sku"])
+    cost_idx = _find_col(header, ["costo", "cost", "precio"])
+    fecha_idx = _find_col(header, ["fecha", "date", "vigencia", "desde"])
+    iva_idx = _find_col(header, ["iva"])
     if sku_idx is None or cost_idx is None:
         return []
     items = []
+    today_iso = datetime.utcnow().date().isoformat()
     for row in rows[data_start:]:
         if row is None or len(row) <= max(sku_idx, cost_idx):
             continue
@@ -850,15 +969,21 @@ def parse_excel_costs(content: bytes) -> list:
         cost = row[cost_idx]
         if sku is None or cost is None:
             continue
-        items.append({"sku": str(sku).strip(), "cost": cost})
+        fecha = _parse_date_cell(row[fecha_idx]) if fecha_idx is not None and len(row) > fecha_idx else None
+        iva = _parse_iva_cell(row[iva_idx]) if iva_idx is not None and len(row) > iva_idx else False
+        items.append({
+            "sku": str(sku).strip(),
+            "cost": cost,
+            "valid_from": fecha or today_iso,
+            "iva_included": iva,
+        })
     return items
 
 
 def parse_csv_costs(content: bytes) -> list:
-    """Devuelve [{sku, cost}, ...] leyendo un csv en bytes."""
+    """Devuelve [{sku, cost, iva_included, valid_from}, ...] desde csv."""
     import csv, io
     text_content = content.decode("utf-8-sig", errors="ignore")
-    # Detectar separador (coma o punto y coma)
     sample = text_content[:2048]
     sep = ";" if sample.count(";") > sample.count(",") else ","
     reader = csv.reader(io.StringIO(text_content), delimiter=sep)
@@ -866,26 +991,36 @@ def parse_csv_costs(content: bytes) -> list:
     if not rows:
         return []
     header = [(c or "").strip().lower() for c in rows[0]]
-    sku_idx = next((i for i, n in enumerate(header) if "sku" in n), None)
-    cost_idx = next(
-        (i for i, n in enumerate(header) if n in {"costo", "cost", "precio", "precio_costo"} or "costo" in n or "cost" in n),
-        None,
-    )
+    sku_idx = _find_col(header, ["sku"])
+    cost_idx = _find_col(header, ["costo", "cost", "precio"])
+    fecha_idx = _find_col(header, ["fecha", "date", "vigencia", "desde"])
+    iva_idx = _find_col(header, ["iva"])
     if sku_idx is None or cost_idx is None:
         return []
     items = []
+    today_iso = datetime.utcnow().date().isoformat()
     for row in rows[1:]:
         if len(row) <= max(sku_idx, cost_idx):
             continue
         sku = (row[sku_idx] or "").strip()
-        raw_cost = (row[cost_idx] or "").strip().replace(".", "").replace(",", ".") if sep == ";" else (row[cost_idx] or "").strip().replace(",", "")
+        raw_cost = (row[cost_idx] or "").strip()
+        if sep == ";":
+            raw_cost = raw_cost.replace(".", "").replace(",", ".")
+        else:
+            raw_cost = raw_cost.replace(",", "")
         if not sku or not raw_cost:
             continue
         try:
             cost = float(raw_cost)
         except ValueError:
             continue
-        items.append({"sku": sku, "cost": cost})
+        fecha = _parse_date_cell(row[fecha_idx]) if fecha_idx is not None and len(row) > fecha_idx else None
+        iva = _parse_iva_cell(row[iva_idx]) if iva_idx is not None and len(row) > iva_idx else False
+        items.append({
+            "sku": sku, "cost": cost,
+            "valid_from": fecha or today_iso,
+            "iva_included": iva,
+        })
     return items
 
 
@@ -911,42 +1046,67 @@ async def api_costos_list(request: Request, account_id: int):
     if not acc:
         raise HTTPException(404)
     rows = db_fetchall(
-        "SELECT sku, cost, updated_at FROM product_costs WHERE account_id=:aid ORDER BY sku",
+        "SELECT sku, cost, iva_included, valid_from, updated_at FROM product_costs"
+        " WHERE account_id=:aid ORDER BY sku, valid_from DESC",
         {"aid": account_id},
     )
     return {
         "items": [
-            {"sku": r["sku"], "cost": float(r["cost"]), "updated_at": r["updated_at"].isoformat() if r.get("updated_at") else None}
+            {
+                "sku": r["sku"],
+                "cost": float(r["cost"]),
+                "iva_included": bool(r["iva_included"]),
+                "valid_from": r["valid_from"].isoformat() if hasattr(r["valid_from"], "isoformat") else str(r["valid_from"]),
+                "updated_at": r["updated_at"].isoformat() if r.get("updated_at") else None,
+            }
             for r in rows
         ],
     }
 
 
 @app.post("/api/costos/{account_id}")
-async def api_costos_upsert(request: Request, account_id: int, sku: str = Form(...), cost: float = Form(...)):
+async def api_costos_upsert(
+    request: Request, account_id: int,
+    sku: str = Form(...),
+    cost: float = Form(...),
+    valid_from: Optional[str] = Form(None),
+    iva_included: Optional[str] = Form(None),
+):
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
     acc = db_fetchone("SELECT id FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
     if not acc:
         raise HTTPException(404)
-    saved = db_save_product_costs(account_id, [{"sku": sku, "cost": cost}])
+    iva_flag = str(iva_included or "").lower() in {"1", "true", "on", "yes", "si", "sí"}
+    saved = db_save_product_costs(account_id, [{
+        "sku": sku, "cost": cost,
+        "valid_from": valid_from or datetime.utcnow().date().isoformat(),
+        "iva_included": iva_flag,
+    }])
     invalidate_orders_cache_for_account(account_id)
     return {"ok": True, "saved": saved}
 
 
 @app.delete("/api/costos/{account_id}/{sku}")
-async def api_costos_delete(request: Request, account_id: int, sku: str):
+async def api_costos_delete(request: Request, account_id: int, sku: str, valid_from: Optional[str] = None):
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
     acc = db_fetchone("SELECT id FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
     if not acc:
         raise HTTPException(404)
-    db_execute(
-        "DELETE FROM product_costs WHERE account_id=:aid AND sku=:sku",
-        {"aid": account_id, "sku": sku},
-    )
+    if valid_from:
+        db_execute(
+            "DELETE FROM product_costs WHERE account_id=:aid AND sku=:sku AND valid_from=:vf",
+            {"aid": account_id, "sku": sku, "vf": valid_from},
+        )
+    else:
+        # Sin fecha: borra TODAS las versiones de ese SKU
+        db_execute(
+            "DELETE FROM product_costs WHERE account_id=:aid AND sku=:sku",
+            {"aid": account_id, "sku": sku},
+        )
     invalidate_orders_cache_for_account(account_id)
     return {"ok": True}
 
@@ -1117,8 +1277,8 @@ async def api_orders(request: Request, account_id: int,
 
     empty_ship = {"seller": 0.0, "buyer": 0.0, "bonificacion": 0.0}
 
-    # Cargar costos de mercadería de esta cuenta (CMV por SKU).
-    product_costs = db_get_product_costs(account_id)
+    # Cargar costos versionados de mercadería (CMV por SKU con fechas).
+    versioned_costs = db_get_product_costs(account_id)
 
     # ── Paso 1: construir lista raw por orden individual ──────────
     raw_list = []
@@ -1167,7 +1327,12 @@ async def api_orders(request: Request, account_id: int,
         for i in o.get("order_items", []):
             sku = (i.get("item", {}).get("seller_sku") or "").strip()
             qty = int(i.get("quantity", 1))
-            unit_cost = product_costs.get(sku.upper(), 0.0) if sku else 0.0
+            # Buscar el costo vigente al momento de la venta (más reciente
+            # entry con valid_from <= fecha de la venta). Si el costo está
+            # cargado sin IVA, le aplicamos 21% para que sea comparable con
+            # monto/comisión que vienen con IVA incluido.
+            cost_entry = find_cost_for_date(versioned_costs, sku, fecha) if sku else None
+            unit_cost = cost_with_iva(cost_entry)
             item_cmv = round(unit_cost * qty, 2)
             order_cmv += item_cmv
             items.append({

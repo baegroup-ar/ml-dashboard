@@ -30,8 +30,9 @@
     .upload-row button:disabled { background: #ccc; cursor: not-allowed; }
     .add-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
     .add-row input { padding: 7px 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 13px; font-family: 'Inter', sans-serif; }
-    .add-row input.sku { width: 200px; text-transform: uppercase; }
-    .add-row input.cost { width: 120px; }
+    .add-row input.sku { width: 180px; text-transform: uppercase; }
+    .add-row input.cost { width: 110px; }
+    .add-row input[type=date] { width: 140px; }
     .add-row button { padding: 8px 16px; border: none; border-radius: 8px; background: #3483FA; color: #fff; font-size: 13px; cursor: pointer; }
     .add-row button:hover { background: #2970e0; }
     table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 12px; }
@@ -70,7 +71,13 @@
 
 <main>
   <h1>Costos de mercadería (CMV)</h1>
-  <p class="lead">Cargá el costo de cada SKU. Después se cruza con cada venta para calcular la ganancia real (Monto − Comisión − Envío − CMV).</p>
+  <p class="lead">
+    Cargá el costo de cada SKU con la <b>fecha desde la cual aplica</b>. Cada venta toma
+    el costo vigente al momento de la venta (la entry más reciente con fecha ≤ fecha de la venta),
+    así se respeta el costo histórico ponderado.
+    Si el costo es <b>sin IVA</b>, el sistema le aplica 21% automáticamente para compararlo con
+    Monto/Comisión/Envío que vienen con IVA incluido.
+  </p>
 
   {% if accounts %}
   <div class="card">
@@ -92,8 +99,10 @@
       <button onclick="uploadFile()" id="btn-upload">Subir archivo</button>
     </div>
     <div class="help-box">
-      Formato esperado: una columna <code>SKU</code> y una columna <code>Costo</code> (Excel <code>.xlsx</code> o CSV).
-      El sistema reemplaza los costos existentes por los nuevos manteniendo los SKUs que no estén en el archivo.
+      Columnas esperadas: <code>SKU</code>, <code>Costo</code>, opcionalmente <code>Fecha</code>
+      (vigencia desde, formato <code>YYYY-MM-DD</code> o <code>DD/MM/YYYY</code>; si falta, hoy)
+      y <code>IVA</code> (<code>Sí</code>/<code>No</code> — si el costo ya incluye IVA; por defecto <b>sin IVA</b>).
+      Cada combinación SKU+Fecha es una versión histórica de costo.
     </div>
     <div id="upload-msg"></div>
   </div>
@@ -103,7 +112,14 @@
     <div class="add-row">
       <input type="text" id="manual-sku" class="sku" placeholder="SKU (ej. SOP68-443)" />
       <input type="number" id="manual-cost" class="cost" placeholder="Costo" step="0.01" min="0" />
+      <input type="date" id="manual-fecha" title="Vigente desde" />
+      <label style="font-size:12px;color:#555;display:flex;align-items:center;gap:4px;">
+        <input type="checkbox" id="manual-iva" /> Costo con IVA
+      </label>
       <button onclick="addCost()">Guardar</button>
+    </div>
+    <div style="font-size:11px;color:#888;margin-top:6px;">
+      Si dejás la fecha vacía toma hoy. Si el costo no tiene IVA, dejá el checkbox sin marcar.
     </div>
     <div id="add-msg"></div>
   </div>
@@ -115,9 +131,11 @@
     </div>
     <div style="overflow-x:auto;">
       <table>
-        <thead><tr><th>SKU</th><th>Costo</th><th>Actualizado</th><th class="actions">Acciones</th></tr></thead>
+        <thead><tr>
+          <th>SKU</th><th>Costo</th><th>IVA</th><th>Vigente desde</th><th>Actualizado</th><th class="actions">Acciones</th>
+        </tr></thead>
         <tbody id="costs-tbody">
-          <tr><td colspan="4" class="empty">Cargando...</td></tr>
+          <tr><td colspan="6" class="empty">Cargando...</td></tr>
         </tbody>
       </table>
     </div>
@@ -143,7 +161,7 @@
   async function loadCosts() {
     if(!currentAccountId) return;
     const tbody = document.getElementById('costs-tbody');
-    tbody.innerHTML = '<tr><td colspan="4" class="empty">Cargando...</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" class="empty">Cargando...</td></tr>';
     try {
       const r = await fetch(`/api/costos/${currentAccountId}`);
       if(!r.ok) throw new Error('Error al cargar');
@@ -151,7 +169,7 @@
       allItems = data.items || [];
       renderTable();
     } catch(e) {
-      tbody.innerHTML = `<tr><td colspan="4" class="empty">Error: ${e.message}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="6" class="empty">Error: ${e.message}</td></tr>`;
     }
   }
 
@@ -161,17 +179,21 @@
     const items = filter
       ? allItems.filter(it => (it.sku || '').toUpperCase().includes(filter))
       : allItems;
-    document.getElementById('count-label').textContent = `${allItems.length} SKU${allItems.length===1?'':'s'} cargados`;
+    const uniqueSkus = new Set(allItems.map(it => (it.sku || '').toUpperCase())).size;
+    document.getElementById('count-label').textContent =
+      `${uniqueSkus} SKU${uniqueSkus===1?'':'s'} · ${allItems.length} entrada${allItems.length===1?'':'s'}`;
     if(!items.length) {
-      tbody.innerHTML = `<tr><td colspan="4" class="empty">${filter ? 'Sin resultados.' : 'Todavía no hay costos cargados.'}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="6" class="empty">${filter ? 'Sin resultados.' : 'Todavía no hay costos cargados.'}</td></tr>`;
       return;
     }
     tbody.innerHTML = items.map(it => `
       <tr>
         <td><b>${it.sku}</b></td>
         <td>${fmt(it.cost)}</td>
+        <td style="font-size:12px;color:${it.iva_included ? '#1a8a5a' : '#c47a1e'};">${it.iva_included ? 'Con IVA' : 'Sin IVA (+21%)'}</td>
+        <td style="font-size:12px;">${it.valid_from || '—'}</td>
         <td style="color:#888;font-size:12px;">${it.updated_at ? new Date(it.updated_at + 'Z').toLocaleString('es-AR', {dateStyle:'short', timeStyle:'short'}) : ''}</td>
-        <td class="actions"><button class="btn-delete" onclick="deleteCost('${it.sku.replace(/'/g, "\\'")}')">Eliminar</button></td>
+        <td class="actions"><button class="btn-delete" onclick="deleteCost('${it.sku.replace(/'/g, "\\'")}', '${it.valid_from}')">Eliminar</button></td>
       </tr>
     `).join('');
   }
@@ -212,6 +234,8 @@
     if(!currentAccountId) return;
     const sku = (document.getElementById('manual-sku').value || '').trim();
     const cost = parseFloat(document.getElementById('manual-cost').value);
+    const fecha = document.getElementById('manual-fecha').value || '';
+    const ivaChecked = document.getElementById('manual-iva').checked;
     const msg = document.getElementById('add-msg');
     if(!sku || isNaN(cost) || cost <= 0) {
       msg.innerHTML = '<div class="msg err">SKU y costo válido son obligatorios.</div>';
@@ -220,22 +244,27 @@
     const form = new FormData();
     form.append('sku', sku);
     form.append('cost', String(cost));
+    if(fecha) form.append('valid_from', fecha);
+    form.append('iva_included', ivaChecked ? '1' : '0');
     try {
       const r = await fetch(`/api/costos/${currentAccountId}`, { method: 'POST', body: form });
       if(!r.ok) throw new Error('Error al guardar');
       msg.innerHTML = '<div class="msg ok">Guardado.</div>';
       document.getElementById('manual-sku').value = '';
       document.getElementById('manual-cost').value = '';
+      document.getElementById('manual-fecha').value = '';
+      document.getElementById('manual-iva').checked = false;
       await loadCosts();
     } catch(e) {
       msg.innerHTML = `<div class="msg err">${e.message}</div>`;
     }
   }
 
-  async function deleteCost(sku) {
-    if(!confirm(`¿Eliminar el costo de ${sku}?`)) return;
+  async function deleteCost(sku, validFrom) {
+    if(!confirm(`¿Eliminar el costo de ${sku} (vigente desde ${validFrom})?`)) return;
     try {
-      const r = await fetch(`/api/costos/${currentAccountId}/${encodeURIComponent(sku)}`, { method: 'DELETE' });
+      const url = `/api/costos/${currentAccountId}/${encodeURIComponent(sku)}?valid_from=${encodeURIComponent(validFrom)}`;
+      const r = await fetch(url, { method: 'DELETE' });
       if(!r.ok) throw new Error('Error');
       await loadCosts();
     } catch(e) {
