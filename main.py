@@ -27,7 +27,7 @@ ADMIN_PASSWORD = os.environ["ADMIN_PASSWORD"]
 ML_AUTH_URL = "https://auth.mercadolibre.com.ar/authorization"
 ML_TOKEN_URL = "https://api.mercadolibre.com/oauth/token"
 ML_API_URL = "https://api.mercadolibre.com"
-SHIPPING_LOGIC_VERSION = "v22-no-fake-bonif-sku-fallback"
+SHIPPING_LOGIC_VERSION = "v23-unified-envio-formula"
 
 serializer = URLSafeTimedSerializer(SECRET_KEY)
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -676,55 +676,41 @@ async def get_shipping_cost(client, shipping_id, headers) -> dict:
             return gross_cost - net_cost
         return 0.0
 
-    if is_flex:
-        # Flex: ML descuenta el list_cost y compensa con la bonificación.
-        buyer_cost = buyer_cost_from_costs
-        seller_net_cost = costs_sender_cost or list_cost or base_cost or cost
-        seller_cost = gross_candidate(seller_net_cost, compensation or sender_discount)
-        bonificacion = derive_bonif(seller_net_cost, seller_cost)
-        if bonificacion == 0 and buyer_cost == 0 and seller_net_cost > 0 and seller_cost == seller_net_cost:
-            bonificacion = seller_cost
-            seller_cost = 0.0
-    elif logistic_type in {"xd_drop_off", "drop_off", "cross_docking", "fulfillment"}:
-        # Colecta / Full
-        if cost > 0:
-            buyer_cost = cost
-            # En colecta paga, senders[0].cost de /shipments/{id}/costs
-            # es el NETO que el vendedor absorbe (después de descontar
-            # lo que pagó el comprador). Para mostrar el "Cargo por
-            # Envíos" GROSS del panel de ML, reconstruimos:
-            #   gross = senders[0].cost (neto) + receiver.cost (buyer)
-            # Ej: #2000016645537442 → buyer $5.331,48 + net $7.470 = $12.801,48.
-            # Ej: #2000016628948574 → buyer $14.180 + net $0 = $14.180.
-            seller_cost = costs_sender_cost + (receiver_cost or buyer_cost)
-            if seller_cost <= 0:
-                seller_cost = cost
-            bonificacion = compensation
-        else:
-            # Envío Gratis: el comprador paga 0. Confiamos en lo que devuelve
-            # /costs — NO inferimos bonificaciones cuando la API no las expone.
-            #   - senders[0].cost > 0 → ese es el cargo real al vendedor.
-            #   - compensation/discounts > 0 → bonificación explícita de ML.
-            # Ej. #2000013189550281 (Bonif $6.490) → la API expone discount/compensation.
-            # Ej. #2000013213985241 (Envíos -$10.760, sin bonif) → la API expone sólo sender.cost.
-            # No "neteamos" automáticamente: el panel de ML muestra distinta
-            # info según el caso y replicamos eso.
-            buyer_cost = 0.0
-            seller_cost = costs_sender_cost
-            bonificacion = max(compensation, sender_discount, option_discount_amount)
-            # Si /costs no devolvió data útil (sender=0 y sin bonif), aplicar
-            # el fallback Argentina (50% del list_cost) sólo como aproximación.
-            if seller_cost == 0 and bonificacion == 0:
-                if option_discount_rate and list_cost > 0:
-                    seller_cost = list_cost * (1.0 - option_discount_rate)
-                elif list_cost > 0 or base_cost > 0:
-                    seller_cost = (list_cost or base_cost) * 0.5
+    # ── Fórmula unificada basada en lo que devuelve /shipments/{id}/costs ──
+    # Idea: el panel de ML para cada venta arma sus líneas a partir de:
+    #   - receiver.cost     (Pago de Mercado Envíos del comprador, INGRESO)
+    #   - senders[0].cost   (lo que ML descuenta NETO al vendedor)
+    #   - gross_amount      (lo que ML cobra sin descontar nada)
+    # Reconstruimos las líneas del panel:
+    #   Ing. Envío (lo que paga el comprador) = receiver.cost
+    #   Costo Envío:
+    #     · Colecta / Full → senders.cost + receiver.cost (GROSS "Cargo por
+    #       Envíos" que muestra el panel cuando el comprador aporta parte).
+    #     · Flex u otros  → senders.cost directo (el vendedor no paga por ML).
+    #   Bonificación = max(compensation, discounts, save, gross − sender − receiver).
+    # La fórmula del bonif implícito captura los casos donde ML otorga una
+    # bonificación pero no la expone en compensation explícita: la diferencia
+    # entre el gross (lo que ML cobra) y lo que efectivamente se paga es
+    # exactamente la bonificación.
+    is_colecta = logistic_type in {"xd_drop_off", "drop_off", "cross_docking", "fulfillment"}
+
+    buyer_cost = receiver_cost if receiver_cost > 0 else cost
+    if is_colecta:
+        seller_cost = costs_sender_cost + receiver_cost
     else:
-        # logistic_type vacío o desconocido (común en ventas canceladas).
-        # Confiamos en lo que devuelve /costs sin inferir bonificaciones.
-        buyer_cost = buyer_cost_from_costs
-        seller_cost = costs_sender_cost or base_cost or list_cost or cost
-        bonificacion = max(compensation, sender_discount, option_discount_amount)
+        seller_cost = costs_sender_cost
+
+    explicit_bonif = max(compensation, sender_discount, option_discount_amount)
+    implicit_bonif = max(0.0, costs_gross_amount - costs_sender_cost - receiver_cost)
+    bonificacion = max(explicit_bonif, implicit_bonif)
+
+    # Fallback sólo cuando /costs no devolvió data útil para esa venta
+    # (ej. shipments cancelados o sin info de costos).
+    if seller_cost == 0 and bonificacion == 0 and buyer_cost == 0 and is_colecta:
+        if option_discount_rate and list_cost > 0:
+            seller_cost = list_cost * (1.0 - option_discount_rate)
+        elif list_cost > 0 or base_cost > 0:
+            seller_cost = (list_cost or base_cost) * 0.5
 
     return {
         "seller": round(seller_cost, 2),
