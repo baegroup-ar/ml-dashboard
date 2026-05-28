@@ -27,7 +27,7 @@ ADMIN_PASSWORD = os.environ["ADMIN_PASSWORD"]
 ML_AUTH_URL = "https://auth.mercadolibre.com.ar/authorization"
 ML_TOKEN_URL = "https://api.mercadolibre.com/oauth/token"
 ML_API_URL = "https://api.mercadolibre.com"
-SHIPPING_LOGIC_VERSION = "v17-cmv"
+SHIPPING_LOGIC_VERSION = "v18-colecta-seller-gross"
 
 serializer = URLSafeTimedSerializer(SECRET_KEY)
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -635,8 +635,13 @@ async def get_shipping_cost(client, shipping_id, headers) -> dict:
         # Colecta / Full
         if cost > 0:
             buyer_cost = cost
-            seller_cost = cost
-            bonificacion = 0.0
+            # ML puede descontarle al vendedor un monto MAYOR a lo que pagó
+            # el comprador (el vendedor absorbe la diferencia). Ej:
+            # #2000016645537442 — comprador paga $5.331,48, ML cobra al
+            # vendedor $12.801,48 → neto envío −$7.470. Por eso usamos
+            # senders[0].cost (gross real del descuento), no cost del comprador.
+            seller_cost = costs_sender_cost if costs_sender_cost > 0 else cost
+            bonificacion = compensation
         else:
             # Envío Gratis: el Costo Envío que muestra ML es el monto NETO que
             # le descuenta al vendedor (senders[0].cost en /shipments/{id}/costs),
