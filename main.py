@@ -27,7 +27,7 @@ ADMIN_PASSWORD = os.environ["ADMIN_PASSWORD"]
 ML_AUTH_URL = "https://auth.mercadolibre.com.ar/authorization"
 ML_TOKEN_URL = "https://api.mercadolibre.com/oauth/token"
 ML_API_URL = "https://api.mercadolibre.com"
-SHIPPING_LOGIC_VERSION = "v15-net-cost-envio-gratis"
+SHIPPING_LOGIC_VERSION = "v16-partition-no-billing"
 
 serializer = URLSafeTimedSerializer(SECRET_KEY)
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -805,71 +805,88 @@ async def api_orders(request: Request, account_id: int,
         "order.date_created.to":   to_utc.strftime("%Y-%m-%dT%H:%M:%S.000-00:00"),
     }
 
-    async with httpx.AsyncClient(timeout=90) as client:
-        # Primera página para saber el total
-        r = await client.get(f"{ML_API_URL}/orders/search", headers=headers, params={**search_params, "offset": 0})
-        if r.status_code != 200:
-            raise HTTPException(502)
-        first = r.json()
-        all_results = list(first.get("results", []))
-        total = first.get("paging", {}).get("total", 0)
+    # Particionar el rango en chunks de 30 días para esquivar el tope de
+    # 1000 órdenes por búsqueda paginada que tiene /orders/search.
+    df_d = datetime.strptime(df, "%Y-%m-%d").date()
+    dt_d = datetime.strptime(dt, "%Y-%m-%d").date()
+    date_chunks: list = []
+    cur = df_d
+    while cur <= dt_d:
+        chunk_end = min(cur + timedelta(days=29), dt_d)
+        date_chunks.append((cur, chunk_end))
+        cur = chunk_end + timedelta(days=1)
 
-        # Resto de páginas en paralelo
-        offsets = list(range(50, total, 50))
-        if offsets:
-            page_sem = asyncio.Semaphore(10)
-            async def fetch_page(off: int):
-                async with page_sem:
-                    rp = await client.get(
-                        f"{ML_API_URL}/orders/search", headers=headers,
-                        params={**search_params, "offset": off},
-                    )
-                    return rp.json().get("results", []) if rp.status_code == 200 else []
-            pages = await asyncio.gather(*[fetch_page(off) for off in offsets])
-            for page in pages:
-                all_results.extend(page)
+    base_search = {
+        "seller": acc["ml_user_id"],
+        "sort": "date_desc",
+        "limit": 50,
+    }
 
-        # Costos de envío: primero desde cache, luego API solo para los que faltan
+    async with httpx.AsyncClient(timeout=120) as client:
+        async def fetch_chunk(start_d, end_d):
+            from_utc = datetime.combine(start_d, datetime.min.time()) + timedelta(hours=3) - timedelta(hours=24)
+            to_utc = datetime.combine(end_d, datetime.min.time()) + timedelta(hours=27)
+            chunk_params = {
+                **base_search,
+                "order.date_created.from": from_utc.strftime("%Y-%m-%dT%H:%M:%S.000-00:00"),
+                "order.date_created.to":   to_utc.strftime("%Y-%m-%dT%H:%M:%S.000-00:00"),
+            }
+            r = await client.get(f"{ML_API_URL}/orders/search", headers=headers, params={**chunk_params, "offset": 0})
+            if r.status_code != 200:
+                return []
+            data = r.json()
+            results = list(data.get("results", []))
+            total = min(data.get("paging", {}).get("total", 0), 1000)  # cap duro de ML
+            offsets = list(range(50, total, 50))
+            if offsets:
+                sem = asyncio.Semaphore(8)
+                async def get_page(off):
+                    async with sem:
+                        rp = await client.get(f"{ML_API_URL}/orders/search", headers=headers, params={**chunk_params, "offset": off})
+                        return rp.json().get("results", []) if rp.status_code == 200 else []
+                pages = await asyncio.gather(*[get_page(off) for off in offsets])
+                for page in pages:
+                    results.extend(page)
+            return results
+
+        # Chunks en paralelo. Para 1 año = 12 chunks corriendo a la vez.
+        chunk_results = await asyncio.gather(*[fetch_chunk(s, e) for s, e in date_chunks])
+        all_results: list = []
+        for results in chunk_results:
+            all_results.extend(results)
+
+        # Deduplicar (por si una orden cae en el solapamiento de 24h entre chunks).
+        seen: set = set()
+        deduped: list = []
+        for o in all_results:
+            oid = o.get("id")
+            if oid in seen:
+                continue
+            seen.add(oid)
+            deduped.append(o)
+        all_results = deduped
+
+        # Costos de envío: primero desde cache, luego API solo para los que faltan.
+        # NOTA: ya no consultamos /billing/integration/... — agregaba latencia
+        # sustancial (loops sequenciales internos) y todo lo que necesitamos
+        # (Ing./Bonif./Costo Envío) lo da /shipments/{id}/costs.
         all_sids = [(o.get("shipping") or {}).get("id") for o in all_results]
-        cost_cache = {}
-        billing_by_order = {}
-        flex_billing_by_order = {}
+        cost_cache: dict = {}
+        billing_by_order: dict = {}
+        flex_billing_by_order: dict = {}
         new_shipping_costs: dict = {}
         if not fast:
             unique_sids = [sid for sid in dict.fromkeys(s for s in all_sids if s)]
             cost_cache = db_get_cached_shipping(unique_sids)
             uncached = [sid for sid in unique_sids if sid not in cost_cache]
 
-            # Bajar envíos faltantes, billing normal y billing flex en paralelo.
-            ship_sem = asyncio.Semaphore(25)
-            async def fetch_ship(sid):
-                async with ship_sem:
-                    return sid, await get_shipping_cost(client, sid, headers)
-
-            async def gather_ships():
-                if not uncached:
-                    return {}
-                return dict(await asyncio.gather(*[fetch_ship(sid) for sid in uncached]))
-
-            order_ids_for_billing = [str(o.get("id")) for o in all_results if o.get("id")]
-            order_period_map = {
-                str(o.get("id")): period_key_from_ml_date(o.get("date_created", ""))
-                for o in all_results
-                if o.get("id")
-            }
-
-            # Si alguno de los billing endpoints falla, no rompemos la respuesta;
-            # caemos al cálculo desde /shipments + /shipments/.../costs.
-            results = await asyncio.gather(
-                gather_ships(),
-                fetch_billing_by_order(client, headers, acc["ml_user_id"], order_ids_for_billing),
-                fetch_flex_billing_by_order(client, headers, order_period_map),
-                return_exceptions=True,
-            )
-            new_shipping_costs = results[0] if not isinstance(results[0], Exception) else {}
-            billing_by_order = results[1] if not isinstance(results[1], Exception) else {}
-            flex_billing_by_order = results[2] if not isinstance(results[2], Exception) else {}
-            cost_cache.update(new_shipping_costs)
+            if uncached:
+                ship_sem = asyncio.Semaphore(40)
+                async def fetch_ship(sid):
+                    async with ship_sem:
+                        return sid, await get_shipping_cost(client, sid, headers)
+                new_shipping_costs = dict(await asyncio.gather(*[fetch_ship(sid) for sid in uncached]))
+                cost_cache.update(new_shipping_costs)
 
     empty_ship = {"seller": 0.0, "buyer": 0.0, "bonificacion": 0.0}
 
