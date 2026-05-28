@@ -89,6 +89,9 @@
       </select>
       <span class="count" id="count-label"></span>
     </div>
+    <div style="font-size:12px;color:#888;margin-top:8px;">
+      Los costos se guardan por cuenta. Cada cuenta de ML tiene su propio listado independiente.
+    </div>
   </div>
 
   <div class="card">
@@ -96,12 +99,17 @@
     <div class="upload-row">
       <input type="file" id="file-input" accept=".xlsx,.xlsm,.csv" />
       <button onclick="uploadFile()" id="btn-upload">Subir archivo</button>
+      <a href="/api/costos/template" download="plantilla_costos.xlsx"
+         style="padding:8px 14px;border:1px solid #3483FA;border-radius:8px;background:#fff;color:#3483FA;font-size:13px;text-decoration:none;">
+        Descargar plantilla
+      </a>
     </div>
     <div class="help-box">
       Columnas esperadas: <code>SKU</code>, <code>Costo</code> (sin IVA), opcionalmente
       <code>Fecha</code> (vigencia desde, <code>YYYY-MM-DD</code> o <code>DD/MM/YYYY</code>; si falta, hoy)
       y <code>IVA</code> (tasa: <code>21</code>, <code>10.5</code>, <code>0</code> o <code>Exento</code>;
       default <b>21%</b>). Cada combinación SKU+Fecha es una versión histórica.
+      Bajate la plantilla para tener un Excel listo con las columnas y filas de ejemplo.
     </div>
     <div id="upload-msg"></div>
   </div>

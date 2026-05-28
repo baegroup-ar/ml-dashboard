@@ -1059,6 +1059,79 @@ async def costos_page(request: Request):
     return templates.TemplateResponse("costos.html", {"request": request, "user": user, "accounts": accounts})
 
 
+@app.get("/api/costos/template")
+async def api_costos_template(request: Request):
+    """Genera un Excel modelo (plantilla) con las columnas esperadas
+    y un par de filas de ejemplo para que el usuario lo complete."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    import io
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from fastapi.responses import StreamingResponse
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Costos"
+
+    headers = ["SKU", "Costo", "Fecha", "IVA"]
+    ws.append(headers)
+    # Estilizar header
+    header_fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
+    header_font = Font(bold=True, color="000000")
+    for col_idx, _ in enumerate(headers, start=1):
+        cell = ws.cell(row=1, column=col_idx)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center")
+
+    # Filas de ejemplo
+    examples = [
+        ["SOP68-443", 5000.00, "2025-01-15", 21],
+        ["SOP78-446", 8500.50, "2025-01-15", 10.5],
+        ["SOP22G-44T", 3200.00, "2025-02-01", 0],   # Exento
+    ]
+    for row in examples:
+        ws.append(row)
+
+    # Ancho de columnas
+    ws.column_dimensions["A"].width = 20
+    ws.column_dimensions["B"].width = 14
+    ws.column_dimensions["C"].width = 14
+    ws.column_dimensions["D"].width = 10
+
+    # Hoja de instrucciones
+    ws2 = wb.create_sheet("Instrucciones")
+    instr = [
+        ["Plantilla de costos de mercadería"],
+        [""],
+        ["Columnas:"],
+        ["SKU", "Identificador único del producto (coincide con el seller_sku de ML)."],
+        ["Costo", "Costo SIN IVA (el sistema le aplica la tasa de IVA automáticamente)."],
+        ["Fecha", "Fecha de vigencia desde. Formato YYYY-MM-DD o DD/MM/YYYY. Si la dejás vacía toma hoy."],
+        ["IVA", "Tasa de IVA: 21, 10.5, 0 (exento). También acepta 'Exento'. Default 21."],
+        [""],
+        ["Notas:"],
+        ["", "Cada combinación SKU + Fecha es una versión histórica."],
+        ["", "Las ventas toman el costo vigente más reciente con Fecha ≤ fecha de la venta."],
+        ["", "Los costos son por cuenta de ML — cada cuenta tiene su propio listado."],
+    ]
+    for row in instr:
+        ws2.append(row)
+    ws2.column_dimensions["A"].width = 14
+    ws2.column_dimensions["B"].width = 80
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="plantilla_costos.xlsx"'},
+    )
+
+
 @app.get("/api/costos/{account_id}")
 async def api_costos_list(request: Request, account_id: int):
     user_id = get_session_user_id(request)
