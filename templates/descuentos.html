@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Descuentos · Panel ML</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Inter', sans-serif; background: #f5f5f3; color: #111; }
+    nav { background: #fff; border-bottom: 1px solid #e5e5e3; padding: 0 1.5rem; height: 56px; display: flex; align-items: center; justify-content: space-between; }
+    .nav-brand { font-weight: 600; font-size: 15px; display: flex; align-items: center; gap: 8px; }
+    .nav-brand span { background: #FFE600; border-radius: 6px; padding: 2px 8px; font-size: 12px; }
+    .nav-right { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+    .btn-nav { padding: 6px 14px; border: 1px solid #ddd; border-radius: 8px; background: #fff; font-size: 13px; cursor: pointer; text-decoration: none; color: #111; }
+    main { max-width: 1280px; margin: 0 auto; padding: 1.5rem; }
+    h1 { font-size: 20px; font-weight: 600; margin-bottom: 6px; }
+    p.lead { font-size: 13px; color: #888; margin-bottom: 1.25rem; }
+    .card { background: #fff; border: 1px solid #e5e5e3; border-radius: 12px; padding: 1.25rem; margin-bottom: 1.25rem; }
+    .card h3 { font-size: 14px; font-weight: 600; color: #444; margin-bottom: 12px; }
+    .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .row label { font-size: 13px; color: #666; }
+    .row select, .row input { padding: 7px 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 13px; font-family: 'Inter', sans-serif; }
+    .row select { min-width: 220px; }
+    .row button { padding: 8px 16px; border: none; border-radius: 8px; background: #3483FA; color: #fff; font-size: 13px; cursor: pointer; }
+    .row button.green { background: #1a8a5a; }
+    .row button:disabled { background: #ccc; cursor: not-allowed; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 12px; }
+    th { padding: 10px 14px; text-align: left; color: #888; font-weight: 500; border-bottom: 1px solid #eee; font-size: 12px; }
+    td { padding: 10px 14px; border-bottom: 1px solid #f0f0ee; color: #333; }
+    tr:last-child td { border-bottom: none; }
+    .empty { padding: 2rem; text-align: center; color: #aaa; font-size: 13px; }
+    .badge { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 99px; font-weight: 500; }
+    .badge.warn { background: #fef0e6; color: #c47a1e; }
+    .badge.ok { background: #e6f5ee; color: #1a8a5a; }
+    .badge.gray { background: #f0f0ee; color: #666; }
+    .badge.purple { background: #efe6f5; color: #6f3499; }
+    .msg { padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-top: 10px; }
+    .msg.ok { background: #e6f5ee; color: #1a8a5a; border: 1px solid #c5e9d8; }
+    .msg.err { background: #fce9e9; color: #c0392b; border: 1px solid #f5c6c6; }
+    .help-box { background: #f5f5f3; border-left: 3px solid #3483FA; padding: 10px 14px; font-size: 12px; color: #666; margin-top: 10px; }
+    .help-box code { background: #fff; padding: 1px 6px; border-radius: 4px; border: 1px solid #e5e5e3; font-family: monospace; }
+    .btn-edit { color: #3483FA; background: none; border: none; cursor: pointer; font-size: 12px; padding: 4px 8px; border-radius: 6px; }
+    .btn-delete { color: #c0392b; background: none; border: none; cursor: pointer; font-size: 12px; padding: 4px 8px; border-radius: 6px; }
+    .btn-save { color: #1a8a5a; background: none; border: none; cursor: pointer; font-size: 12px; padding: 4px 8px; border-radius: 6px; }
+    .row-edit input { padding: 4px 6px; border: 1px solid #ddd; border-radius: 4px; font-size: 12px; font-family: 'Inter', sans-serif; width: 100%; }
+    .preview-table tbody tr:hover { background: #fafaf8; }
+    .preview-table input[type=checkbox] { width: 16px; height: 16px; }
+    .preview-table .num { text-align: right; }
+    .preview-table tr.row-warn { background: #fffaf2; }
+    .preview-table tr.row-gray { background: #fafafa; color: #888; }
+    .summary { display: flex; gap: 16px; font-size: 13px; padding: 12px 0; flex-wrap: wrap; }
+    .summary span b { color: #111; }
+    .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: none; align-items: center; justify-content: center; z-index: 50; }
+    .modal-backdrop.show { display: flex; }
+    .modal { background: #fff; border-radius: 12px; padding: 1.5rem; max-width: 500px; width: 90%; }
+    .modal h3 { font-size: 16px; margin-bottom: 10px; }
+    .modal .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+    .no-accounts { text-align: center; padding: 4rem; color: #888; font-size: 14px; }
+  </style>
+</head>
+<body>
+<nav>
+  <div class="nav-brand">
+    <div style="width:24px;height:24px;background:#FFE600;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;">ML</div>
+    Panel de ventas <span>Beta</span>
+  </div>
+  <div class="nav-right">
+    <a href="/dashboard" class="btn-nav">Dashboard</a>
+    <a href="/costos" class="btn-nav">Costos</a>
+    <a href="/costos/envios-flex" class="btn-nav">Envíos Flex</a>
+    <span style="color:#3483FA;font-weight:500;">Descuentos</span>
+    <span style="color:#888;">{{ user.name }}</span>
+    {% if user.is_admin %}<a href="/admin" style="font-size:12px;color:#3483FA;text-decoration:none;">Admin</a>{% endif %}
+    <a href="/logout" class="btn-nav">Salir</a>
+  </div>
+</nav>
+
+<main>
+  <h1>Descuentos</h1>
+  <p class="lead">
+    Cargá una base de descuentos por SKU (Excel o manual). Después seleccioná una promoción
+    de ML y el sistema te muestra los items elegibles cruzados con tu base. Siempre vas a ver
+    la vista previa antes de aplicar.
+  </p>
+
+  {% if accounts %}
+  <div class="card">
+    <div class="row">
+      <label>Cuenta ML:</label>
+      <select id="account-select" onchange="onAccountChange()">
+        {% for acc in accounts %}
+        <option value="{{ acc.id }}">{{ acc.nickname }}</option>
+        {% endfor %}
+      </select>
+      <span id="count-label" style="font-size:12px;color:#888;"></span>
+    </div>
+  </div>
+
+  <!-- ─── BASE DE DESCUENTOS ─── -->
+  <div class="card">
+    <h3>1. Base de descuentos por SKU</h3>
+    <div class="row" style="margin-bottom:10px;">
+      <input type="file" id="file-input" accept=".xlsx,.xlsm,.csv" />
+      <button onclick="uploadFile()" id="btn-upload" class="green">Subir archivo</button>
+      <a href="/api/descuentos/template" download="plantilla_descuentos.xlsx"
+         style="padding:8px 14px;border:1px solid #3483FA;border-radius:8px;background:#fff;color:#3483FA;font-size:13px;text-decoration:none;">
+        Descargar plantilla
+      </a>
+    </div>
+    <div class="help-box">
+      Columnas esperadas: <code>SKU</code> y <code>Descuento %</code> (0 a 100).
+    </div>
+    <div id="upload-msg"></div>
+
+    <div style="margin-top:1rem;border-top:1px solid #f0f0ee;padding-top:1rem;">
+      <div class="row">
+        <input type="text" id="manual-sku" placeholder="SKU" style="width:200px;text-transform:uppercase;" />
+        <input type="number" id="manual-pct" placeholder="% descuento" step="0.5" min="0" max="100" style="width:120px;" />
+        <button onclick="addDescuento()">Agregar / actualizar</button>
+      </div>
+      <div id="add-msg"></div>
+    </div>
+
+    <div style="margin-top:1rem;">
+      <input type="text" id="filter-input" placeholder="Filtrar por SKU..." oninput="renderBase()" style="padding:6px 10px;border:1px solid #ddd;border-radius:8px;font-size:13px;width:300px;" />
+      <div style="overflow-x:auto;margin-top:8px;">
+        <table>
+          <thead><tr>
+            <th>SKU</th><th>Descuento %</th><th>Actualizado</th><th style="text-align:right;">Acciones</th>
+          </tr></thead>
+          <tbody id="base-tbody">
+            <tr><td colspan="4" class="empty">Cargando...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── PROMOCIONES ─── -->
+  <div class="card">
+    <h3>2. Promociones disponibles de ML</h3>
+    <div class="row">
+      <button onclick="loadPromos()" id="btn-load-promos">Refrescar promos</button>
+      <span id="promos-status" style="font-size:12px;color:#888;"></span>
+    </div>
+    <div style="overflow-x:auto;margin-top:8px;">
+      <table>
+        <thead><tr>
+          <th>Promoción</th><th>Tipo</th><th>Estado</th><th>Vigencia</th><th style="text-align:right;">Acción</th>
+        </tr></thead>
+        <tbody id="promos-tbody">
+          <tr><td colspan="5" class="empty">Hacé click en "Refrescar promos" para ver las disponibles.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ─── PREVIEW DE APLICACIÓN ─── -->
+  <div class="card" id="preview-card" style="display:none;">
+    <h3>3. Vista previa — <span id="preview-promo-name"></span></h3>
+    <div class="row" style="margin-bottom:10px;">
+      <button onclick="loadPromoItems('candidate')" id="btn-preview-cand">Items elegibles</button>
+      <button onclick="loadPromoItems('started')" id="btn-preview-started">Items participando</button>
+      <span id="preview-status" style="font-size:12px;color:#888;"></span>
+    </div>
+    <div class="summary" id="preview-summary"></div>
+    <div style="overflow-x:auto;">
+      <table class="preview-table">
+        <thead><tr>
+          <th style="width:30px;"><input type="checkbox" id="select-all" onchange="toggleAll(this)" /></th>
+          <th>SKU</th>
+          <th>Título</th>
+          <th class="num">Precio actual</th>
+          <th class="num">Mínimo ML</th>
+          <th class="num">Tu desc.</th>
+          <th class="num">Desc. final</th>
+          <th class="num">Precio final</th>
+          <th>Estado</th>
+        </tr></thead>
+        <tbody id="preview-tbody">
+          <tr><td colspan="9" class="empty">Seleccioná una promo para ver los items.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="row" style="margin-top:12px;justify-content:flex-end;">
+      <span id="selected-count" style="font-size:13px;color:#888;"></span>
+      <button onclick="openConfirm()" id="btn-apply" class="green" disabled>Aplicar a los seleccionados</button>
+    </div>
+  </div>
+
+  {% else %}
+  <div class="no-accounts">
+    <p style="font-size:18px;font-weight:500;margin-bottom:8px;">No tenés cuentas conectadas</p>
+    <p>Conectá una cuenta desde el <a href="/dashboard" style="color:#3483FA;">Dashboard</a>.</p>
+  </div>
+  {% endif %}
+</main>
+
+<!-- Modal de confirmación -->
+<div class="modal-backdrop" id="confirm-modal">
+  <div class="modal">
+    <h3>Confirmar aplicación</h3>
+    <p id="confirm-text" style="font-size:13px;color:#555;margin-bottom:10px;"></p>
+    <div style="background:#fef0e6;border-left:3px solid #c47a1e;padding:10px;font-size:12px;color:#7a4a0a;border-radius:6px;">
+      Esta acción aplica los descuentos directamente en MercadoLibre. ¿Confirmás?
+    </div>
+    <div class="actions">
+      <button onclick="closeConfirm()" style="background:#fff;border:1px solid #ddd;color:#333;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;">Cancelar</button>
+      <button onclick="doApply()" class="green" style="border:none;padding:8px 16px;border-radius:8px;background:#1a8a5a;color:#fff;cursor:pointer;font-size:13px;">Aplicar</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  const fmt = n => n == null ? '—' : '$' + Number(n).toLocaleString('es-AR', {minimumFractionDigits:2, maximumFractionDigits:2});
+  let currentAccountId = document.getElementById('account-select')?.value;
+  let baseItems = [];
+  let promos = [];
+  let currentPromo = null;
+  let currentItems = [];
+  let currentStatus = 'candidate';
+
+  function onAccountChange() {
+    currentAccountId = document.getElementById('account-select').value;
+    loadBase();
+    document.getElementById('preview-card').style.display = 'none';
+    document.getElementById('promos-tbody').innerHTML = `<tr><td colspan="5" class="empty">Hacé click en "Refrescar promos" para ver las disponibles.</td></tr>`;
+  }
+
+  // ── BASE DE DESCUENTOS ──
+  async function loadBase() {
+    if(!currentAccountId) return;
+    const tbody = document.getElementById('base-tbody');
+    tbody.innerHTML = `<tr><td colspan="4" class="empty">Cargando...</td></tr>`;
+    try {
+      const r = await fetch(`/api/descuentos/${currentAccountId}`);
+      if(!r.ok) throw new Error('Error al cargar');
+      const data = await r.json();
+      baseItems = data.items || [];
+      renderBase();
+    } catch(e) {
+      tbody.innerHTML = `<tr><td colspan="4" class="empty">Error: ${e.message}</td></tr>`;
+    }
+  }
+
+  function renderBase() {
+    const tbody = document.getElementById('base-tbody');
+    const filter = (document.getElementById('filter-input').value || '').trim().toUpperCase();
+    const items = filter ? baseItems.filter(it => it.sku.toUpperCase().includes(filter)) : baseItems;
+    document.getElementById('count-label').textContent = `${baseItems.length} SKU${baseItems.length===1?'':'s'} cargados`;
+    if(!items.length) {
+      tbody.innerHTML = `<tr><td colspan="4" class="empty">${filter ? 'Sin resultados.' : 'Todavía no hay descuentos cargados.'}</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = items.map(it => {
+      const skuEsc = it.sku.replace(/'/g, "\\'");
+      const rowId = it.sku.replace(/[^a-zA-Z0-9_]/g, '_');
+      return `
+        <tr data-row-id="${rowId}" data-old-sku="${it.sku}">
+          <td class="c-sku"><b>${it.sku}</b></td>
+          <td class="c-pct">${it.discount_pct}%</td>
+          <td style="color:#888;font-size:12px;">${it.updated_at ? new Date(it.updated_at + 'Z').toLocaleString('es-AR', {dateStyle:'short', timeStyle:'short'}) : ''}</td>
+          <td style="text-align:right;">
+            <button class="btn-edit" onclick="startEdit('${rowId}', '${skuEsc}', ${it.discount_pct})">Editar</button>
+            <button class="btn-delete" onclick="deleteDescuento('${skuEsc}')">Eliminar</button>
+          </td>
+        </tr>`;
+    }).join('');
+  }
+
+  function startEdit(rowId, sku, pct) {
+    const tr = document.querySelector(`tr[data-row-id="${rowId}"]`);
+    if(!tr) return;
+    tr.querySelector('.c-sku').innerHTML = `<input type="text" id="edit-sku" value="${sku}" />`;
+    tr.querySelector('.c-pct').innerHTML = `<input type="number" id="edit-pct" value="${pct}" step="0.5" min="0" max="100" />`;
+    tr.querySelector('td[style*="text-align:right"]').innerHTML = `
+      <button class="btn-save" onclick="saveEdit('${rowId}')">Guardar</button>
+      <button class="btn-delete" onclick="loadBase()">Cancelar</button>
+    `;
+  }
+
+  async function saveEdit(rowId) {
+    const tr = document.querySelector(`tr[data-row-id="${rowId}"]`);
+    if(!tr) return;
+    const form = new FormData();
+    form.append('old_sku', tr.dataset.oldSku);
+    form.append('sku', document.getElementById('edit-sku').value.trim());
+    form.append('discount_pct', String(parseFloat(document.getElementById('edit-pct').value)));
+    try {
+      const r = await fetch(`/api/descuentos/${currentAccountId}/edit`, { method: 'PUT', body: form });
+      if(!r.ok) throw new Error('Error al guardar');
+      await loadBase();
+    } catch(e) { alert(e.message); }
+  }
+
+  async function addDescuento() {
+    const sku = (document.getElementById('manual-sku').value || '').trim();
+    const pct = parseFloat(document.getElementById('manual-pct').value);
+    const msg = document.getElementById('add-msg');
+    if(!sku || isNaN(pct) || pct < 0 || pct > 100) {
+      msg.innerHTML = '<div class="msg err">SKU y % válido son obligatorios.</div>';
+      return;
+    }
+    const form = new FormData();
+    form.append('sku', sku);
+    form.append('discount_pct', String(pct));
+    try {
+      const r = await fetch(`/api/descuentos/${currentAccountId}`, { method: 'POST', body: form });
+      if(!r.ok) throw new Error('Error al guardar');
+      msg.innerHTML = '<div class="msg ok">Guardado.</div>';
+      document.getElementById('manual-sku').value = '';
+      document.getElementById('manual-pct').value = '';
+      await loadBase();
+    } catch(e) {
+      msg.innerHTML = `<div class="msg err">${e.message}</div>`;
+    }
+  }
+
+  async function deleteDescuento(sku) {
+    if(!confirm(`¿Eliminar el descuento de ${sku}?`)) return;
+    try {
+      const r = await fetch(`/api/descuentos/${currentAccountId}/${encodeURIComponent(sku)}`, { method: 'DELETE' });
+      if(!r.ok) throw new Error('Error');
+      await loadBase();
+    } catch(e) { alert(e.message); }
+  }
+
+  async function uploadFile() {
+    const input = document.getElementById('file-input');
+    const btn = document.getElementById('btn-upload');
+    const msg = document.getElementById('upload-msg');
+    if(!input.files.length) {
+      msg.innerHTML = '<div class="msg err">Seleccioná un archivo primero.</div>';
+      return;
+    }
+    btn.disabled = true; btn.textContent = 'Subiendo...';
+    const form = new FormData();
+    form.append('file', input.files[0]);
+    try {
+      const r = await fetch(`/api/descuentos/${currentAccountId}/upload`, { method: 'POST', body: form });
+      if(!r.ok) { const t = await r.text(); throw new Error(t || 'Error'); }
+      const data = await r.json();
+      msg.innerHTML = `<div class="msg ok">${data.saved} descuentos guardados (de ${data.rows_parsed} filas).</div>`;
+      input.value = '';
+      await loadBase();
+    } catch(e) {
+      msg.innerHTML = `<div class="msg err">${e.message}</div>`;
+    } finally {
+      btn.disabled = false; btn.textContent = 'Subir archivo';
+    }
+  }
+
+  // ── PROMOCIONES ──
+  async function loadPromos() {
+    const btn = document.getElementById('btn-load-promos');
+    const status = document.getElementById('promos-status');
+    const tbody = document.getElementById('promos-tbody');
+    btn.disabled = true; btn.textContent = 'Cargando...';
+    status.textContent = '';
+    try {
+      const r = await fetch(`/api/promociones/${currentAccountId}`);
+      if(!r.ok) throw new Error('Error al cargar promos');
+      const data = await r.json();
+      promos = data.items || [];
+      if(data.error) status.textContent = `(${data.error})`;
+      if(!promos.length) {
+        tbody.innerHTML = '<tr><td colspan="5" class="empty">No hay promociones disponibles para esta cuenta.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = promos.map(p => {
+        const vigencia = (p.start_date && p.finish_date)
+          ? `${p.start_date.slice(0,10)} → ${p.finish_date.slice(0,10)}`
+          : (p.deadline_date ? `Hasta ${p.deadline_date.slice(0,10)}` : '—');
+        return `
+          <tr>
+            <td><b>${p.name}</b></td>
+            <td><span class="badge gray">${p.type || '—'}</span></td>
+            <td><span class="badge ${p.status === 'started' ? 'ok' : 'gray'}">${p.status || '—'}</span></td>
+            <td style="font-size:12px;">${vigencia}</td>
+            <td style="text-align:right;">
+              <button onclick="selectPromo('${p.id}', '${(p.name || '').replace(/'/g, "\\'")}', '${p.type || ''}')">Ver items</button>
+            </td>
+          </tr>`;
+      }).join('');
+    } catch(e) {
+      tbody.innerHTML = `<tr><td colspan="5" class="empty">Error: ${e.message}</td></tr>`;
+    } finally {
+      btn.disabled = false; btn.textContent = 'Refrescar promos';
+    }
+  }
+
+  function selectPromo(promoId, name, type) {
+    currentPromo = { id: promoId, name, type };
+    document.getElementById('preview-promo-name').textContent = name;
+    document.getElementById('preview-card').style.display = 'block';
+    document.getElementById('preview-tbody').innerHTML = '<tr><td colspan="9" class="empty">Cargando items...</td></tr>';
+    document.getElementById('preview-summary').innerHTML = '';
+    loadPromoItems('candidate');
+    setTimeout(() => document.getElementById('preview-card').scrollIntoView({behavior:'smooth'}), 50);
+  }
+
+  async function loadPromoItems(status) {
+    if(!currentPromo) return;
+    currentStatus = status;
+    const tbody = document.getElementById('preview-tbody');
+    const statusEl = document.getElementById('preview-status');
+    tbody.innerHTML = '<tr><td colspan="9" class="empty">Cargando items...</td></tr>';
+    statusEl.textContent = '';
+    try {
+      const params = new URLSearchParams({ status });
+      if(currentPromo.type) params.set('promotion_type', currentPromo.type);
+      const r = await fetch(`/api/promociones/${currentAccountId}/${encodeURIComponent(currentPromo.id)}/items?${params}`);
+      if(!r.ok) throw new Error('Error');
+      const data = await r.json();
+      currentItems = data.items || [];
+      if(data.error) statusEl.textContent = `(${data.error})`;
+      renderPreview();
+    } catch(e) {
+      tbody.innerHTML = `<tr><td colspan="9" class="empty">Error: ${e.message}</td></tr>`;
+    }
+  }
+
+  function renderPreview() {
+    const tbody = document.getElementById('preview-tbody');
+    if(!currentItems.length) {
+      tbody.innerHTML = `<tr><td colspan="9" class="empty">No hay items en este estado.</td></tr>`;
+      document.getElementById('preview-summary').innerHTML = '';
+      document.getElementById('btn-apply').disabled = true;
+      return;
+    }
+    let cargados=0, sinDesc=0, debajoMin=0;
+    tbody.innerHTML = currentItems.map((it, idx) => {
+      const sinDescuento = it.loaded_discount_pct == null;
+      const debajo = it.below_min;
+      if(sinDescuento) sinDesc++;
+      else cargados++;
+      if(debajo) debajoMin++;
+      const rowCls = sinDescuento ? 'row-gray' : (debajo ? 'row-warn' : '');
+      let estado = '';
+      if(sinDescuento) estado = '<span class="badge gray">Sin descuento cargado</span>';
+      else if(debajo) estado = `<span class="badge warn">Debajo del mínimo (${it.min_discount_pct}%)</span>`;
+      else estado = '<span class="badge ok">Listo para aplicar</span>';
+      if(it.ml_contribution) estado += ' <span class="badge purple">+ Aporte ML</span>';
+      const checked = (!sinDescuento && !debajo) ? 'checked' : '';
+      return `
+        <tr class="${rowCls}" data-idx="${idx}">
+          <td><input type="checkbox" class="row-check" ${checked} onchange="updateSelectedCount()" /></td>
+          <td><b>${it.sku || '—'}</b></td>
+          <td style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${it.title || ''}">${it.title || '—'}</td>
+          <td class="num">${fmt(it.original_price)}</td>
+          <td class="num" style="color:#888;">${it.min_discount_pct != null ? it.min_discount_pct + '%' : '—'}</td>
+          <td class="num">${it.loaded_discount_pct != null ? it.loaded_discount_pct + '%' : '0%'}</td>
+          <td class="num"><b>${it.final_discount_pct}%</b></td>
+          <td class="num" style="color:#1a8a5a;">${fmt(it.final_price)}</td>
+          <td>${estado}</td>
+        </tr>
+      `;
+    }).join('');
+    document.getElementById('preview-summary').innerHTML = `
+      <span><b>${currentItems.length}</b> items totales</span>
+      <span style="color:#1a8a5a;"><b>${cargados}</b> con descuento cargado</span>
+      <span style="color:#888;"><b>${sinDesc}</b> sin descuento</span>
+      <span style="color:#c47a1e;"><b>${debajoMin}</b> debajo del mínimo</span>
+    `;
+    updateSelectedCount();
+  }
+
+  function toggleAll(cb) {
+    document.querySelectorAll('.row-check').forEach(c => c.checked = cb.checked);
+    updateSelectedCount();
+  }
+
+  function updateSelectedCount() {
+    const checks = document.querySelectorAll('.row-check');
+    let n = 0;
+    checks.forEach(c => { if(c.checked) n++; });
+    document.getElementById('selected-count').textContent = `${n} seleccionados`;
+    document.getElementById('btn-apply').disabled = n === 0;
+  }
+
+  function getSelected() {
+    const out = [];
+    document.querySelectorAll('.row-check').forEach((c, idx) => {
+      if(c.checked) {
+        const it = currentItems[idx];
+        out.push({
+          item_id: it.item_id,
+          discount_pct: it.final_discount_pct,
+          promotion_type: it.promotion_type || currentPromo.type,
+        });
+      }
+    });
+    return out;
+  }
+
+  function openConfirm() {
+    const sel = getSelected();
+    if(!sel.length) return;
+    document.getElementById('confirm-text').textContent =
+      `Vas a aplicar la promoción "${currentPromo.name}" a ${sel.length} items con los descuentos configurados.`;
+    document.getElementById('confirm-modal').classList.add('show');
+  }
+  function closeConfirm() {
+    document.getElementById('confirm-modal').classList.remove('show');
+  }
+
+  async function doApply() {
+    const sel = getSelected();
+    closeConfirm();
+    const btn = document.getElementById('btn-apply');
+    btn.disabled = true; btn.textContent = 'Aplicando...';
+    try {
+      const r = await fetch(`/api/promociones/${currentAccountId}/${encodeURIComponent(currentPromo.id)}/apply`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ items: sel }),
+      });
+      if(!r.ok) throw new Error('Error al aplicar');
+      const data = await r.json();
+      const oks = (data.results || []).filter(x => x.ok).length;
+      const fails = (data.results || []).filter(x => !x.ok);
+      let msg = `${oks} aplicados correctamente.`;
+      if(fails.length) {
+        msg += ` ${fails.length} fallaron.`;
+        console.warn('Fallos:', fails);
+      }
+      alert(msg);
+      await loadPromoItems(currentStatus);
+    } catch(e) {
+      alert(e.message);
+    } finally {
+      btn.textContent = 'Aplicar a los seleccionados';
+      updateSelectedCount();
+    }
+  }
+
+  if(currentAccountId) loadBase();
+</script>
+</body>
+</html>

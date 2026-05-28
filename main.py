@@ -134,6 +134,18 @@ def init_db():
         # comprador). Sirve de referencia para asociar cada shipment Flex
         # con la zona correcta (matcheamos contra shipping_option.list_cost).
         conn.execute(text("ALTER TABLE flex_tariffs ADD COLUMN IF NOT EXISTS tarifa_ml NUMERIC(12,2)"))
+        # Base de descuentos por SKU (lo que el vendedor está dispuesto a
+        # descontar para cualquier promo de ML). El cruce con las
+        # promociones disponibles se hace en runtime.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS product_discounts (
+                account_id INTEGER NOT NULL REFERENCES ml_accounts(id) ON DELETE CASCADE,
+                sku TEXT NOT NULL,
+                discount_pct NUMERIC(5,2) NOT NULL,
+                updated_at TIMESTAMP DEFAULT NOW(),
+                PRIMARY KEY (account_id, sku)
+            )
+        """))
         # Migrar iva_included → iva_rate UNA VEZ (controlado por app_meta).
         iva_migrated = conn.execute(text(
             "SELECT 1 FROM app_meta WHERE key='iva_rate_migrated'"
@@ -1801,6 +1813,511 @@ def _parse_csv_flex(content: bytes) -> list:
             "valid_from": fecha or today_iso, "iva_rate": iva_rate,
         })
     return items
+
+
+# ── Descuentos / Promociones ───────────────────────────────────────
+
+@app.get("/descuentos", response_class=HTMLResponse)
+async def descuentos_page(request: Request):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse("/")
+    user = get_user(user_id)
+    accounts = db_fetchall(
+        "SELECT id, nickname FROM ml_accounts WHERE user_id=:uid ORDER BY id",
+        {"uid": user_id},
+    )
+    return templates.TemplateResponse(
+        "descuentos.html",
+        {"request": request, "user": user, "accounts": accounts},
+    )
+
+
+def db_save_product_discounts(account_id: int, items: list) -> int:
+    if not items:
+        return 0
+    params = []
+    for it in items:
+        sku = (it.get("sku") or "").strip()
+        if not sku:
+            continue
+        try:
+            pct = float(it.get("discount_pct") or 0)
+        except (TypeError, ValueError):
+            continue
+        if pct < 0 or pct > 100:
+            continue
+        params.append({"aid": account_id, "sku": sku.upper(), "pct": pct})
+    if not params:
+        return 0
+    with engine.connect() as conn:
+        conn.execute(text(
+            "INSERT INTO product_discounts (account_id, sku, discount_pct, updated_at)"
+            " VALUES (:aid, :sku, :pct, NOW())"
+            " ON CONFLICT (account_id, sku) DO UPDATE SET"
+            " discount_pct = EXCLUDED.discount_pct, updated_at = NOW()"
+        ), params)
+        conn.commit()
+    return len(params)
+
+
+@app.get("/api/descuentos/template")
+async def api_descuentos_template(request: Request):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    import io
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from fastapi.responses import StreamingResponse
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Descuentos"
+    ws.append(["SKU", "Descuento %"])
+    fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
+    font = Font(bold=True)
+    for col in range(1, 3):
+        c = ws.cell(row=1, column=col)
+        c.fill = fill
+        c.font = font
+        c.alignment = Alignment(horizontal="center")
+    examples = [
+        ["SOP68-443", 20],
+        ["SOP78-446", 15],
+        ["ART-LAUNDRYBOX", 10],
+    ]
+    for r in examples:
+        ws.append(r)
+    ws.column_dimensions["A"].width = 24
+    ws.column_dimensions["B"].width = 14
+    ws2 = wb.create_sheet("Instrucciones")
+    rows = [
+        ["Plantilla de base de descuentos por SKU"],
+        [""],
+        ["Columnas:"],
+        ["SKU", "Identificador único del producto (coincide con el seller_sku de ML)."],
+        ["Descuento %", "Porcentaje a aplicar (0 a 100). Ej: 20 = 20% off."],
+        [""],
+        ["Cómo se usa:"],
+        ["", "Esta base es referencial. Al aplicar una promoción de ML, el sistema"],
+        ["", "cruza tus SKUs con los items elegibles y propone los descuentos."],
+        ["", "Si tu descuento es menor al mínimo sugerido por ML, te avisa."],
+        ["", "Siempre vas a ver la vista previa antes de aplicar."],
+    ]
+    for r in rows:
+        ws2.append(r)
+    ws2.column_dimensions["A"].width = 16
+    ws2.column_dimensions["B"].width = 90
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="plantilla_descuentos.xlsx"'},
+    )
+
+
+@app.get("/api/descuentos/{account_id}")
+async def api_descuentos_list(request: Request, account_id: int):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = db_fetchone("SELECT id FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
+    if not acc:
+        raise HTTPException(404)
+    rows = db_fetchall(
+        "SELECT sku, discount_pct, updated_at FROM product_discounts"
+        " WHERE account_id=:aid ORDER BY sku",
+        {"aid": account_id},
+    )
+    return {
+        "items": [
+            {
+                "sku": r["sku"],
+                "discount_pct": float(r["discount_pct"]),
+                "updated_at": r["updated_at"].isoformat() if r.get("updated_at") else None,
+            }
+            for r in rows
+        ],
+    }
+
+
+@app.post("/api/descuentos/{account_id}")
+async def api_descuentos_upsert(
+    request: Request, account_id: int,
+    sku: str = Form(...),
+    discount_pct: float = Form(...),
+):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = db_fetchone("SELECT id FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
+    if not acc:
+        raise HTTPException(404)
+    saved = db_save_product_discounts(account_id, [{"sku": sku, "discount_pct": discount_pct}])
+    return {"ok": True, "saved": saved}
+
+
+@app.put("/api/descuentos/{account_id}/edit")
+async def api_descuentos_edit(
+    request: Request, account_id: int,
+    old_sku: str = Form(...),
+    sku: str = Form(...),
+    discount_pct: float = Form(...),
+):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = db_fetchone("SELECT id FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
+    if not acc:
+        raise HTTPException(404)
+    db_execute(
+        "DELETE FROM product_discounts WHERE account_id=:aid AND sku=:sku",
+        {"aid": account_id, "sku": old_sku.upper()},
+    )
+    saved = db_save_product_discounts(account_id, [{"sku": sku, "discount_pct": discount_pct}])
+    return {"ok": True, "saved": saved}
+
+
+@app.delete("/api/descuentos/{account_id}/{sku}")
+async def api_descuentos_delete(request: Request, account_id: int, sku: str):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = db_fetchone("SELECT id FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
+    if not acc:
+        raise HTTPException(404)
+    db_execute(
+        "DELETE FROM product_discounts WHERE account_id=:aid AND sku=:sku",
+        {"aid": account_id, "sku": sku.upper()},
+    )
+    return {"ok": True}
+
+
+@app.post("/api/descuentos/{account_id}/upload")
+async def api_descuentos_upload(request: Request, account_id: int):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = db_fetchone("SELECT id FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
+    if not acc:
+        raise HTTPException(404)
+    form = await request.form()
+    upload = form.get("file")
+    if upload is None or not hasattr(upload, "read"):
+        raise HTTPException(400, "Falta el archivo")
+    content = await upload.read()
+    filename = (getattr(upload, "filename", "") or "").lower()
+    try:
+        if filename.endswith(".xlsx") or filename.endswith(".xlsm"):
+            items = _parse_excel_discounts(content)
+        else:
+            items = _parse_csv_discounts(content)
+    except Exception as e:
+        raise HTTPException(400, f"No pude leer el archivo: {e}")
+    saved = db_save_product_discounts(account_id, items)
+    return {"ok": True, "saved": saved, "rows_parsed": len(items)}
+
+
+def _parse_excel_discounts(content: bytes) -> list:
+    import io
+    from openpyxl import load_workbook
+    wb = load_workbook(io.BytesIO(content), data_only=True, read_only=True)
+    ws = wb.active
+    rows = list(ws.iter_rows(values_only=True))
+    if not rows:
+        return []
+    header = None
+    data_start = 0
+    for idx, row in enumerate(rows[:5]):
+        if row is None:
+            continue
+        normalized = [str(c).strip().lower() if c is not None else "" for c in row]
+        if any("sku" in n for n in normalized):
+            header = normalized
+            data_start = idx + 1
+            break
+    if not header:
+        return []
+    sku_idx = _find_col(header, ["sku"])
+    pct_idx = _find_col(header, ["descuento", "discount", "off", "%"])
+    if sku_idx is None or pct_idx is None:
+        return []
+    items = []
+    for row in rows[data_start:]:
+        if row is None or len(row) <= max(sku_idx, pct_idx):
+            continue
+        sku = row[sku_idx]
+        pct = row[pct_idx]
+        if sku is None or pct is None:
+            continue
+        try:
+            pct_val = float(str(pct).replace("%", "").replace(",", ".").strip())
+        except ValueError:
+            continue
+        items.append({"sku": str(sku).strip(), "discount_pct": pct_val})
+    return items
+
+
+def _parse_csv_discounts(content: bytes) -> list:
+    import csv, io
+    text_content = content.decode("utf-8-sig", errors="ignore")
+    sample = text_content[:2048]
+    sep = ";" if sample.count(";") > sample.count(",") else ","
+    reader = csv.reader(io.StringIO(text_content), delimiter=sep)
+    rows = list(reader)
+    if not rows:
+        return []
+    header = [(c or "").strip().lower() for c in rows[0]]
+    sku_idx = _find_col(header, ["sku"])
+    pct_idx = _find_col(header, ["descuento", "discount", "off", "%"])
+    if sku_idx is None or pct_idx is None:
+        return []
+    items = []
+    for row in rows[1:]:
+        if len(row) <= max(sku_idx, pct_idx):
+            continue
+        sku = (row[sku_idx] or "").strip()
+        raw = (row[pct_idx] or "").strip().replace("%", "")
+        if sep == ";":
+            raw = raw.replace(",", ".")
+        else:
+            raw = raw.replace(",", ".")
+        if not sku or not raw:
+            continue
+        try:
+            pct = float(raw)
+        except ValueError:
+            continue
+        items.append({"sku": sku, "discount_pct": pct})
+    return items
+
+
+@app.get("/api/promociones/{account_id}")
+async def api_promociones_list(request: Request, account_id: int):
+    """Lista las promociones disponibles para la cuenta vía ML API."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = db_fetchone("SELECT * FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
+    if not acc:
+        raise HTTPException(404)
+    token = await refresh_ml_token(account_id)
+    if not token:
+        raise HTTPException(502)
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get(
+            f"{ML_API_URL}/seller-promotions/promotions/search",
+            headers=headers,
+            params={"app_version": "v2"},
+        )
+        if r.status_code != 200:
+            return {"items": [], "error": f"ML {r.status_code}: {r.text[:200]}"}
+        data = r.json()
+    promos = data.get("results", []) if isinstance(data, dict) else (data or [])
+    items = []
+    for p in promos:
+        items.append({
+            "id": p.get("id"),
+            "name": p.get("name") or p.get("id"),
+            "type": p.get("type"),
+            "status": p.get("status"),
+            "start_date": p.get("start_date"),
+            "finish_date": p.get("finish_date"),
+            "deadline_date": p.get("deadline_date"),
+            "benefits": p.get("benefits"),
+        })
+    return {"items": items}
+
+
+@app.get("/api/promociones/{account_id}/{promotion_id}/items")
+async def api_promociones_items(
+    request: Request, account_id: int, promotion_id: str,
+    status: str = "candidate", promotion_type: Optional[str] = None,
+):
+    """Lista los items elegibles (candidate) o participando (started) de una promo,
+    cruzados con la base de descuentos del vendedor."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = db_fetchone("SELECT * FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
+    if not acc:
+        raise HTTPException(404)
+    token = await refresh_ml_token(account_id)
+    if not token:
+        raise HTTPException(502)
+    headers = {"Authorization": f"Bearer {token}"}
+    # Cargar base de descuentos local
+    discount_rows = db_fetchall(
+        "SELECT sku, discount_pct FROM product_discounts WHERE account_id=:aid",
+        {"aid": account_id},
+    )
+    discount_map = {r["sku"].upper(): float(r["discount_pct"]) for r in discount_rows}
+
+    params = {"app_version": "v2", "status": status, "limit": 50}
+    if promotion_type:
+        params["promotion_type"] = promotion_type
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        all_results = []
+        offset = 0
+        while True:
+            r = await client.get(
+                f"{ML_API_URL}/seller-promotions/promotions/{promotion_id}/items",
+                headers=headers,
+                params={**params, "offset": offset},
+            )
+            if r.status_code != 200:
+                if not all_results:
+                    return {"items": [], "error": f"ML {r.status_code}: {r.text[:200]}"}
+                break
+            data = r.json()
+            results = data.get("results", []) if isinstance(data, dict) else []
+            if not results:
+                break
+            all_results.extend(results)
+            paging = data.get("paging") or {}
+            total = paging.get("total", len(all_results))
+            offset += len(results)
+            if offset >= total or len(results) < 50:
+                break
+
+        # Enriquecer con SKU y nombre desde /items/{id}?attributes=...
+        async def enrich(item_id):
+            try:
+                ri = await client.get(
+                    f"{ML_API_URL}/items/{item_id}",
+                    headers=headers,
+                    params={"attributes": "id,title,seller_sku,price,available_quantity"},
+                )
+                if ri.status_code == 200:
+                    return ri.json()
+            except Exception:
+                pass
+            return None
+
+        ids = [it.get("id") for it in all_results if it.get("id")]
+        sem = asyncio.Semaphore(15)
+        async def fetch(iid):
+            async with sem:
+                return await enrich(iid)
+        enriched = await asyncio.gather(*[fetch(i) for i in ids])
+
+    items_out = []
+    for promo_item, info in zip(all_results, enriched):
+        item_id = promo_item.get("id")
+        original_price = promo_item.get("original_price") or (info.get("price") if info else None)
+        suggested_price = promo_item.get("suggested_price")
+        # Mínimo sugerido viene como precio sugerido. Calculamos % equivalente.
+        min_discount_pct = None
+        if original_price and suggested_price:
+            try:
+                min_discount_pct = round((1 - float(suggested_price) / float(original_price)) * 100, 2)
+            except Exception:
+                min_discount_pct = None
+        sku = ""
+        title = ""
+        if info:
+            sku = (info.get("seller_sku") or "").strip()
+            title = info.get("title") or ""
+        sku_up = sku.upper()
+        # Buscar en base local. Si no está, intentar con fallback de cuotas.
+        loaded_pct = discount_map.get(sku_up)
+        if loaded_pct is None and sku_up:
+            for fb in _sku_fallbacks(sku_up):
+                if fb in discount_map:
+                    loaded_pct = discount_map[fb]
+                    break
+        final_pct = loaded_pct if loaded_pct is not None else 0.0
+        # Validar contra mínimo
+        below_min = False
+        if min_discount_pct is not None and final_pct < min_discount_pct:
+            below_min = True
+        final_price = None
+        if original_price:
+            try:
+                final_price = round(float(original_price) * (1 - final_pct / 100.0), 2)
+            except Exception:
+                final_price = None
+        # Detectar aporte ML compartido
+        ml_contribution = promo_item.get("meli_percentage") or promo_item.get("meli_amount")
+        items_out.append({
+            "item_id": item_id,
+            "sku": sku,
+            "title": title,
+            "original_price": float(original_price) if original_price else None,
+            "suggested_price": float(suggested_price) if suggested_price else None,
+            "min_discount_pct": min_discount_pct,
+            "loaded_discount_pct": loaded_pct,
+            "final_discount_pct": final_pct,
+            "final_price": final_price,
+            "below_min": below_min,
+            "ml_contribution": ml_contribution,
+            "status": promo_item.get("status"),
+            "promotion_type": promo_item.get("promotion_type") or promo_item.get("type"),
+        })
+    return {"items": items_out, "discount_base_count": len(discount_map)}
+
+
+@app.post("/api/promociones/{account_id}/{promotion_id}/apply")
+async def api_promociones_apply(
+    request: Request, account_id: int, promotion_id: str,
+):
+    """Aplica los descuentos a los items seleccionados.
+    Body JSON: { items: [{item_id, discount_pct, promotion_type?}, ...] }
+    """
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = db_fetchone("SELECT * FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
+    if not acc:
+        raise HTTPException(404)
+    body = await request.json()
+    items = body.get("items") or []
+    if not items:
+        raise HTTPException(400, "Faltan items para aplicar")
+    token = await refresh_ml_token(account_id)
+    if not token:
+        raise HTTPException(502)
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    results = []
+    async with httpx.AsyncClient(timeout=60) as client:
+        sem = asyncio.Semaphore(8)
+        async def apply_one(it):
+            iid = it.get("item_id")
+            pct = float(it.get("discount_pct") or 0)
+            ptype = it.get("promotion_type") or "DEAL"
+            async with sem:
+                payload = {
+                    "promotion_id": promotion_id,
+                    "promotion_type": ptype,
+                    "deal_id": promotion_id,
+                    "offer_type": "PERCENTAGE",
+                    "top_deal_price": None,
+                    "deal_price": None,
+                    "discount_percentage": pct,
+                }
+                # Limpiamos campos None
+                payload = {k: v for k, v in payload.items() if v is not None}
+                try:
+                    r = await client.post(
+                        f"{ML_API_URL}/seller-promotions/items/{iid}",
+                        headers=headers,
+                        params={"app_version": "v2"},
+                        json=payload,
+                    )
+                    return {
+                        "item_id": iid,
+                        "ok": r.status_code in (200, 201, 204),
+                        "status": r.status_code,
+                        "error": (r.text[:300] if r.status_code not in (200, 201, 204) else None),
+                    }
+                except Exception as e:
+                    return {"item_id": iid, "ok": False, "status": 0, "error": str(e)[:200]}
+        results = await asyncio.gather(*[apply_one(it) for it in items])
+    return {"results": results, "ok": True}
 
 
 # ── API datos ───────────────────────────────────────────────────
