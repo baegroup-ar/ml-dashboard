@@ -74,9 +74,10 @@
 <main>
   <h1>Tarifas de Envíos Flex</h1>
   <p class="lead">
-    Cargá lo que <b>vos le pagás a tu mensajería</b> por cada zona de entrega, sin IVA. El sistema aplica
-    la tasa automáticamente y respeta la fecha de vigencia (igual que los costos de mercadería).
-    Cada cuenta de ML tiene su propio listado.
+    Cargá lo que <b>vos le pagás a tu mensajería</b> (Tarifa Propia, sin IVA) y la <b>Tarifa ML</b>
+    pública de referencia para esa zona. Para cada venta Flex el dashboard matchea el
+    <code>list_cost</code> del shipment contra la Tarifa ML más cercana y reemplaza el Costo Envío
+    con tu Tarifa Propia + IVA. Las tarifas son por cuenta y respetan la fecha de vigencia.
   </p>
 
   {% if accounts %}
@@ -118,7 +119,8 @@
         <option value="{{ key }}">{{ label }}</option>
         {% endfor %}
       </select>
-      <input type="number" id="manual-tarifa" class="tarifa" placeholder="Tarifa sin IVA" step="0.01" min="0" />
+      <input type="number" id="manual-tarifa" class="tarifa" placeholder="Tarifa propia (sin IVA)" step="0.01" min="0" />
+      <input type="number" id="manual-tarifa-ml" class="tarifa" placeholder="Tarifa ML (referencia)" step="0.01" min="0" />
       <input type="date" id="manual-fecha" title="Vigente desde" />
       <input type="number" id="manual-iva" class="iva" value="21" step="0.5" min="0" max="100" title="IVA %" />
       <button onclick="addTariff()">Guardar</button>
@@ -134,10 +136,10 @@
     <div style="overflow-x:auto;">
       <table>
         <thead><tr>
-          <th>Zona</th><th>Tarifa sin IVA</th><th>IVA</th><th>Tarifa con IVA</th><th>Vigente desde</th><th>Actualizado</th><th class="actions">Acciones</th>
+          <th>Zona</th><th>Tarifa Propia (sin IVA)</th><th>IVA</th><th>Tarifa Propia con IVA</th><th>Tarifa ML</th><th>Vigente desde</th><th>Actualizado</th><th class="actions">Acciones</th>
         </tr></thead>
         <tbody id="tariffs-tbody">
-          <tr><td colspan="7" class="empty">Cargando...</td></tr>
+          <tr><td colspan="8" class="empty">Cargando...</td></tr>
         </tbody>
       </table>
     </div>
@@ -166,7 +168,7 @@
   async function loadTariffs() {
     if(!currentAccountId) return;
     const tbody = document.getElementById('tariffs-tbody');
-    tbody.innerHTML = '<tr><td colspan="7" class="empty">Cargando...</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" class="empty">Cargando...</td></tr>';
     try {
       const r = await fetch(`/api/flex-tariffs/${currentAccountId}`);
       if(!r.ok) throw new Error('Error al cargar');
@@ -174,7 +176,7 @@
       allItems = data.items || [];
       renderTable();
     } catch(e) {
-      tbody.innerHTML = `<tr><td colspan="7" class="empty">Error: ${e.message}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="8" class="empty">Error: ${e.message}</td></tr>`;
     }
   }
 
@@ -184,7 +186,7 @@
     document.getElementById('count-label').textContent =
       `${uniqueZones} zona${uniqueZones===1?'':'s'} · ${allItems.length} entrada${allItems.length===1?'':'s'}`;
     if(!allItems.length) {
-      tbody.innerHTML = `<tr><td colspan="7" class="empty">Todavía no hay tarifas cargadas.</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="8" class="empty">Todavía no hay tarifas cargadas.</td></tr>`;
       return;
     }
     tbody.innerHTML = allItems.map(it => {
@@ -193,16 +195,18 @@
       const ivaLabel = rate === 0 ? 'Exento' : `${rate}%`;
       const zonaLabel = ZONE_LABELS[it.zona] || it.zona;
       const rowId = `${it.zona}|${it.valid_from}`.replace(/[^a-zA-Z0-9_]/g, '_');
+      const tarifaMlLabel = it.tarifa_ml != null ? fmt(it.tarifa_ml) : '<span style="color:#c0392b;">(falta)</span>';
       return `
         <tr data-row-id="${rowId}" data-old-zona="${it.zona}" data-old-vf="${it.valid_from}">
           <td class="c-zona"><b>${zonaLabel}</b></td>
           <td class="c-tarifa">${fmt(it.tarifa)}</td>
           <td class="c-iva" style="font-size:12px;color:#555;">${ivaLabel}</td>
           <td class="c-twi" style="font-size:12px;color:#1a8a5a;">${fmt(tarifaConIva)}</td>
+          <td class="c-tml" style="font-size:12px;">${tarifaMlLabel}</td>
           <td class="c-vf" style="font-size:12px;">${it.valid_from || '—'}</td>
           <td style="color:#888;font-size:12px;">${it.updated_at ? new Date(it.updated_at + 'Z').toLocaleString('es-AR', {dateStyle:'short', timeStyle:'short'}) : ''}</td>
           <td class="actions">
-            <button class="btn-edit" onclick="startEdit('${rowId}', '${it.zona}', ${it.tarifa}, '${it.valid_from}', ${rate})">Editar</button>
+            <button class="btn-edit" onclick="startEdit('${rowId}', '${it.zona}', ${it.tarifa}, ${it.tarifa_ml == null ? 'null' : it.tarifa_ml}, '${it.valid_from}', ${rate})">Editar</button>
             <button class="btn-delete" onclick="deleteTariff('${it.zona}', '${it.valid_from}')">Eliminar</button>
           </td>
         </tr>
@@ -210,7 +214,7 @@
     }).join('');
   }
 
-  function startEdit(rowId, zona, tarifa, validFrom, ivaRate) {
+  function startEdit(rowId, zona, tarifa, tarifaMl, validFrom, ivaRate) {
     const tr = document.querySelector(`tr[data-row-id="${rowId}"]`);
     if(!tr) return;
     tr.classList.add('row-edit');
@@ -220,6 +224,7 @@
     tr.querySelector('.c-tarifa').innerHTML = `<input type="number" id="edit-tarifa" value="${tarifa}" step="0.01" min="0" />`;
     tr.querySelector('.c-iva').innerHTML = `<input type="number" id="edit-iva" value="${ivaRate}" step="0.5" min="0" max="100" />`;
     tr.querySelector('.c-twi').textContent = '—';
+    tr.querySelector('.c-tml').innerHTML = `<input type="number" id="edit-tml" value="${tarifaMl == null ? '' : tarifaMl}" step="0.01" min="0" placeholder="Tarifa ML" />`;
     tr.querySelector('.c-vf').innerHTML = `<input type="date" id="edit-vf" value="${validFrom}" />`;
     tr.querySelector('.actions').innerHTML = `
       <button class="btn-save" onclick="saveEdit('${rowId}')">Guardar</button>
@@ -237,6 +242,8 @@
     form.append('tarifa', String(parseFloat(document.getElementById('edit-tarifa').value)));
     form.append('valid_from', document.getElementById('edit-vf').value);
     form.append('iva_rate', String(parseFloat(document.getElementById('edit-iva').value)));
+    const tmlRaw = document.getElementById('edit-tml').value;
+    if(tmlRaw !== '') form.append('tarifa_ml', tmlRaw);
     try {
       const r = await fetch(`/api/flex-tariffs/${currentAccountId}/edit`, { method: 'PUT', body: form });
       if(!r.ok) throw new Error('Error al guardar');
@@ -274,6 +281,7 @@
     if(!currentAccountId) return;
     const zona = document.getElementById('manual-zona').value;
     const tarifa = parseFloat(document.getElementById('manual-tarifa').value);
+    const tarifaMlRaw = document.getElementById('manual-tarifa-ml').value;
     const fecha = document.getElementById('manual-fecha').value || '';
     const ivaRate = parseFloat(document.getElementById('manual-iva').value);
     const msg = document.getElementById('add-msg');
@@ -284,6 +292,7 @@
     const form = new FormData();
     form.append('zona', zona);
     form.append('tarifa', String(tarifa));
+    if(tarifaMlRaw !== '') form.append('tarifa_ml', tarifaMlRaw);
     if(fecha) form.append('valid_from', fecha);
     form.append('iva_rate', String(isNaN(ivaRate) ? 21 : ivaRate));
     try {
@@ -291,6 +300,7 @@
       if(!r.ok) throw new Error('Error al guardar');
       msg.innerHTML = '<div class="msg ok">Guardado.</div>';
       document.getElementById('manual-tarifa').value = '';
+      document.getElementById('manual-tarifa-ml').value = '';
       document.getElementById('manual-fecha').value = '';
       document.getElementById('manual-iva').value = '21';
       await loadTariffs();

@@ -27,7 +27,7 @@ ADMIN_PASSWORD = os.environ["ADMIN_PASSWORD"]
 ML_AUTH_URL = "https://auth.mercadolibre.com.ar/authorization"
 ML_TOKEN_URL = "https://api.mercadolibre.com/oauth/token"
 ML_API_URL = "https://api.mercadolibre.com"
-SHIPPING_LOGIC_VERSION = "v20-iva-rate-envio-net-plus-buyer"
+SHIPPING_LOGIC_VERSION = "v21-flex-tariff-match"
 
 serializer = URLSafeTimedSerializer(SECRET_KEY)
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -71,6 +71,7 @@ def init_db():
         conn.execute(text("ALTER TABLE shipment_cost_cache ALTER COLUMN buyer_cost DROP NOT NULL"))
         conn.execute(text("ALTER TABLE shipment_cost_cache ADD COLUMN IF NOT EXISTS logistic_type VARCHAR(50) DEFAULT NULL"))
         conn.execute(text("ALTER TABLE shipment_cost_cache ADD COLUMN IF NOT EXISTS bonificacion NUMERIC(10,2) DEFAULT NULL"))
+        conn.execute(text("ALTER TABLE shipment_cost_cache ADD COLUMN IF NOT EXISTS list_cost NUMERIC(10,2) DEFAULT NULL"))
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS app_meta (
                 key TEXT PRIMARY KEY,
@@ -129,6 +130,10 @@ def init_db():
                 PRIMARY KEY (account_id, zona, valid_from)
             )
         """))
+        # tarifa_ml: precio público que ML cobra por esa zona (a cargo del
+        # comprador). Sirve de referencia para asociar cada shipment Flex
+        # con la zona correcta (matcheamos contra shipping_option.list_cost).
+        conn.execute(text("ALTER TABLE flex_tariffs ADD COLUMN IF NOT EXISTS tarifa_ml NUMERIC(12,2)"))
         # Migrar iva_included → iva_rate UNA VEZ (controlado por app_meta).
         iva_migrated = conn.execute(text(
             "SELECT 1 FROM app_meta WHERE key='iva_rate_migrated'"
@@ -314,7 +319,8 @@ def db_get_cached_shipping(shipping_ids: list) -> dict:
         placeholders = ",".join(f":id{j}" for j in range(len(batch)))
         params = {f"id{j}": sid for j, sid in enumerate(batch)}
         rows = db_fetchall(
-            f"SELECT shipping_id, cost, buyer_cost, bonificacion FROM shipment_cost_cache WHERE shipping_id IN ({placeholders})",
+            f"SELECT shipping_id, cost, buyer_cost, bonificacion, list_cost, logistic_type"
+            f" FROM shipment_cost_cache WHERE shipping_id IN ({placeholders})",
             params,
         )
         for row in rows:
@@ -323,6 +329,8 @@ def db_get_cached_shipping(shipping_ids: list) -> dict:
                     "seller": float(row["cost"]),
                     "buyer": float(row["buyer_cost"]),
                     "bonificacion": float(row["bonificacion"]),
+                    "list_cost": float(row["list_cost"]) if row["list_cost"] is not None else 0.0,
+                    "logistic_type": row["logistic_type"] or "",
                 }
     return result
 
@@ -336,16 +344,20 @@ def db_save_shipping_costs(costs: dict):
             "cost": float(c.get("seller", 0)),
             "buyer_cost": float(c.get("buyer", 0)),
             "bonif": float(c.get("bonificacion", 0)),
+            "list_cost": float(c.get("list_cost", 0)),
+            "lt": c.get("logistic_type", "") or "",
         }
         for sid, c in costs.items()
     ]
     # Una sola conexión + executemany en vez de N conexiones.
     with engine.connect() as conn:
         conn.execute(text(
-            "INSERT INTO shipment_cost_cache (shipping_id, cost, buyer_cost, bonificacion)"
-            " VALUES (:sid, :cost, :buyer_cost, :bonif)"
+            "INSERT INTO shipment_cost_cache (shipping_id, cost, buyer_cost, bonificacion, list_cost, logistic_type)"
+            " VALUES (:sid, :cost, :buyer_cost, :bonif, :list_cost, :lt)"
             " ON CONFLICT (shipping_id) DO UPDATE SET"
-            " cost = EXCLUDED.cost, buyer_cost = EXCLUDED.buyer_cost, bonificacion = EXCLUDED.bonificacion"
+            " cost = EXCLUDED.cost, buyer_cost = EXCLUDED.buyer_cost,"
+            " bonificacion = EXCLUDED.bonificacion, list_cost = EXCLUDED.list_cost,"
+            " logistic_type = EXCLUDED.logistic_type"
         ), params_list)
         conn.commit()
 
@@ -720,6 +732,8 @@ async def get_shipping_cost(client, shipping_id, headers) -> dict:
         "seller": round(seller_cost, 2),
         "buyer": round(buyer_cost, 2),
         "bonificacion": round(bonificacion, 2),
+        "list_cost": round(list_cost, 2) if list_cost else 0.0,
+        "logistic_type": logistic_type,
     }
 
 
@@ -1335,39 +1349,44 @@ async def api_flex_template(request: Request):
     wb = Workbook()
     ws = wb.active
     ws.title = "Tarifas Flex"
-    ws.append(["Zona", "Tarifa", "Fecha", "IVA"])
+    ws.append(["Zona", "Tarifa Propia", "Tarifa ML", "Fecha", "IVA"])
     fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
     font = Font(bold=True)
-    for col in range(1, 5):
+    for col in range(1, 6):
         c = ws.cell(row=1, column=col)
         c.fill = fill
         c.font = font
         c.alignment = Alignment(horizontal="center")
     today_iso = datetime.utcnow().date().isoformat()
+    # Filas de ejemplo con tarifas ML referenciales de Argentina.
+    ml_reference = {"cercana": 4490, "media": 6490, "lejana": 8690, "muy_lejana": 9990}
     for key, label in FLEX_ZONES:
-        ws.append([label, 0, today_iso, 21])
+        ws.append([label, 0, ml_reference.get(key, 0), today_iso, 21])
     ws.column_dimensions["A"].width = 28
-    ws.column_dimensions["B"].width = 14
+    ws.column_dimensions["B"].width = 16
     ws.column_dimensions["C"].width = 14
-    ws.column_dimensions["D"].width = 10
+    ws.column_dimensions["D"].width = 14
+    ws.column_dimensions["E"].width = 10
     ws2 = wb.create_sheet("Instrucciones")
     rows = [
-        ["Plantilla de tarifas Flex (costo real que pagás a tu mensajería)"],
+        ["Plantilla de tarifas Flex"],
         [""],
         ["Columnas:"],
-        ["Zona", "Una de las 4: 'Zonas cercanas', 'Zonas de media distancia', 'Zonas lejanas', 'Zonas muy lejanas'. También acepta 'cercana', 'media', 'lejana', 'muy_lejana'."],
-        ["Tarifa", "Costo SIN IVA que le pagás a la mensajería por un envío Flex en esa zona."],
+        ["Zona", "Una de las 4: 'Zonas cercanas', 'Zonas de media distancia', 'Zonas lejanas', 'Zonas muy lejanas'."],
+        ["Tarifa Propia", "Costo SIN IVA que le pagás a tu mensajería para esa zona."],
+        ["Tarifa ML", "Tarifa pública que cobra ML para esa zona (referencia para identificar la zona de cada venta)."],
         ["Fecha", "Vigencia desde (YYYY-MM-DD o DD/MM/YYYY). Si está vacía, hoy."],
         ["IVA", "Tasa de IVA (21, 10.5, 0 = exento). Default 21."],
         [""],
-        ["Notas:"],
-        ["", "Cada combinación Zona + Fecha es una versión histórica."],
-        ["", "Las tarifas son por cuenta de ML — cada cuenta tiene su propio listado."],
+        ["Cómo se usa:"],
+        ["", "Cuando llega una venta Flex el sistema mira el list_cost del envío y busca la entry con Tarifa ML más cercana (vigente al momento de la venta). Usa la Tarifa Propia + IVA como Costo Envío real."],
+        ["", "Si no hay match (zona no cargada o muy distinta), usa el cálculo basado en lo que devuelve ML."],
+        ["", "Las tarifas son por cuenta de ML."],
     ]
     for r in rows:
         ws2.append(r)
-    ws2.column_dimensions["A"].width = 14
-    ws2.column_dimensions["B"].width = 90
+    ws2.column_dimensions["A"].width = 16
+    ws2.column_dimensions["B"].width = 100
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
@@ -1387,7 +1406,7 @@ async def api_flex_list(request: Request, account_id: int):
     if not acc:
         raise HTTPException(404)
     rows = db_fetchall(
-        "SELECT zona, tarifa, iva_rate, valid_from, updated_at FROM flex_tariffs"
+        "SELECT zona, tarifa, tarifa_ml, iva_rate, valid_from, updated_at FROM flex_tariffs"
         " WHERE account_id=:aid ORDER BY zona, valid_from DESC",
         {"aid": account_id},
     )
@@ -1396,6 +1415,7 @@ async def api_flex_list(request: Request, account_id: int):
             {
                 "zona": r["zona"],
                 "tarifa": float(r["tarifa"]),
+                "tarifa_ml": float(r["tarifa_ml"]) if r["tarifa_ml"] is not None else None,
                 "iva_rate": float(r["iva_rate"] if r["iva_rate"] is not None else 21),
                 "valid_from": r["valid_from"].isoformat() if hasattr(r["valid_from"], "isoformat") else str(r["valid_from"]),
                 "updated_at": r["updated_at"].isoformat() if r.get("updated_at") else None,
@@ -1430,7 +1450,8 @@ def _normalize_zone(value) -> Optional[str]:
 
 
 def _save_flex_tariffs(account_id: int, items: list) -> int:
-    """Inserta/actualiza tarifas flex. items: {zona, tarifa, iva_rate, valid_from}."""
+    """Inserta/actualiza tarifas flex.
+    items: {zona, tarifa, tarifa_ml, iva_rate, valid_from}."""
     if not items:
         return 0
     params = []
@@ -1452,15 +1473,23 @@ def _save_flex_tariffs(account_id: int, items: list) -> int:
             iva_rate = float(it.get("iva_rate") if it.get("iva_rate") is not None else 21)
         except (TypeError, ValueError):
             iva_rate = 21.0
-        params.append({"aid": account_id, "zona": zona, "tarifa": tarifa, "iva": iva_rate, "vf": vf})
+        try:
+            tarifa_ml = float(it.get("tarifa_ml")) if it.get("tarifa_ml") not in (None, "", 0) else None
+        except (TypeError, ValueError):
+            tarifa_ml = None
+        params.append({
+            "aid": account_id, "zona": zona, "tarifa": tarifa,
+            "iva": iva_rate, "vf": vf, "tml": tarifa_ml,
+        })
     if not params:
         return 0
     with engine.connect() as conn:
         conn.execute(text(
-            "INSERT INTO flex_tariffs (account_id, zona, tarifa, iva_rate, valid_from, updated_at)"
-            " VALUES (:aid, :zona, :tarifa, :iva, :vf, NOW())"
+            "INSERT INTO flex_tariffs (account_id, zona, tarifa, tarifa_ml, iva_rate, valid_from, updated_at)"
+            " VALUES (:aid, :zona, :tarifa, :tml, :iva, :vf, NOW())"
             " ON CONFLICT (account_id, zona, valid_from) DO UPDATE SET"
             " tarifa = EXCLUDED.tarifa,"
+            " tarifa_ml = EXCLUDED.tarifa_ml,"
             " iva_rate = EXCLUDED.iva_rate,"
             " updated_at = NOW()"
         ), params)
@@ -1468,11 +1497,76 @@ def _save_flex_tariffs(account_id: int, items: list) -> int:
     return len(params)
 
 
+def db_get_flex_tariffs(account_id: int) -> list:
+    """Devuelve [{zona, tarifa, tarifa_ml, iva_rate, valid_from}, ...]
+    ordenado por zona y fecha asc, para hacer lookup vigente al momento
+    de la venta."""
+    rows = db_fetchall(
+        "SELECT zona, tarifa, tarifa_ml, iva_rate, valid_from FROM flex_tariffs"
+        " WHERE account_id=:aid ORDER BY zona, valid_from",
+        {"aid": account_id},
+    )
+    out = []
+    for r in rows:
+        vf = r["valid_from"]
+        out.append({
+            "zona": r["zona"],
+            "tarifa": float(r["tarifa"]),
+            "tarifa_ml": float(r["tarifa_ml"]) if r["tarifa_ml"] is not None else None,
+            "iva_rate": float(r["iva_rate"] if r["iva_rate"] is not None else 21),
+            "valid_from": vf.isoformat() if hasattr(vf, "isoformat") else str(vf),
+        })
+    return out
+
+
+def match_flex_tariff(entries: list, list_cost: float, sale_date: str) -> dict:
+    """Busca la entry de flex_tariffs con tarifa_ml más cercana al
+    list_cost del shipment, vigente al sale_date (valid_from <= sale_date).
+    Devuelve None si no encuentra match razonable (dif > 15%)."""
+    if not entries or not list_cost or list_cost <= 0 or not sale_date:
+        return None
+    # Filtrar entries vigentes a la fecha de la venta, con tarifa_ml cargada.
+    # Para cada zona conservar la entry más reciente con valid_from <= sale_date.
+    latest_by_zone = {}
+    for e in entries:
+        if e.get("tarifa_ml") is None:
+            continue
+        if e["valid_from"] > sale_date:
+            continue
+        prev = latest_by_zone.get(e["zona"])
+        if prev is None or e["valid_from"] > prev["valid_from"]:
+            latest_by_zone[e["zona"]] = e
+    if not latest_by_zone:
+        return None
+    # Mejor match por diferencia relativa.
+    best = None
+    best_diff = None
+    for e in latest_by_zone.values():
+        diff = abs(e["tarifa_ml"] - list_cost) / list_cost
+        if best_diff is None or diff < best_diff:
+            best_diff = diff
+            best = e
+    # Tolerancia 15% (ej. variación por peso del envío)
+    if best_diff is not None and best_diff <= 0.15:
+        return best
+    return None
+
+
+def flex_cost_with_iva(entry: dict) -> float:
+    """Convierte la tarifa propia (sin IVA) a un valor con IVA aplicado."""
+    if not entry:
+        return 0.0
+    tarifa = float(entry.get("tarifa") or 0)
+    rate = float(entry.get("iva_rate") or 0)
+    return tarifa * (1 + rate / 100.0)
+
+
 @app.post("/api/flex-tariffs/{account_id}")
 async def api_flex_upsert(
     request: Request, account_id: int,
     zona: str = Form(...),
     tarifa: float = Form(...),
+    tarifa_ml: Optional[str] = Form(None),
     valid_from: Optional[str] = Form(None),
     iva_rate: Optional[str] = Form(None),
 ):
@@ -1486,11 +1580,16 @@ async def api_flex_upsert(
         rate_val = float(iva_rate) if iva_rate is not None and iva_rate != "" else 21.0
     except ValueError:
         rate_val = 21.0
+    try:
+        tml_val = float(tarifa_ml) if tarifa_ml not in (None, "") else None
+    except ValueError:
+        tml_val = None
     saved = _save_flex_tariffs(account_id, [{
-        "zona": zona, "tarifa": tarifa,
+        "zona": zona, "tarifa": tarifa, "tarifa_ml": tml_val,
         "valid_from": valid_from or datetime.utcnow().date().isoformat(),
         "iva_rate": rate_val,
     }])
+    invalidate_orders_cache_for_account(account_id)
     return {"ok": True, "saved": saved}
 
 
@@ -1502,6 +1601,7 @@ async def api_flex_edit(
     zona: str = Form(...),
     tarifa: float = Form(...),
     valid_from: str = Form(...),
+    tarifa_ml: Optional[str] = Form(None),
     iva_rate: Optional[str] = Form(None),
 ):
     user_id = get_session_user_id(request)
@@ -1514,14 +1614,19 @@ async def api_flex_edit(
         rate_val = float(iva_rate) if iva_rate is not None and iva_rate != "" else 21.0
     except ValueError:
         rate_val = 21.0
+    try:
+        tml_val = float(tarifa_ml) if tarifa_ml not in (None, "") else None
+    except ValueError:
+        tml_val = None
     db_execute(
         "DELETE FROM flex_tariffs WHERE account_id=:aid AND zona=:zona AND valid_from=:vf",
         {"aid": account_id, "zona": old_zona, "vf": old_valid_from},
     )
     saved = _save_flex_tariffs(account_id, [{
-        "zona": zona, "tarifa": tarifa,
+        "zona": zona, "tarifa": tarifa, "tarifa_ml": tml_val,
         "valid_from": valid_from, "iva_rate": rate_val,
     }])
+    invalidate_orders_cache_for_account(account_id)
     return {"ok": True, "saved": saved}
 
 
@@ -1543,6 +1648,7 @@ async def api_flex_delete(request: Request, account_id: int, zona: str, valid_fr
             "DELETE FROM flex_tariffs WHERE account_id=:aid AND zona=:zona",
             {"aid": account_id, "zona": zona},
         )
+    invalidate_orders_cache_for_account(account_id)
     return {"ok": True}
 
 
@@ -1568,6 +1674,7 @@ async def api_flex_upload(request: Request, account_id: int):
     except Exception as e:
         raise HTTPException(400, f"No pude leer el archivo: {e}")
     saved = _save_flex_tariffs(account_id, items)
+    invalidate_orders_cache_for_account(account_id)
     return {"ok": True, "saved": saved, "rows_parsed": len(items)}
 
 
@@ -1592,7 +1699,12 @@ def _parse_excel_flex(content: bytes) -> list:
     if not header:
         return []
     zona_idx = _find_col(header, ["zona"])
-    tarifa_idx = _find_col(header, ["tarifa", "costo", "cost", "precio"])
+    # 'tarifa propia' o sólo 'tarifa' = lo que paga el vendedor a su mensajería
+    tarifa_idx = _find_col(header, ["tarifa propia", "tu tarifa", "mi tarifa", "costo propio"])
+    if tarifa_idx is None:
+        tarifa_idx = _find_col(header, ["tarifa", "costo", "cost", "precio"])
+    # 'tarifa ml' = lo que ML cobra públicamente (referencia para matchear zona)
+    tarifa_ml_idx = _find_col(header, ["tarifa ml", "ml", "referencia", "publica", "pública"])
     fecha_idx = _find_col(header, ["fecha", "date", "vigencia", "desde"])
     iva_idx = _find_col(header, ["iva"])
     if zona_idx is None or tarifa_idx is None:
@@ -1608,8 +1720,14 @@ def _parse_excel_flex(content: bytes) -> list:
             continue
         fecha = _parse_date_cell(row[fecha_idx]) if fecha_idx is not None and len(row) > fecha_idx else None
         iva_rate = _parse_iva_rate_cell(row[iva_idx]) if iva_idx is not None and len(row) > iva_idx else 21.0
+        tarifa_ml = None
+        if tarifa_ml_idx is not None and len(row) > tarifa_ml_idx and row[tarifa_ml_idx] not in (None, ""):
+            try:
+                tarifa_ml = float(row[tarifa_ml_idx])
+            except (TypeError, ValueError):
+                tarifa_ml = None
         items.append({
-            "zona": str(zona), "tarifa": tarifa,
+            "zona": str(zona), "tarifa": tarifa, "tarifa_ml": tarifa_ml,
             "valid_from": fecha or today_iso, "iva_rate": iva_rate,
         })
     return items
@@ -1626,32 +1744,35 @@ def _parse_csv_flex(content: bytes) -> list:
         return []
     header = [(c or "").strip().lower() for c in rows[0]]
     zona_idx = _find_col(header, ["zona"])
-    tarifa_idx = _find_col(header, ["tarifa", "costo", "cost", "precio"])
+    tarifa_idx = _find_col(header, ["tarifa propia", "tu tarifa", "mi tarifa", "costo propio"])
+    if tarifa_idx is None:
+        tarifa_idx = _find_col(header, ["tarifa", "costo", "cost", "precio"])
+    tarifa_ml_idx = _find_col(header, ["tarifa ml", "ml", "referencia", "publica", "pública"])
     fecha_idx = _find_col(header, ["fecha", "date", "vigencia", "desde"])
     iva_idx = _find_col(header, ["iva"])
     if zona_idx is None or tarifa_idx is None:
         return []
     items = []
     today_iso = datetime.utcnow().date().isoformat()
+    def _to_float(v):
+        if v is None: return None
+        s = str(v).strip()
+        if not s: return None
+        s = s.replace(".", "").replace(",", ".") if sep == ";" else s.replace(",", "")
+        try: return float(s)
+        except ValueError: return None
     for row in rows[1:]:
         if len(row) <= max(zona_idx, tarifa_idx):
             continue
         zona = (row[zona_idx] or "").strip()
-        raw = (row[tarifa_idx] or "").strip()
-        if sep == ";":
-            raw = raw.replace(".", "").replace(",", ".")
-        else:
-            raw = raw.replace(",", "")
-        if not zona or not raw:
-            continue
-        try:
-            tarifa = float(raw)
-        except ValueError:
+        tarifa = _to_float(row[tarifa_idx])
+        if not zona or tarifa is None:
             continue
         fecha = _parse_date_cell(row[fecha_idx]) if fecha_idx is not None and len(row) > fecha_idx else None
         iva_rate = _parse_iva_rate_cell(row[iva_idx]) if iva_idx is not None and len(row) > iva_idx else 21.0
+        tarifa_ml = _to_float(row[tarifa_ml_idx]) if tarifa_ml_idx is not None and len(row) > tarifa_ml_idx else None
         items.append({
-            "zona": zona, "tarifa": tarifa,
+            "zona": zona, "tarifa": tarifa, "tarifa_ml": tarifa_ml,
             "valid_from": fecha or today_iso, "iva_rate": iva_rate,
         })
     return items
@@ -1790,6 +1911,9 @@ async def api_orders(request: Request, account_id: int,
 
     # Cargar costos versionados de mercadería (CMV por SKU con fechas).
     versioned_costs = db_get_product_costs(account_id)
+    # Cargar tarifas Flex propias del vendedor (para reemplazar el costo de
+    # envío de las ventas flex con lo que el vendedor le paga a su mensajería).
+    flex_tariffs = db_get_flex_tariffs(account_id)
 
     # ── Paso 1: construir lista raw por orden individual ──────────
     raw_list = []
@@ -1833,6 +1957,15 @@ async def api_orders(request: Request, account_id: int,
         # vendedor el mismo monto (ej. #2000013189550281 → Bonif = $6.490).
         if ingreso_envio == 0 and envio > 0 and bonificacion == 0:
             bonificacion = envio
+        # Override Flex: si la venta es Flex y tenemos tarifa propia cargada
+        # que matchea con la tarifa ML del shipment, usamos la tarifa propia
+        # como Costo Envío (lo que el vendedor le paga a su mensajería).
+        logistic_type = ship_info.get("logistic_type", "") if isinstance(ship_info, dict) else ""
+        list_cost = ship_info.get("list_cost", 0) if isinstance(ship_info, dict) else 0
+        if logistic_type == "home_delivery" and list_cost > 0 and flex_tariffs:
+            matched = match_flex_tariff(flex_tariffs, list_cost, fecha)
+            if matched:
+                envio = flex_cost_with_iva(matched)
         items = []
         order_cmv = 0.0
         for i in o.get("order_items", []):
