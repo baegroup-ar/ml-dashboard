@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Costos · Panel ML</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Inter', sans-serif; background: #f5f5f3; color: #111; }
+    nav { background: #fff; border-bottom: 1px solid #e5e5e3; padding: 0 1.5rem; height: 56px; display: flex; align-items: center; justify-content: space-between; }
+    .nav-brand { font-weight: 600; font-size: 15px; display: flex; align-items: center; gap: 8px; }
+    .nav-brand span { background: #FFE600; border-radius: 6px; padding: 2px 8px; font-size: 12px; }
+    .nav-right { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+    .btn-nav { padding: 6px 14px; border: 1px solid #ddd; border-radius: 8px; background: #fff; font-size: 13px; cursor: pointer; text-decoration: none; color: #111; }
+    .btn-blue { background: #3483FA; color: #fff !important; border-color: #3483FA; }
+    .btn-blue:hover { background: #2970e0 !important; }
+    main { max-width: 1100px; margin: 0 auto; padding: 1.5rem; }
+    h1 { font-size: 20px; font-weight: 600; margin-bottom: 6px; }
+    p.lead { font-size: 13px; color: #888; margin-bottom: 1.25rem; }
+    .card { background: #fff; border: 1px solid #e5e5e3; border-radius: 12px; padding: 1.25rem; margin-bottom: 1.25rem; }
+    .card h3 { font-size: 14px; font-weight: 600; color: #444; margin-bottom: 12px; }
+    .account-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .account-bar label { font-size: 13px; color: #666; }
+    .account-bar select { flex: 1; min-width: 220px; padding: 7px 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 14px; font-family: 'Inter', sans-serif; }
+    .upload-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+    .upload-row input[type=file] { font-size: 13px; }
+    .upload-row button { padding: 8px 16px; border: none; border-radius: 8px; background: #1a8a5a; color: #fff; font-size: 13px; cursor: pointer; }
+    .upload-row button:hover { background: #157047; }
+    .upload-row button:disabled { background: #ccc; cursor: not-allowed; }
+    .add-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .add-row input { padding: 7px 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 13px; font-family: 'Inter', sans-serif; }
+    .add-row input.sku { width: 200px; text-transform: uppercase; }
+    .add-row input.cost { width: 120px; }
+    .add-row button { padding: 8px 16px; border: none; border-radius: 8px; background: #3483FA; color: #fff; font-size: 13px; cursor: pointer; }
+    .add-row button:hover { background: #2970e0; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 12px; }
+    th { padding: 10px 14px; text-align: left; color: #888; font-weight: 500; border-bottom: 1px solid #eee; font-size: 12px; }
+    td { padding: 10px 14px; border-bottom: 1px solid #f0f0ee; color: #333; }
+    tr:last-child td { border-bottom: none; }
+    .actions { text-align: right; }
+    .btn-delete { color: #c0392b; background: none; border: none; cursor: pointer; font-size: 12px; padding: 4px 8px; border-radius: 6px; }
+    .btn-delete:hover { background: #fce9e9; }
+    .empty { padding: 2rem; text-align: center; color: #aaa; font-size: 13px; }
+    .msg { padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-top: 10px; }
+    .msg.ok { background: #e6f5ee; color: #1a8a5a; border: 1px solid #c5e9d8; }
+    .msg.err { background: #fce9e9; color: #c0392b; border: 1px solid #f5c6c6; }
+    .help-box { background: #f5f5f3; border-left: 3px solid #3483FA; padding: 10px 14px; font-size: 12px; color: #666; margin-top: 10px; }
+    .help-box code { background: #fff; padding: 1px 6px; border-radius: 4px; border: 1px solid #e5e5e3; font-family: monospace; }
+    .search-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+    .search-row input { flex: 1; padding: 7px 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 13px; }
+    .count { font-size: 12px; color: #888; }
+    .no-accounts { text-align: center; padding: 4rem; color: #888; font-size: 14px; }
+  </style>
+</head>
+<body>
+<nav>
+  <div class="nav-brand">
+    <div style="width:24px;height:24px;background:#FFE600;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;">ML</div>
+    Panel de ventas <span>Beta</span>
+  </div>
+  <div class="nav-right">
+    <a href="/dashboard" class="btn-nav">Dashboard</a>
+    <span style="color:#3483FA;font-weight:500;">Costos</span>
+    <span style="color:#888;">{{ user.name }}</span>
+    {% if user.is_admin %}<a href="/admin" style="font-size:12px;color:#3483FA;text-decoration:none;">Admin</a>{% endif %}
+    <a href="/logout" class="btn-nav">Salir</a>
+  </div>
+</nav>
+
+<main>
+  <h1>Costos de mercadería (CMV)</h1>
+  <p class="lead">Cargá el costo de cada SKU. Después se cruza con cada venta para calcular la ganancia real (Monto − Comisión − Envío − CMV).</p>
+
+  {% if accounts %}
+  <div class="card">
+    <div class="account-bar">
+      <label>Cuenta ML:</label>
+      <select id="account-select" onchange="onAccountChange()">
+        {% for acc in accounts %}
+        <option value="{{ acc.id }}">{{ acc.nickname }}</option>
+        {% endfor %}
+      </select>
+      <span class="count" id="count-label"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Cargar desde Excel o CSV</h3>
+    <div class="upload-row">
+      <input type="file" id="file-input" accept=".xlsx,.xlsm,.csv" />
+      <button onclick="uploadFile()" id="btn-upload">Subir archivo</button>
+    </div>
+    <div class="help-box">
+      Formato esperado: una columna <code>SKU</code> y una columna <code>Costo</code> (Excel <code>.xlsx</code> o CSV).
+      El sistema reemplaza los costos existentes por los nuevos manteniendo los SKUs que no estén en el archivo.
+    </div>
+    <div id="upload-msg"></div>
+  </div>
+
+  <div class="card">
+    <h3>Agregar / actualizar manualmente</h3>
+    <div class="add-row">
+      <input type="text" id="manual-sku" class="sku" placeholder="SKU (ej. SOP68-443)" />
+      <input type="number" id="manual-cost" class="cost" placeholder="Costo" step="0.01" min="0" />
+      <button onclick="addCost()">Guardar</button>
+    </div>
+    <div id="add-msg"></div>
+  </div>
+
+  <div class="card">
+    <h3>Costos cargados</h3>
+    <div class="search-row">
+      <input type="text" id="filter-input" placeholder="Buscar por SKU..." oninput="renderTable()" />
+    </div>
+    <div style="overflow-x:auto;">
+      <table>
+        <thead><tr><th>SKU</th><th>Costo</th><th>Actualizado</th><th class="actions">Acciones</th></tr></thead>
+        <tbody id="costs-tbody">
+          <tr><td colspan="4" class="empty">Cargando...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% else %}
+  <div class="no-accounts">
+    <p style="font-size:18px;font-weight:500;margin-bottom:8px;">No tenés cuentas de MercadoLibre conectadas</p>
+    <p style="margin-bottom:1.5rem;">Conectá tu primera cuenta desde el <a href="/dashboard" style="color:#3483FA;">Dashboard</a>.</p>
+  </div>
+  {% endif %}
+</main>
+
+<script>
+  const fmt = n => '$' + Number(n).toLocaleString('es-AR', {minimumFractionDigits:2, maximumFractionDigits:2});
+  let currentAccountId = document.getElementById('account-select')?.value;
+  let allItems = [];
+
+  function onAccountChange() {
+    currentAccountId = document.getElementById('account-select').value;
+    loadCosts();
+  }
+
+  async function loadCosts() {
+    if(!currentAccountId) return;
+    const tbody = document.getElementById('costs-tbody');
+    tbody.innerHTML = '<tr><td colspan="4" class="empty">Cargando...</td></tr>';
+    try {
+      const r = await fetch(`/api/costos/${currentAccountId}`);
+      if(!r.ok) throw new Error('Error al cargar');
+      const data = await r.json();
+      allItems = data.items || [];
+      renderTable();
+    } catch(e) {
+      tbody.innerHTML = `<tr><td colspan="4" class="empty">Error: ${e.message}</td></tr>`;
+    }
+  }
+
+  function renderTable() {
+    const tbody = document.getElementById('costs-tbody');
+    const filter = (document.getElementById('filter-input').value || '').trim().toUpperCase();
+    const items = filter
+      ? allItems.filter(it => (it.sku || '').toUpperCase().includes(filter))
+      : allItems;
+    document.getElementById('count-label').textContent = `${allItems.length} SKU${allItems.length===1?'':'s'} cargados`;
+    if(!items.length) {
+      tbody.innerHTML = `<tr><td colspan="4" class="empty">${filter ? 'Sin resultados.' : 'Todavía no hay costos cargados.'}</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = items.map(it => `
+      <tr>
+        <td><b>${it.sku}</b></td>
+        <td>${fmt(it.cost)}</td>
+        <td style="color:#888;font-size:12px;">${it.updated_at ? new Date(it.updated_at + 'Z').toLocaleString('es-AR', {dateStyle:'short', timeStyle:'short'}) : ''}</td>
+        <td class="actions"><button class="btn-delete" onclick="deleteCost('${it.sku.replace(/'/g, "\\'")}')">Eliminar</button></td>
+      </tr>
+    `).join('');
+  }
+
+  async function uploadFile() {
+    if(!currentAccountId) return;
+    const input = document.getElementById('file-input');
+    const btn = document.getElementById('btn-upload');
+    const msg = document.getElementById('upload-msg');
+    if(!input.files.length) {
+      msg.innerHTML = '<div class="msg err">Seleccioná un archivo primero.</div>';
+      return;
+    }
+    btn.disabled = true;
+    btn.textContent = 'Subiendo...';
+    msg.innerHTML = '';
+    const form = new FormData();
+    form.append('file', input.files[0]);
+    try {
+      const r = await fetch(`/api/costos/${currentAccountId}/upload`, { method: 'POST', body: form });
+      if(!r.ok) {
+        const t = await r.text();
+        throw new Error(t || 'Error al subir');
+      }
+      const data = await r.json();
+      msg.innerHTML = `<div class="msg ok">${data.saved} costos guardados (de ${data.rows_parsed} filas leídas).</div>`;
+      input.value = '';
+      await loadCosts();
+    } catch(e) {
+      msg.innerHTML = `<div class="msg err">${e.message}</div>`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Subir archivo';
+    }
+  }
+
+  async function addCost() {
+    if(!currentAccountId) return;
+    const sku = (document.getElementById('manual-sku').value || '').trim();
+    const cost = parseFloat(document.getElementById('manual-cost').value);
+    const msg = document.getElementById('add-msg');
+    if(!sku || isNaN(cost) || cost <= 0) {
+      msg.innerHTML = '<div class="msg err">SKU y costo válido son obligatorios.</div>';
+      return;
+    }
+    const form = new FormData();
+    form.append('sku', sku);
+    form.append('cost', String(cost));
+    try {
+      const r = await fetch(`/api/costos/${currentAccountId}`, { method: 'POST', body: form });
+      if(!r.ok) throw new Error('Error al guardar');
+      msg.innerHTML = '<div class="msg ok">Guardado.</div>';
+      document.getElementById('manual-sku').value = '';
+      document.getElementById('manual-cost').value = '';
+      await loadCosts();
+    } catch(e) {
+      msg.innerHTML = `<div class="msg err">${e.message}</div>`;
+    }
+  }
+
+  async function deleteCost(sku) {
+    if(!confirm(`¿Eliminar el costo de ${sku}?`)) return;
+    try {
+      const r = await fetch(`/api/costos/${currentAccountId}/${encodeURIComponent(sku)}`, { method: 'DELETE' });
+      if(!r.ok) throw new Error('Error');
+      await loadCosts();
+    } catch(e) {
+      alert(e.message);
+    }
+  }
+
+  if(currentAccountId) loadCosts();
+</script>
+</body>
+</html>

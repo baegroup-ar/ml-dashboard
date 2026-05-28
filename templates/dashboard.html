@@ -82,6 +82,7 @@
     Panel de ventas <span>Beta</span>
   </div>
   <div class="nav-right">
+    <a href="/costos" class="btn-nav">Costos</a>
     <span style="color:#888;">{{ user.name }}</span>
     {% if user.is_admin %}<a href="/admin" class="admin-link">Admin</a>{% endif %}
     <button class="btn-nav btn-blue" onclick="loadData(true)">
@@ -143,6 +144,10 @@
         <div class="value orange" id="m-envios">—</div>
         <div class="loading-bar" id="lb-envios"></div>
       </div>
+      <div class="metric-card" id="card-cmv">
+        <div class="label">Costo mercadería (CMV)</div>
+        <div class="value red" id="m-cmv">—</div>
+      </div>
       <div class="metric-card" id="card-neta">
         <div class="label">Ganancia neta</div>
         <div class="value green" id="m-neta">—</div>
@@ -157,7 +162,7 @@
       </div>
       <div style="overflow-x:auto;">
         <table>
-          <thead><tr><th>Fecha</th><th>Hora</th><th>N° Venta</th><th>Producto</th><th>Unid.</th><th>Monto</th><th>Comisión</th><th>Ing. Envío</th><th>Bonif.</th><th>Costo Envío</th><th>Ganancia neta</th><th>Margen</th></tr></thead>
+          <thead><tr><th>Fecha</th><th>Hora</th><th>N° Venta</th><th>Producto</th><th>Unid.</th><th>Monto</th><th>Comisión</th><th>Ing. Envío</th><th>Bonif.</th><th>Costo Envío</th><th>CMV</th><th>Ganancia neta</th><th>Margen</th></tr></thead>
           <tbody id="orders-tbody"></tbody>
         </table>
       </div>
@@ -286,8 +291,9 @@
     const bonificaciones = paidOrders.reduce((s, o) => s + (o.bonificacion || 0), 0);
     const comisiones = paidOrders.reduce((s, o) => s + (o.comision || 0), 0);
     const envios = paidOrders.reduce((s, o) => s + (o.envio || 0), 0);
+    const cmv_total = paidOrders.reduce((s, o) => s + (o.cmv || 0), 0);
     const ingresos_total = ingresos + ingresos_envio + bonificaciones;
-    const neta = ingresos_total - comisiones - envios;
+    const neta = ingresos_total - comisiones - envios - cmv_total;
     const unidades = paidOrders.reduce((s, o) => s + (o.items||[]).reduce((si, i) => si + (i.cantidad||1), 0), 0);
 
     document.getElementById('m-ventas').textContent = paidOrders.length;
@@ -296,12 +302,15 @@
 
     const pctCom = ingresos_total > 0 ? (comisiones/ingresos_total*100).toFixed(1) : '0.0';
     const pctEnv = ingresos_total > 0 ? (envios/ingresos_total*100).toFixed(1) : '0.0';
+    const pctCmv = ingresos_total > 0 ? (cmv_total/ingresos_total*100).toFixed(1) : '0.0';
     const pctNet = ingresos_total > 0 ? (neta/ingresos_total*100).toFixed(1) : '0.0';
     if(!loadingDetails) {
       document.getElementById('m-comisiones').innerHTML = `${fmt(comisiones)} <span style="font-size:11px;font-weight:400;">(${pctCom}%)</span>`;
       document.getElementById('m-comisiones').className = 'value red';
       document.getElementById('m-envios').innerHTML = `${fmt(envios)} <span style="font-size:11px;font-weight:400;">(${pctEnv}%)</span>`;
       document.getElementById('m-envios').className = 'value orange';
+      document.getElementById('m-cmv').innerHTML = `${fmt(cmv_total)} <span style="font-size:11px;font-weight:400;">(${pctCmv}%)</span>`;
+      document.getElementById('m-cmv').className = 'value red';
       document.getElementById('m-neta').innerHTML = `${fmt(neta)} <span style="font-size:11px;font-weight:400;">(${pctNet}%)</span>`;
       document.getElementById('m-neta').className = 'value ' + (neta >= 0 ? 'green' : 'red');
 
@@ -331,7 +340,7 @@
   function renderOrders(orders) {
     const tbody = document.getElementById('orders-tbody');
     if(!orders.length){
-      tbody.innerHTML='<tr><td colspan="12" style="text-align:center;color:#aaa;padding:2rem;">Sin ventas en este período.</td></tr>';
+      tbody.innerHTML='<tr><td colspan="13" style="text-align:center;color:#aaa;padding:2rem;">Sin ventas en este período.</td></tr>';
       document.getElementById('pagination').innerHTML='';
       return;
     }
@@ -355,6 +364,7 @@
         <td style="color:${isCancel?'#a0524d':'#1a8a5a'};">${fmt(o.ingreso_envio || 0)}</td>
         <td style="color:${isCancel?'#a0524d':'#1a8a5a'};">${fmt(o.bonificacion || 0)}</td>
         <td style="color:${isCancel?'#a0524d':'#c47a1e'};">${fmt(o.envio)}</td>
+        <td style="color:${isCancel?'#a0524d':((o.cmv||0)>0?'#c0392b':'#aaa')};">${fmt(o.cmv || 0)}</td>
         <td style="color:${gc};font-weight:500;">${fmt(g)}</td>
         <td style="color:${gc};font-size:13px;font-weight:600;">${pct}%</td>`;
       if(o.is_pack) {
@@ -376,7 +386,9 @@
             <td style="font-size:12px;text-align:center;">${item.cantidad||1}</td>
             <td style="font-size:12px;">${fmt(item.monto)}</td>
             <td style="font-size:12px;color:#c0392b;">${fmt(item.comision)}</td>
-            <td colspan="5"></td>
+            <td colspan="3"></td>
+            <td style="font-size:12px;color:${(item.cmv||0)>0?'#c0392b':'#aaa'};">${fmt(item.cmv || 0)}</td>
+            <td colspan="2"></td>
           </tr>`);
         });
       } else {

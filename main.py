@@ -27,7 +27,7 @@ ADMIN_PASSWORD = os.environ["ADMIN_PASSWORD"]
 ML_AUTH_URL = "https://auth.mercadolibre.com.ar/authorization"
 ML_TOKEN_URL = "https://api.mercadolibre.com/oauth/token"
 ML_API_URL = "https://api.mercadolibre.com"
-SHIPPING_LOGIC_VERSION = "v16-partition-no-billing"
+SHIPPING_LOGIC_VERSION = "v17-cmv"
 
 serializer = URLSafeTimedSerializer(SECRET_KEY)
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -91,6 +91,15 @@ def init_db():
             )
         """))
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_order_snapshot_cache_account_date ON order_snapshot_cache (account_id, paid_date)"))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS product_costs (
+                account_id INTEGER NOT NULL REFERENCES ml_accounts(id) ON DELETE CASCADE,
+                sku TEXT NOT NULL,
+                cost NUMERIC(12,2) NOT NULL,
+                updated_at TIMESTAMP DEFAULT NOW(),
+                PRIMARY KEY (account_id, sku)
+            )
+        """))
         # Invalida el caché cuando cambia la lógica de cálculo de envío.
         current = conn.execute(text("SELECT value FROM app_meta WHERE key='shipping_logic_version'")).fetchone()
         if not current or current[0] != SHIPPING_LOGIC_VERSION:
@@ -759,6 +768,219 @@ async def ml_disconnect(request: Request, account_id: int):
     return RedirectResponse("/dashboard", status_code=303)
 
 
+# ── Costos de mercadería (CMV) ──────────────────────────────────
+
+def db_get_product_costs(account_id: int) -> dict:
+    """Devuelve {sku_uppercase: float_cost} para una cuenta."""
+    rows = db_fetchall(
+        "SELECT sku, cost FROM product_costs WHERE account_id = :aid",
+        {"aid": account_id},
+    )
+    return {(r["sku"] or "").strip().upper(): float(r["cost"]) for r in rows if r.get("sku")}
+
+
+def db_save_product_costs(account_id: int, items: list):
+    """Inserta/actualiza una lista de {sku, cost} en una sola transacción."""
+    if not items:
+        return 0
+    params = []
+    for it in items:
+        sku = (it.get("sku") or "").strip()
+        if not sku:
+            continue
+        try:
+            cost = float(it.get("cost") or 0)
+        except (TypeError, ValueError):
+            continue
+        if cost <= 0:
+            continue
+        params.append({"aid": account_id, "sku": sku, "cost": cost})
+    if not params:
+        return 0
+    with engine.connect() as conn:
+        conn.execute(text(
+            "INSERT INTO product_costs (account_id, sku, cost, updated_at)"
+            " VALUES (:aid, :sku, :cost, NOW())"
+            " ON CONFLICT (account_id, sku) DO UPDATE SET"
+            " cost = EXCLUDED.cost, updated_at = NOW()"
+        ), params)
+        conn.commit()
+    return len(params)
+
+
+def parse_excel_costs(content: bytes) -> list:
+    """Devuelve [{sku, cost}, ...] leyendo un xlsx en bytes."""
+    import io
+    from openpyxl import load_workbook
+    wb = load_workbook(io.BytesIO(content), data_only=True, read_only=True)
+    ws = wb.active
+    rows = list(ws.iter_rows(values_only=True))
+    if not rows:
+        return []
+    # Detectar header: buscar 'sku' y 'costo'/'cost' en la primera fila no vacía.
+    header = None
+    data_start = 0
+    for idx, row in enumerate(rows[:5]):
+        if row is None:
+            continue
+        normalized = [str(c).strip().lower() if c is not None else "" for c in row]
+        if any("sku" in n for n in normalized):
+            header = normalized
+            data_start = idx + 1
+            break
+    if not header:
+        return []
+    sku_idx = next((i for i, n in enumerate(header) if "sku" in n), None)
+    cost_idx = next(
+        (i for i, n in enumerate(header) if n in {"costo", "cost", "precio", "precio_costo"} or "costo" in n or "cost" in n),
+        None,
+    )
+    if sku_idx is None or cost_idx is None:
+        return []
+    items = []
+    for row in rows[data_start:]:
+        if row is None or len(row) <= max(sku_idx, cost_idx):
+            continue
+        sku = row[sku_idx]
+        cost = row[cost_idx]
+        if sku is None or cost is None:
+            continue
+        items.append({"sku": str(sku).strip(), "cost": cost})
+    return items
+
+
+def parse_csv_costs(content: bytes) -> list:
+    """Devuelve [{sku, cost}, ...] leyendo un csv en bytes."""
+    import csv, io
+    text_content = content.decode("utf-8-sig", errors="ignore")
+    # Detectar separador (coma o punto y coma)
+    sample = text_content[:2048]
+    sep = ";" if sample.count(";") > sample.count(",") else ","
+    reader = csv.reader(io.StringIO(text_content), delimiter=sep)
+    rows = list(reader)
+    if not rows:
+        return []
+    header = [(c or "").strip().lower() for c in rows[0]]
+    sku_idx = next((i for i, n in enumerate(header) if "sku" in n), None)
+    cost_idx = next(
+        (i for i, n in enumerate(header) if n in {"costo", "cost", "precio", "precio_costo"} or "costo" in n or "cost" in n),
+        None,
+    )
+    if sku_idx is None or cost_idx is None:
+        return []
+    items = []
+    for row in rows[1:]:
+        if len(row) <= max(sku_idx, cost_idx):
+            continue
+        sku = (row[sku_idx] or "").strip()
+        raw_cost = (row[cost_idx] or "").strip().replace(".", "").replace(",", ".") if sep == ";" else (row[cost_idx] or "").strip().replace(",", "")
+        if not sku or not raw_cost:
+            continue
+        try:
+            cost = float(raw_cost)
+        except ValueError:
+            continue
+        items.append({"sku": sku, "cost": cost})
+    return items
+
+
+@app.get("/costos", response_class=HTMLResponse)
+async def costos_page(request: Request):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse("/")
+    user = get_user(user_id)
+    accounts = db_fetchall(
+        "SELECT id, nickname FROM ml_accounts WHERE user_id=:uid ORDER BY id",
+        {"uid": user_id},
+    )
+    return templates.TemplateResponse("costos.html", {"request": request, "user": user, "accounts": accounts})
+
+
+@app.get("/api/costos/{account_id}")
+async def api_costos_list(request: Request, account_id: int):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = db_fetchone("SELECT id FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
+    if not acc:
+        raise HTTPException(404)
+    rows = db_fetchall(
+        "SELECT sku, cost, updated_at FROM product_costs WHERE account_id=:aid ORDER BY sku",
+        {"aid": account_id},
+    )
+    return {
+        "items": [
+            {"sku": r["sku"], "cost": float(r["cost"]), "updated_at": r["updated_at"].isoformat() if r.get("updated_at") else None}
+            for r in rows
+        ],
+    }
+
+
+@app.post("/api/costos/{account_id}")
+async def api_costos_upsert(request: Request, account_id: int, sku: str = Form(...), cost: float = Form(...)):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = db_fetchone("SELECT id FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
+    if not acc:
+        raise HTTPException(404)
+    saved = db_save_product_costs(account_id, [{"sku": sku, "cost": cost}])
+    invalidate_orders_cache_for_account(account_id)
+    return {"ok": True, "saved": saved}
+
+
+@app.delete("/api/costos/{account_id}/{sku}")
+async def api_costos_delete(request: Request, account_id: int, sku: str):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = db_fetchone("SELECT id FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
+    if not acc:
+        raise HTTPException(404)
+    db_execute(
+        "DELETE FROM product_costs WHERE account_id=:aid AND sku=:sku",
+        {"aid": account_id, "sku": sku},
+    )
+    invalidate_orders_cache_for_account(account_id)
+    return {"ok": True}
+
+
+@app.post("/api/costos/{account_id}/upload")
+async def api_costos_upload(request: Request, account_id: int):
+    from fastapi import UploadFile, File  # local import to keep top clean
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = db_fetchone("SELECT id FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
+    if not acc:
+        raise HTTPException(404)
+    form = await request.form()
+    upload = form.get("file")
+    if upload is None or not hasattr(upload, "read"):
+        raise HTTPException(400, "Falta el archivo")
+    content = await upload.read()
+    filename = (getattr(upload, "filename", "") or "").lower()
+    try:
+        if filename.endswith(".xlsx") or filename.endswith(".xlsm"):
+            items = parse_excel_costs(content)
+        else:
+            items = parse_csv_costs(content)
+    except Exception as e:
+        raise HTTPException(400, f"No pude leer el archivo: {e}")
+    saved = db_save_product_costs(account_id, items)
+    invalidate_orders_cache_for_account(account_id)
+    return {"ok": True, "saved": saved, "rows_parsed": len(items)}
+
+
+# Caché invalidator: cuando cambian los costos hay que recalcular las órdenes.
+def invalidate_orders_cache_for_account(account_id: int):
+    db_execute(
+        "DELETE FROM order_snapshot_cache WHERE account_id = :aid",
+        {"aid": account_id},
+    )
+
+
 # ── API datos ───────────────────────────────────────────────────
 
 @app.get("/api/orders/{account_id}")
@@ -890,6 +1112,9 @@ async def api_orders(request: Request, account_id: int,
 
     empty_ship = {"seller": 0.0, "buyer": 0.0, "bonificacion": 0.0}
 
+    # Cargar costos de mercadería de esta cuenta (CMV por SKU).
+    product_costs = db_get_product_costs(account_id)
+
     # ── Paso 1: construir lista raw por orden individual ──────────
     raw_list = []
     for o, sid in zip(all_results, all_sids):
@@ -933,15 +1158,21 @@ async def api_orders(request: Request, account_id: int,
         if ingreso_envio == 0 and envio > 0 and bonificacion == 0:
             bonificacion = envio
         items = []
+        order_cmv = 0.0
         for i in o.get("order_items", []):
             sku = (i.get("item", {}).get("seller_sku") or "").strip()
             qty = int(i.get("quantity", 1))
+            unit_cost = product_costs.get(sku.upper(), 0.0) if sku else 0.0
+            item_cmv = round(unit_cost * qty, 2)
+            order_cmv += item_cmv
             items.append({
                 "sku": sku,
                 "titulo": i.get("item", {}).get("title", "?"),
                 "monto": round(float(i.get("unit_price", 0)) * qty, 2),
                 "comision": round(float(i.get("sale_fee", 0)) * qty, 2),
                 "cantidad": qty,
+                "cmv_unit": round(unit_cost, 2),
+                "cmv": item_cmv,
             })
         raw_list.append({
             "id": o.get("id"),
@@ -954,6 +1185,7 @@ async def api_orders(request: Request, account_id: int,
             "shipping_buyer": round(ingreso_envio, 2),
             "bonificacion": round(bonificacion, 2),
             "coupon_amt": round(float((o.get("coupon") or {}).get("amount", 0)), 2),
+            "cmv": round(order_cmv, 2),
             "estado": estado,
             "items": items,
         })
@@ -973,6 +1205,7 @@ async def api_orders(request: Request, account_id: int,
                     "shipping_buyer": raw["shipping_buyer"],
                     "bonificacion": raw["bonificacion"],
                     "coupon_total": 0.0,
+                    "cmv": 0.0,
                     "estado": raw["estado"],
                     "is_pack": True, "items": [],
                 }
@@ -980,6 +1213,7 @@ async def api_orders(request: Request, account_id: int,
             p["monto"] = round(p["monto"] + raw["monto"], 2)
             p["comision"] = round(p["comision"] + raw["comision"], 2)
             p["coupon_total"] = round(p["coupon_total"] + raw["coupon_amt"], 2)
+            p["cmv"] = round(p["cmv"] + raw["cmv"], 2)
             p["items"].extend(raw["items"])
         else:
             # Ing. Envío = sólo lo que paga el comprador por envío (sin cupones).
@@ -987,7 +1221,8 @@ async def api_orders(request: Request, account_id: int,
             sku_col = " / ".join(i["sku"] or i["titulo"] for i in raw["items"])
             ganancia = round(
                 raw["monto"] + ingreso_envio + raw["bonificacion"]
-                + raw["coupon_amt"] - raw["comision"] - raw["envio"], 2
+                + raw["coupon_amt"] - raw["comision"] - raw["envio"]
+                - raw["cmv"], 2
             )
             orders.append({
                 "id": raw["id"], "venta_id": raw["id"],
@@ -997,6 +1232,7 @@ async def api_orders(request: Request, account_id: int,
                 "ingreso_envio": ingreso_envio,
                 "bonificacion": raw["bonificacion"],
                 "envio": raw["envio"],
+                "cmv": raw["cmv"],
                 "ganancia": ganancia,
                 "estado": raw["estado"],
                 "is_pack": False, "items": raw["items"],
@@ -1007,7 +1243,8 @@ async def api_orders(request: Request, account_id: int,
         p["ingreso_envio"] = ingreso_envio
         p["ganancia"] = round(
             p["monto"] + ingreso_envio + p["bonificacion"]
-            + p["coupon_total"] - p["comision"] - p["envio"], 2
+            + p["coupon_total"] - p["comision"] - p["envio"]
+            - p["cmv"], 2
         )
         if len(p["items"]) == 1:
             p["is_pack"] = False
