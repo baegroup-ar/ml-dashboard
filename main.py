@@ -116,6 +116,19 @@ def init_db():
         if pk_cols and pk_cols[0] != "account_id,sku,valid_from":
             conn.execute(text("ALTER TABLE product_costs DROP CONSTRAINT product_costs_pkey"))
             conn.execute(text("ALTER TABLE product_costs ADD PRIMARY KEY (account_id, sku, valid_from)"))
+        # Tabla de tarifas Flex (costo real que el vendedor paga a la
+        # mensajería, por zona de entrega y con fecha de vigencia).
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS flex_tariffs (
+                account_id INTEGER NOT NULL REFERENCES ml_accounts(id) ON DELETE CASCADE,
+                zona VARCHAR(20) NOT NULL,
+                tarifa NUMERIC(12,2) NOT NULL,
+                iva_rate NUMERIC(5,2) DEFAULT 21,
+                valid_from DATE NOT NULL,
+                updated_at TIMESTAMP DEFAULT NOW(),
+                PRIMARY KEY (account_id, zona, valid_from)
+            )
+        """))
         # Migrar iva_included → iva_rate UNA VEZ (controlado por app_meta).
         iva_migrated = conn.execute(text(
             "SELECT 1 FROM app_meta WHERE key='iva_rate_migrated'"
@@ -1186,6 +1199,44 @@ async def api_costos_upsert(
     return {"ok": True, "saved": saved}
 
 
+@app.put("/api/costos/{account_id}/edit")
+async def api_costos_edit(
+    request: Request, account_id: int,
+    old_sku: str = Form(...),
+    old_valid_from: str = Form(...),
+    sku: str = Form(...),
+    cost: float = Form(...),
+    valid_from: str = Form(...),
+    iva_rate: Optional[str] = Form(None),
+):
+    """Edita una entry de costo: borra la vieja (old_sku, old_valid_from)
+    e inserta la nueva. Sirve para corregir errores de carga incluyendo
+    cambios de SKU o fecha."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = db_fetchone("SELECT id FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
+    if not acc:
+        raise HTTPException(404)
+    try:
+        rate_val = float(iva_rate) if iva_rate is not None and iva_rate != "" else 21.0
+    except ValueError:
+        rate_val = 21.0
+    # Borrar entry vieja
+    db_execute(
+        "DELETE FROM product_costs WHERE account_id=:aid AND sku=:sku AND valid_from=:vf",
+        {"aid": account_id, "sku": old_sku, "vf": old_valid_from},
+    )
+    # Insertar entry nueva
+    saved = db_save_product_costs(account_id, [{
+        "sku": sku, "cost": cost,
+        "valid_from": valid_from,
+        "iva_rate": rate_val,
+    }])
+    invalidate_orders_cache_for_account(account_id)
+    return {"ok": True, "saved": saved}
+
+
 @app.delete("/api/costos/{account_id}/{sku}")
 async def api_costos_delete(request: Request, account_id: int, sku: str, valid_from: Optional[str] = None):
     user_id = get_session_user_id(request)
@@ -1242,6 +1293,368 @@ def invalidate_orders_cache_for_account(account_id: int):
         "DELETE FROM order_snapshot_cache WHERE account_id = :aid",
         {"aid": account_id},
     )
+
+
+# ── Tarifas Flex (costo real del envío Flex que paga el vendedor) ───
+
+FLEX_ZONES = [
+    ("cercana",    "Zonas cercanas"),
+    ("media",      "Zonas de media distancia"),
+    ("lejana",     "Zonas lejanas"),
+    ("muy_lejana", "Zonas muy lejanas"),
+]
+FLEX_ZONE_KEYS = {z[0] for z in FLEX_ZONES}
+
+
+@app.get("/costos/envios-flex", response_class=HTMLResponse)
+async def envios_flex_page(request: Request):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse("/")
+    user = get_user(user_id)
+    accounts = db_fetchall(
+        "SELECT id, nickname FROM ml_accounts WHERE user_id=:uid ORDER BY id",
+        {"uid": user_id},
+    )
+    return templates.TemplateResponse(
+        "envios_flex.html",
+        {"request": request, "user": user, "accounts": accounts, "zones": FLEX_ZONES},
+    )
+
+
+@app.get("/api/flex-tariffs/template")
+async def api_flex_template(request: Request):
+    """Excel modelo con las 4 zonas y filas de ejemplo."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    import io
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from fastapi.responses import StreamingResponse
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Tarifas Flex"
+    ws.append(["Zona", "Tarifa", "Fecha", "IVA"])
+    fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
+    font = Font(bold=True)
+    for col in range(1, 5):
+        c = ws.cell(row=1, column=col)
+        c.fill = fill
+        c.font = font
+        c.alignment = Alignment(horizontal="center")
+    today_iso = datetime.utcnow().date().isoformat()
+    for key, label in FLEX_ZONES:
+        ws.append([label, 0, today_iso, 21])
+    ws.column_dimensions["A"].width = 28
+    ws.column_dimensions["B"].width = 14
+    ws.column_dimensions["C"].width = 14
+    ws.column_dimensions["D"].width = 10
+    ws2 = wb.create_sheet("Instrucciones")
+    rows = [
+        ["Plantilla de tarifas Flex (costo real que pagás a tu mensajería)"],
+        [""],
+        ["Columnas:"],
+        ["Zona", "Una de las 4: 'Zonas cercanas', 'Zonas de media distancia', 'Zonas lejanas', 'Zonas muy lejanas'. También acepta 'cercana', 'media', 'lejana', 'muy_lejana'."],
+        ["Tarifa", "Costo SIN IVA que le pagás a la mensajería por un envío Flex en esa zona."],
+        ["Fecha", "Vigencia desde (YYYY-MM-DD o DD/MM/YYYY). Si está vacía, hoy."],
+        ["IVA", "Tasa de IVA (21, 10.5, 0 = exento). Default 21."],
+        [""],
+        ["Notas:"],
+        ["", "Cada combinación Zona + Fecha es una versión histórica."],
+        ["", "Las tarifas son por cuenta de ML — cada cuenta tiene su propio listado."],
+    ]
+    for r in rows:
+        ws2.append(r)
+    ws2.column_dimensions["A"].width = 14
+    ws2.column_dimensions["B"].width = 90
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="plantilla_envios_flex.xlsx"'},
+    )
+
+
+@app.get("/api/flex-tariffs/{account_id}")
+async def api_flex_list(request: Request, account_id: int):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = db_fetchone("SELECT id FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
+    if not acc:
+        raise HTTPException(404)
+    rows = db_fetchall(
+        "SELECT zona, tarifa, iva_rate, valid_from, updated_at FROM flex_tariffs"
+        " WHERE account_id=:aid ORDER BY zona, valid_from DESC",
+        {"aid": account_id},
+    )
+    return {
+        "items": [
+            {
+                "zona": r["zona"],
+                "tarifa": float(r["tarifa"]),
+                "iva_rate": float(r["iva_rate"] if r["iva_rate"] is not None else 21),
+                "valid_from": r["valid_from"].isoformat() if hasattr(r["valid_from"], "isoformat") else str(r["valid_from"]),
+                "updated_at": r["updated_at"].isoformat() if r.get("updated_at") else None,
+            }
+            for r in rows
+        ],
+    }
+
+
+def _normalize_zone(value) -> Optional[str]:
+    if value is None:
+        return None
+    s = str(value).strip().lower()
+    if not s:
+        return None
+    if s in FLEX_ZONE_KEYS:
+        return s
+    # Mapear desde el label visible
+    for key, label in FLEX_ZONES:
+        if s == label.lower():
+            return key
+    # Mapeos sueltos
+    if "cercana" in s:
+        return "cercana"
+    if "muy" in s and "lejana" in s:
+        return "muy_lejana"
+    if "lejana" in s:
+        return "lejana"
+    if "media" in s or "medio" in s:
+        return "media"
+    return None
+
+
+def _save_flex_tariffs(account_id: int, items: list) -> int:
+    """Inserta/actualiza tarifas flex. items: {zona, tarifa, iva_rate, valid_from}."""
+    if not items:
+        return 0
+    params = []
+    today_iso = datetime.utcnow().date().isoformat()
+    for it in items:
+        zona = _normalize_zone(it.get("zona"))
+        if zona is None:
+            continue
+        try:
+            tarifa = float(it.get("tarifa") or 0)
+        except (TypeError, ValueError):
+            continue
+        if tarifa < 0:
+            continue
+        vf = it.get("valid_from") or today_iso
+        if hasattr(vf, "isoformat"):
+            vf = vf.isoformat()
+        try:
+            iva_rate = float(it.get("iva_rate") if it.get("iva_rate") is not None else 21)
+        except (TypeError, ValueError):
+            iva_rate = 21.0
+        params.append({"aid": account_id, "zona": zona, "tarifa": tarifa, "iva": iva_rate, "vf": vf})
+    if not params:
+        return 0
+    with engine.connect() as conn:
+        conn.execute(text(
+            "INSERT INTO flex_tariffs (account_id, zona, tarifa, iva_rate, valid_from, updated_at)"
+            " VALUES (:aid, :zona, :tarifa, :iva, :vf, NOW())"
+            " ON CONFLICT (account_id, zona, valid_from) DO UPDATE SET"
+            " tarifa = EXCLUDED.tarifa,"
+            " iva_rate = EXCLUDED.iva_rate,"
+            " updated_at = NOW()"
+        ), params)
+        conn.commit()
+    return len(params)
+
+
+@app.post("/api/flex-tariffs/{account_id}")
+async def api_flex_upsert(
+    request: Request, account_id: int,
+    zona: str = Form(...),
+    tarifa: float = Form(...),
+    valid_from: Optional[str] = Form(None),
+    iva_rate: Optional[str] = Form(None),
+):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = db_fetchone("SELECT id FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
+    if not acc:
+        raise HTTPException(404)
+    try:
+        rate_val = float(iva_rate) if iva_rate is not None and iva_rate != "" else 21.0
+    except ValueError:
+        rate_val = 21.0
+    saved = _save_flex_tariffs(account_id, [{
+        "zona": zona, "tarifa": tarifa,
+        "valid_from": valid_from or datetime.utcnow().date().isoformat(),
+        "iva_rate": rate_val,
+    }])
+    return {"ok": True, "saved": saved}
+
+
+@app.put("/api/flex-tariffs/{account_id}/edit")
+async def api_flex_edit(
+    request: Request, account_id: int,
+    old_zona: str = Form(...),
+    old_valid_from: str = Form(...),
+    zona: str = Form(...),
+    tarifa: float = Form(...),
+    valid_from: str = Form(...),
+    iva_rate: Optional[str] = Form(None),
+):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = db_fetchone("SELECT id FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
+    if not acc:
+        raise HTTPException(404)
+    try:
+        rate_val = float(iva_rate) if iva_rate is not None and iva_rate != "" else 21.0
+    except ValueError:
+        rate_val = 21.0
+    db_execute(
+        "DELETE FROM flex_tariffs WHERE account_id=:aid AND zona=:zona AND valid_from=:vf",
+        {"aid": account_id, "zona": old_zona, "vf": old_valid_from},
+    )
+    saved = _save_flex_tariffs(account_id, [{
+        "zona": zona, "tarifa": tarifa,
+        "valid_from": valid_from, "iva_rate": rate_val,
+    }])
+    return {"ok": True, "saved": saved}
+
+
+@app.delete("/api/flex-tariffs/{account_id}/{zona}")
+async def api_flex_delete(request: Request, account_id: int, zona: str, valid_from: Optional[str] = None):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = db_fetchone("SELECT id FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
+    if not acc:
+        raise HTTPException(404)
+    if valid_from:
+        db_execute(
+            "DELETE FROM flex_tariffs WHERE account_id=:aid AND zona=:zona AND valid_from=:vf",
+            {"aid": account_id, "zona": zona, "vf": valid_from},
+        )
+    else:
+        db_execute(
+            "DELETE FROM flex_tariffs WHERE account_id=:aid AND zona=:zona",
+            {"aid": account_id, "zona": zona},
+        )
+    return {"ok": True}
+
+
+@app.post("/api/flex-tariffs/{account_id}/upload")
+async def api_flex_upload(request: Request, account_id: int):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = db_fetchone("SELECT id FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
+    if not acc:
+        raise HTTPException(404)
+    form = await request.form()
+    upload = form.get("file")
+    if upload is None or not hasattr(upload, "read"):
+        raise HTTPException(400, "Falta el archivo")
+    content = await upload.read()
+    filename = (getattr(upload, "filename", "") or "").lower()
+    try:
+        if filename.endswith(".xlsx") or filename.endswith(".xlsm"):
+            items = _parse_excel_flex(content)
+        else:
+            items = _parse_csv_flex(content)
+    except Exception as e:
+        raise HTTPException(400, f"No pude leer el archivo: {e}")
+    saved = _save_flex_tariffs(account_id, items)
+    return {"ok": True, "saved": saved, "rows_parsed": len(items)}
+
+
+def _parse_excel_flex(content: bytes) -> list:
+    import io
+    from openpyxl import load_workbook
+    wb = load_workbook(io.BytesIO(content), data_only=True, read_only=True)
+    ws = wb.active
+    rows = list(ws.iter_rows(values_only=True))
+    if not rows:
+        return []
+    header = None
+    data_start = 0
+    for idx, row in enumerate(rows[:5]):
+        if row is None:
+            continue
+        normalized = [str(c).strip().lower() if c is not None else "" for c in row]
+        if any("zona" in n for n in normalized):
+            header = normalized
+            data_start = idx + 1
+            break
+    if not header:
+        return []
+    zona_idx = _find_col(header, ["zona"])
+    tarifa_idx = _find_col(header, ["tarifa", "costo", "cost", "precio"])
+    fecha_idx = _find_col(header, ["fecha", "date", "vigencia", "desde"])
+    iva_idx = _find_col(header, ["iva"])
+    if zona_idx is None or tarifa_idx is None:
+        return []
+    items = []
+    today_iso = datetime.utcnow().date().isoformat()
+    for row in rows[data_start:]:
+        if row is None or len(row) <= max(zona_idx, tarifa_idx):
+            continue
+        zona = row[zona_idx]
+        tarifa = row[tarifa_idx]
+        if zona is None or tarifa is None:
+            continue
+        fecha = _parse_date_cell(row[fecha_idx]) if fecha_idx is not None and len(row) > fecha_idx else None
+        iva_rate = _parse_iva_rate_cell(row[iva_idx]) if iva_idx is not None and len(row) > iva_idx else 21.0
+        items.append({
+            "zona": str(zona), "tarifa": tarifa,
+            "valid_from": fecha or today_iso, "iva_rate": iva_rate,
+        })
+    return items
+
+
+def _parse_csv_flex(content: bytes) -> list:
+    import csv, io
+    text_content = content.decode("utf-8-sig", errors="ignore")
+    sample = text_content[:2048]
+    sep = ";" if sample.count(";") > sample.count(",") else ","
+    reader = csv.reader(io.StringIO(text_content), delimiter=sep)
+    rows = list(reader)
+    if not rows:
+        return []
+    header = [(c or "").strip().lower() for c in rows[0]]
+    zona_idx = _find_col(header, ["zona"])
+    tarifa_idx = _find_col(header, ["tarifa", "costo", "cost", "precio"])
+    fecha_idx = _find_col(header, ["fecha", "date", "vigencia", "desde"])
+    iva_idx = _find_col(header, ["iva"])
+    if zona_idx is None or tarifa_idx is None:
+        return []
+    items = []
+    today_iso = datetime.utcnow().date().isoformat()
+    for row in rows[1:]:
+        if len(row) <= max(zona_idx, tarifa_idx):
+            continue
+        zona = (row[zona_idx] or "").strip()
+        raw = (row[tarifa_idx] or "").strip()
+        if sep == ";":
+            raw = raw.replace(".", "").replace(",", ".")
+        else:
+            raw = raw.replace(",", "")
+        if not zona or not raw:
+            continue
+        try:
+            tarifa = float(raw)
+        except ValueError:
+            continue
+        fecha = _parse_date_cell(row[fecha_idx]) if fecha_idx is not None and len(row) > fecha_idx else None
+        iva_rate = _parse_iva_rate_cell(row[iva_idx]) if iva_idx is not None and len(row) > iva_idx else 21.0
+        items.append({
+            "zona": zona, "tarifa": tarifa,
+            "valid_from": fecha or today_iso, "iva_rate": iva_rate,
+        })
+    return items
 
 
 # ── API datos ───────────────────────────────────────────────────

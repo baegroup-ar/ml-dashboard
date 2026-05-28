@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Costos · Panel ML</title>
+  <title>Envíos Flex · Panel ML</title>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -13,8 +13,6 @@
     .nav-brand span { background: #FFE600; border-radius: 6px; padding: 2px 8px; font-size: 12px; }
     .nav-right { display: flex; align-items: center; gap: 10px; font-size: 13px; }
     .btn-nav { padding: 6px 14px; border: 1px solid #ddd; border-radius: 8px; background: #fff; font-size: 13px; cursor: pointer; text-decoration: none; color: #111; }
-    .btn-blue { background: #3483FA; color: #fff !important; border-color: #3483FA; }
-    .btn-blue:hover { background: #2970e0 !important; }
     main { max-width: 1100px; margin: 0 auto; padding: 1.5rem; }
     h1 { font-size: 20px; font-weight: 600; margin-bottom: 6px; }
     p.lead { font-size: 13px; color: #888; margin-bottom: 1.25rem; }
@@ -27,12 +25,12 @@
     .upload-row input[type=file] { font-size: 13px; }
     .upload-row button { padding: 8px 16px; border: none; border-radius: 8px; background: #1a8a5a; color: #fff; font-size: 13px; cursor: pointer; }
     .upload-row button:hover { background: #157047; }
-    .upload-row button:disabled { background: #ccc; cursor: not-allowed; }
     .add-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-    .add-row input { padding: 7px 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 13px; font-family: 'Inter', sans-serif; }
-    .add-row input.sku { width: 180px; text-transform: uppercase; }
-    .add-row input.cost { width: 110px; }
+    .add-row input, .add-row select { padding: 7px 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 13px; font-family: 'Inter', sans-serif; }
+    .add-row select.zona { width: 220px; }
+    .add-row input.tarifa { width: 130px; }
     .add-row input[type=date] { width: 140px; }
+    .add-row input.iva { width: 90px; }
     .add-row button { padding: 8px 16px; border: none; border-radius: 8px; background: #3483FA; color: #fff; font-size: 13px; cursor: pointer; }
     .add-row button:hover { background: #2970e0; }
     table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 12px; }
@@ -46,15 +44,13 @@
     .btn-edit:hover { background: #e8f1fd; }
     .btn-save { color: #1a8a5a; background: none; border: none; cursor: pointer; font-size: 12px; padding: 4px 8px; border-radius: 6px; }
     .btn-save:hover { background: #e6f5ee; }
-    .row-edit input { padding: 4px 6px; border: 1px solid #ddd; border-radius: 4px; font-size: 12px; font-family: 'Inter', sans-serif; width: 100%; }
+    .row-edit input, .row-edit select { padding: 4px 6px; border: 1px solid #ddd; border-radius: 4px; font-size: 12px; font-family: 'Inter', sans-serif; width: 100%; }
     .empty { padding: 2rem; text-align: center; color: #aaa; font-size: 13px; }
     .msg { padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-top: 10px; }
     .msg.ok { background: #e6f5ee; color: #1a8a5a; border: 1px solid #c5e9d8; }
     .msg.err { background: #fce9e9; color: #c0392b; border: 1px solid #f5c6c6; }
     .help-box { background: #f5f5f3; border-left: 3px solid #3483FA; padding: 10px 14px; font-size: 12px; color: #666; margin-top: 10px; }
     .help-box code { background: #fff; padding: 1px 6px; border-radius: 4px; border: 1px solid #e5e5e3; font-family: monospace; }
-    .search-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
-    .search-row input { flex: 1; padding: 7px 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 13px; }
     .count { font-size: 12px; color: #888; }
     .no-accounts { text-align: center; padding: 4rem; color: #888; font-size: 14px; }
   </style>
@@ -67,8 +63,8 @@
   </div>
   <div class="nav-right">
     <a href="/dashboard" class="btn-nav">Dashboard</a>
-    <span style="color:#3483FA;font-weight:500;">Costos</span>
-    <a href="/costos/envios-flex" class="btn-nav">Envíos Flex</a>
+    <a href="/costos" class="btn-nav">Costos</a>
+    <span style="color:#3483FA;font-weight:500;">Envíos Flex</span>
     <span style="color:#888;">{{ user.name }}</span>
     {% if user.is_admin %}<a href="/admin" style="font-size:12px;color:#3483FA;text-decoration:none;">Admin</a>{% endif %}
     <a href="/logout" class="btn-nav">Salir</a>
@@ -76,12 +72,11 @@
 </nav>
 
 <main>
-  <h1>Costos de mercadería (CMV)</h1>
+  <h1>Tarifas de Envíos Flex</h1>
   <p class="lead">
-    Cargá el costo de cada SKU <b>sin IVA</b>, con la <b>fecha de vigencia</b> y la <b>tasa de IVA</b> que
-    le corresponde (21%, 10.5%, 0 si está exento, etc.). Cada venta toma el costo vigente al momento
-    de la venta y el sistema aplica la tasa automáticamente para que sea comparable con
-    monto/comisión/envío de ML, que vienen con IVA incluido.
+    Cargá lo que <b>vos le pagás a tu mensajería</b> por cada zona de entrega, sin IVA. El sistema aplica
+    la tasa automáticamente y respeta la fecha de vigencia (igual que los costos de mercadería).
+    Cada cuenta de ML tiene su propio listado.
   </p>
 
   {% if accounts %}
@@ -95,9 +90,6 @@
       </select>
       <span class="count" id="count-label"></span>
     </div>
-    <div style="font-size:12px;color:#888;margin-top:8px;">
-      Los costos se guardan por cuenta. Cada cuenta de ML tiene su propio listado independiente.
-    </div>
   </div>
 
   <div class="card">
@@ -105,17 +97,15 @@
     <div class="upload-row">
       <input type="file" id="file-input" accept=".xlsx,.xlsm,.csv" />
       <button onclick="uploadFile()" id="btn-upload">Subir archivo</button>
-      <a href="/api/costos/template" download="plantilla_costos.xlsx"
+      <a href="/api/flex-tariffs/template" download="plantilla_envios_flex.xlsx"
          style="padding:8px 14px;border:1px solid #3483FA;border-radius:8px;background:#fff;color:#3483FA;font-size:13px;text-decoration:none;">
         Descargar plantilla
       </a>
     </div>
     <div class="help-box">
-      Columnas esperadas: <code>SKU</code>, <code>Costo</code> (sin IVA), opcionalmente
-      <code>Fecha</code> (vigencia desde, <code>YYYY-MM-DD</code> o <code>DD/MM/YYYY</code>; si falta, hoy)
-      y <code>IVA</code> (tasa: <code>21</code>, <code>10.5</code>, <code>0</code> o <code>Exento</code>;
-      default <b>21%</b>). Cada combinación SKU+Fecha es una versión histórica.
-      Bajate la plantilla para tener un Excel listo con las columnas y filas de ejemplo.
+      Columnas: <code>Zona</code> (una de las 4: <code>Zonas cercanas</code>, <code>Zonas de media distancia</code>,
+      <code>Zonas lejanas</code>, <code>Zonas muy lejanas</code>), <code>Tarifa</code> (sin IVA),
+      <code>Fecha</code> (vigencia desde) y <code>IVA</code> (tasa). Bajate la plantilla para tenerla lista.
     </div>
     <div id="upload-msg"></div>
   </div>
@@ -123,11 +113,15 @@
   <div class="card">
     <h3>Agregar / actualizar manualmente</h3>
     <div class="add-row">
-      <input type="text" id="manual-sku" class="sku" placeholder="SKU (ej. SOP68-443)" />
-      <input type="number" id="manual-cost" class="cost" placeholder="Costo sin IVA" step="0.01" min="0" />
+      <select id="manual-zona" class="zona">
+        {% for key, label in zones %}
+        <option value="{{ key }}">{{ label }}</option>
+        {% endfor %}
+      </select>
+      <input type="number" id="manual-tarifa" class="tarifa" placeholder="Tarifa sin IVA" step="0.01" min="0" />
       <input type="date" id="manual-fecha" title="Vigente desde" />
-      <input type="number" id="manual-iva" class="cost" placeholder="IVA %" step="0.5" min="0" max="100" value="21" title="Tasa de IVA (21, 10.5, 0 = exento)" />
-      <button onclick="addCost()">Guardar</button>
+      <input type="number" id="manual-iva" class="iva" value="21" step="0.5" min="0" max="100" title="IVA %" />
+      <button onclick="addTariff()">Guardar</button>
     </div>
     <div style="font-size:11px;color:#888;margin-top:6px;">
       Si dejás la fecha vacía toma hoy. Tasa por defecto 21%, escribí <code>10.5</code> o <code>0</code> según corresponda.
@@ -136,16 +130,13 @@
   </div>
 
   <div class="card">
-    <h3>Costos cargados</h3>
-    <div class="search-row">
-      <input type="text" id="filter-input" placeholder="Buscar por SKU..." oninput="renderTable()" />
-    </div>
+    <h3>Tarifas cargadas</h3>
     <div style="overflow-x:auto;">
       <table>
         <thead><tr>
-          <th>SKU</th><th>Costo sin IVA</th><th>IVA</th><th>Costo con IVA</th><th>Vigente desde</th><th>Actualizado</th><th class="actions">Acciones</th>
+          <th>Zona</th><th>Tarifa sin IVA</th><th>IVA</th><th>Tarifa con IVA</th><th>Vigente desde</th><th>Actualizado</th><th class="actions">Acciones</th>
         </tr></thead>
-        <tbody id="costs-tbody">
+        <tbody id="tariffs-tbody">
           <tr><td colspan="7" class="empty">Cargando...</td></tr>
         </tbody>
       </table>
@@ -154,27 +145,30 @@
   {% else %}
   <div class="no-accounts">
     <p style="font-size:18px;font-weight:500;margin-bottom:8px;">No tenés cuentas de MercadoLibre conectadas</p>
-    <p style="margin-bottom:1.5rem;">Conectá tu primera cuenta desde el <a href="/dashboard" style="color:#3483FA;">Dashboard</a>.</p>
+    <p>Conectá tu primera cuenta desde el <a href="/dashboard" style="color:#3483FA;">Dashboard</a>.</p>
   </div>
   {% endif %}
 </main>
 
 <script>
   const fmt = n => '$' + Number(n).toLocaleString('es-AR', {minimumFractionDigits:2, maximumFractionDigits:2});
+  const ZONE_LABELS = {
+    {% for key, label in zones %}'{{ key }}': '{{ label }}'{% if not loop.last %},{% endif %}{% endfor %}
+  };
   let currentAccountId = document.getElementById('account-select')?.value;
   let allItems = [];
 
   function onAccountChange() {
     currentAccountId = document.getElementById('account-select').value;
-    loadCosts();
+    loadTariffs();
   }
 
-  async function loadCosts() {
+  async function loadTariffs() {
     if(!currentAccountId) return;
-    const tbody = document.getElementById('costs-tbody');
+    const tbody = document.getElementById('tariffs-tbody');
     tbody.innerHTML = '<tr><td colspan="7" class="empty">Cargando...</td></tr>';
     try {
-      const r = await fetch(`/api/costos/${currentAccountId}`);
+      const r = await fetch(`/api/flex-tariffs/${currentAccountId}`);
       if(!r.ok) throw new Error('Error al cargar');
       const data = await r.json();
       allItems = data.items || [];
@@ -185,83 +179,69 @@
   }
 
   function renderTable() {
-    const tbody = document.getElementById('costs-tbody');
-    const filter = (document.getElementById('filter-input').value || '').trim().toUpperCase();
-    const items = filter
-      ? allItems.filter(it => (it.sku || '').toUpperCase().includes(filter))
-      : allItems;
-    const uniqueSkus = new Set(allItems.map(it => (it.sku || '').toUpperCase())).size;
+    const tbody = document.getElementById('tariffs-tbody');
+    const uniqueZones = new Set(allItems.map(it => it.zona)).size;
     document.getElementById('count-label').textContent =
-      `${uniqueSkus} SKU${uniqueSkus===1?'':'s'} · ${allItems.length} entrada${allItems.length===1?'':'s'}`;
-    if(!items.length) {
-      tbody.innerHTML = `<tr><td colspan="7" class="empty">${filter ? 'Sin resultados.' : 'Todavía no hay costos cargados.'}</td></tr>`;
+      `${uniqueZones} zona${uniqueZones===1?'':'s'} · ${allItems.length} entrada${allItems.length===1?'':'s'}`;
+    if(!allItems.length) {
+      tbody.innerHTML = `<tr><td colspan="7" class="empty">Todavía no hay tarifas cargadas.</td></tr>`;
       return;
     }
-    tbody.innerHTML = items.map(it => {
+    tbody.innerHTML = allItems.map(it => {
       const rate = Number(it.iva_rate || 0);
-      const costoConIva = it.cost * (1 + rate / 100);
+      const tarifaConIva = it.tarifa * (1 + rate / 100);
       const ivaLabel = rate === 0 ? 'Exento' : `${rate}%`;
-      const skuEsc = it.sku.replace(/'/g, "\\'");
-      const rowId = `${it.sku}|${it.valid_from}`.replace(/[^a-zA-Z0-9_]/g, '_');
+      const zonaLabel = ZONE_LABELS[it.zona] || it.zona;
+      const rowId = `${it.zona}|${it.valid_from}`.replace(/[^a-zA-Z0-9_]/g, '_');
       return `
-        <tr data-row-id="${rowId}" data-old-sku="${it.sku}" data-old-vf="${it.valid_from}">
-          <td class="c-sku"><b>${it.sku}</b></td>
-          <td class="c-cost">${fmt(it.cost)}</td>
+        <tr data-row-id="${rowId}" data-old-zona="${it.zona}" data-old-vf="${it.valid_from}">
+          <td class="c-zona"><b>${zonaLabel}</b></td>
+          <td class="c-tarifa">${fmt(it.tarifa)}</td>
           <td class="c-iva" style="font-size:12px;color:#555;">${ivaLabel}</td>
-          <td class="c-cwi" style="font-size:12px;color:#1a8a5a;">${fmt(costoConIva)}</td>
+          <td class="c-twi" style="font-size:12px;color:#1a8a5a;">${fmt(tarifaConIva)}</td>
           <td class="c-vf" style="font-size:12px;">${it.valid_from || '—'}</td>
           <td style="color:#888;font-size:12px;">${it.updated_at ? new Date(it.updated_at + 'Z').toLocaleString('es-AR', {dateStyle:'short', timeStyle:'short'}) : ''}</td>
           <td class="actions">
-            <button class="btn-edit" onclick="startEdit('${rowId}', '${skuEsc}', ${it.cost}, '${it.valid_from}', ${rate})">Editar</button>
-            <button class="btn-delete" onclick="deleteCost('${skuEsc}', '${it.valid_from}')">Eliminar</button>
+            <button class="btn-edit" onclick="startEdit('${rowId}', '${it.zona}', ${it.tarifa}, '${it.valid_from}', ${rate})">Editar</button>
+            <button class="btn-delete" onclick="deleteTariff('${it.zona}', '${it.valid_from}')">Eliminar</button>
           </td>
         </tr>
       `;
     }).join('');
   }
 
-  function startEdit(rowId, sku, cost, validFrom, ivaRate) {
+  function startEdit(rowId, zona, tarifa, validFrom, ivaRate) {
     const tr = document.querySelector(`tr[data-row-id="${rowId}"]`);
     if(!tr) return;
     tr.classList.add('row-edit');
-    tr.querySelector('.c-sku').innerHTML = `<input type="text" id="edit-sku" value="${sku}" />`;
-    tr.querySelector('.c-cost').innerHTML = `<input type="number" id="edit-cost" value="${cost}" step="0.01" min="0" />`;
+    const opts = Object.entries(ZONE_LABELS).map(([k, l]) =>
+      `<option value="${k}" ${k===zona?'selected':''}>${l}</option>`).join('');
+    tr.querySelector('.c-zona').innerHTML = `<select id="edit-zona">${opts}</select>`;
+    tr.querySelector('.c-tarifa').innerHTML = `<input type="number" id="edit-tarifa" value="${tarifa}" step="0.01" min="0" />`;
     tr.querySelector('.c-iva').innerHTML = `<input type="number" id="edit-iva" value="${ivaRate}" step="0.5" min="0" max="100" />`;
-    tr.querySelector('.c-cwi').textContent = '—';
+    tr.querySelector('.c-twi').textContent = '—';
     tr.querySelector('.c-vf').innerHTML = `<input type="date" id="edit-vf" value="${validFrom}" />`;
     tr.querySelector('.actions').innerHTML = `
       <button class="btn-save" onclick="saveEdit('${rowId}')">Guardar</button>
-      <button class="btn-delete" onclick="loadCosts()">Cancelar</button>
+      <button class="btn-delete" onclick="loadTariffs()">Cancelar</button>
     `;
   }
 
   async function saveEdit(rowId) {
     const tr = document.querySelector(`tr[data-row-id="${rowId}"]`);
     if(!tr) return;
-    const oldSku = tr.dataset.oldSku;
-    const oldVf = tr.dataset.oldVf;
-    const newSku = (document.getElementById('edit-sku').value || '').trim();
-    const newCost = parseFloat(document.getElementById('edit-cost').value);
-    const newIva = parseFloat(document.getElementById('edit-iva').value);
-    const newVf = document.getElementById('edit-vf').value;
-    if(!newSku || isNaN(newCost) || newCost <= 0 || isNaN(newIva) || !newVf) {
-      alert('Todos los campos son obligatorios.');
-      return;
-    }
     const form = new FormData();
-    form.append('old_sku', oldSku);
-    form.append('old_valid_from', oldVf);
-    form.append('sku', newSku);
-    form.append('cost', String(newCost));
-    form.append('valid_from', newVf);
-    form.append('iva_rate', String(newIva));
+    form.append('old_zona', tr.dataset.oldZona);
+    form.append('old_valid_from', tr.dataset.oldVf);
+    form.append('zona', document.getElementById('edit-zona').value);
+    form.append('tarifa', String(parseFloat(document.getElementById('edit-tarifa').value)));
+    form.append('valid_from', document.getElementById('edit-vf').value);
+    form.append('iva_rate', String(parseFloat(document.getElementById('edit-iva').value)));
     try {
-      const r = await fetch(`/api/costos/${currentAccountId}/edit`, { method: 'PUT', body: form });
+      const r = await fetch(`/api/flex-tariffs/${currentAccountId}/edit`, { method: 'PUT', body: form });
       if(!r.ok) throw new Error('Error al guardar');
-      await loadCosts();
-    } catch(e) {
-      alert(e.message);
-    }
+      await loadTariffs();
+    } catch(e) { alert(e.message); }
   }
 
   async function uploadFile() {
@@ -273,77 +253,63 @@
       msg.innerHTML = '<div class="msg err">Seleccioná un archivo primero.</div>';
       return;
     }
-    btn.disabled = true;
-    btn.textContent = 'Subiendo...';
-    msg.innerHTML = '';
+    btn.disabled = true; btn.textContent = 'Subiendo...'; msg.innerHTML = '';
     const form = new FormData();
     form.append('file', input.files[0]);
     try {
-      const r = await fetch(`/api/costos/${currentAccountId}/upload`, { method: 'POST', body: form });
-      if(!r.ok) {
-        const t = await r.text();
-        throw new Error(t || 'Error al subir');
-      }
+      const r = await fetch(`/api/flex-tariffs/${currentAccountId}/upload`, { method: 'POST', body: form });
+      if(!r.ok) { const t = await r.text(); throw new Error(t || 'Error al subir'); }
       const data = await r.json();
-      msg.innerHTML = `<div class="msg ok">${data.saved} costos guardados (de ${data.rows_parsed} filas leídas).</div>`;
+      msg.innerHTML = `<div class="msg ok">${data.saved} tarifas guardadas (de ${data.rows_parsed} filas leídas).</div>`;
       input.value = '';
-      await loadCosts();
+      await loadTariffs();
     } catch(e) {
       msg.innerHTML = `<div class="msg err">${e.message}</div>`;
     } finally {
-      btn.disabled = false;
-      btn.textContent = 'Subir archivo';
+      btn.disabled = false; btn.textContent = 'Subir archivo';
     }
   }
 
-  async function addCost() {
+  async function addTariff() {
     if(!currentAccountId) return;
-    const sku = (document.getElementById('manual-sku').value || '').trim();
-    const cost = parseFloat(document.getElementById('manual-cost').value);
+    const zona = document.getElementById('manual-zona').value;
+    const tarifa = parseFloat(document.getElementById('manual-tarifa').value);
     const fecha = document.getElementById('manual-fecha').value || '';
-    const ivaRaw = document.getElementById('manual-iva').value;
-    const ivaRate = ivaRaw === '' ? 21 : parseFloat(ivaRaw);
+    const ivaRate = parseFloat(document.getElementById('manual-iva').value);
     const msg = document.getElementById('add-msg');
-    if(!sku || isNaN(cost) || cost <= 0) {
-      msg.innerHTML = '<div class="msg err">SKU y costo válido son obligatorios.</div>';
-      return;
-    }
-    if(isNaN(ivaRate) || ivaRate < 0 || ivaRate > 100) {
-      msg.innerHTML = '<div class="msg err">Tasa de IVA inválida (0 a 100).</div>';
+    if(!zona || isNaN(tarifa) || tarifa < 0) {
+      msg.innerHTML = '<div class="msg err">Zona y tarifa válida son obligatorios.</div>';
       return;
     }
     const form = new FormData();
-    form.append('sku', sku);
-    form.append('cost', String(cost));
+    form.append('zona', zona);
+    form.append('tarifa', String(tarifa));
     if(fecha) form.append('valid_from', fecha);
-    form.append('iva_rate', String(ivaRate));
+    form.append('iva_rate', String(isNaN(ivaRate) ? 21 : ivaRate));
     try {
-      const r = await fetch(`/api/costos/${currentAccountId}`, { method: 'POST', body: form });
+      const r = await fetch(`/api/flex-tariffs/${currentAccountId}`, { method: 'POST', body: form });
       if(!r.ok) throw new Error('Error al guardar');
       msg.innerHTML = '<div class="msg ok">Guardado.</div>';
-      document.getElementById('manual-sku').value = '';
-      document.getElementById('manual-cost').value = '';
+      document.getElementById('manual-tarifa').value = '';
       document.getElementById('manual-fecha').value = '';
       document.getElementById('manual-iva').value = '21';
-      await loadCosts();
+      await loadTariffs();
     } catch(e) {
       msg.innerHTML = `<div class="msg err">${e.message}</div>`;
     }
   }
 
-  async function deleteCost(sku, validFrom) {
-    if(!confirm(`¿Eliminar el costo de ${sku} (vigente desde ${validFrom})?`)) return;
+  async function deleteTariff(zona, validFrom) {
+    if(!confirm(`¿Eliminar la tarifa de ${ZONE_LABELS[zona] || zona} (vigente desde ${validFrom})?`)) return;
     try {
-      const url = `/api/costos/${currentAccountId}/${encodeURIComponent(sku)}?valid_from=${encodeURIComponent(validFrom)}`;
+      const url = `/api/flex-tariffs/${currentAccountId}/${encodeURIComponent(zona)}?valid_from=${encodeURIComponent(validFrom)}`;
       const r = await fetch(url, { method: 'DELETE' });
       if(!r.ok) throw new Error('Error');
-      await loadCosts();
-    } catch(e) {
-      alert(e.message);
-    }
+      await loadTariffs();
+    } catch(e) { alert(e.message); }
   }
 
-  if(currentAccountId) loadCosts();
+  if(currentAccountId) loadTariffs();
 </script>
 </body>
 </html>
