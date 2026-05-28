@@ -27,7 +27,7 @@ ADMIN_PASSWORD = os.environ["ADMIN_PASSWORD"]
 ML_AUTH_URL = "https://auth.mercadolibre.com.ar/authorization"
 ML_TOKEN_URL = "https://api.mercadolibre.com/oauth/token"
 ML_API_URL = "https://api.mercadolibre.com"
-SHIPPING_LOGIC_VERSION = "v25-bonif-discount-semantics"
+SHIPPING_LOGIC_VERSION = "v26-flex-implicit-bonif"
 
 serializer = URLSafeTimedSerializer(SECRET_KEY)
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -706,6 +706,17 @@ async def get_shipping_cost(client, shipping_id, headers) -> dict:
         bonificacion = max(compensation, option_discount_amount)
     else:
         bonificacion = max(compensation, sender_discount, option_discount_amount)
+
+    # Para flex (no-colecta), ML no siempre expone la bonificación en los
+    # campos explícitos. En esos casos gross_amount − sender − receiver da
+    # la bonificación correcta (en colecta este cálculo es inflado por
+    # fees adicionales, por eso se restringe a no-colecta). Ej:
+    #   #2000013217950751 (env gratis Z. media):  Bonif $6.490
+    #   #2000013214734089 (env gratis Z. lejana): Bonif $8.490
+    if not is_colecta and bonificacion == 0:
+        implicit_bonif = max(0.0, costs_gross_amount - costs_sender_cost - receiver_cost)
+        if implicit_bonif > 0:
+            bonificacion = implicit_bonif
 
     # Fallback sólo cuando /costs no devolvió data útil para esa venta
     # (ej. shipments cancelados o sin info de costos).
@@ -1969,12 +1980,20 @@ async def api_orders(request: Request, account_id: int,
         # Override Flex: si la venta es Flex y tenemos tarifa propia cargada
         # que matchea con la tarifa ML del shipment, usamos la tarifa propia
         # como Costo Envío (lo que el vendedor le paga a su mensajería).
+        # Buscamos un valor "tarifa ML" para matchear:
+        #  - list_cost de shipping_option (preferido; flex paga lo expone)
+        #  - bonificación (en env. gratis es exactamente la tarifa ML)
+        #  - ingreso del comprador (último recurso)
         logistic_type = ship_info.get("logistic_type", "") if isinstance(ship_info, dict) else ""
         list_cost = ship_info.get("list_cost", 0) if isinstance(ship_info, dict) else 0
-        if logistic_type in {"home_delivery", "self_service"} and list_cost > 0 and flex_tariffs:
-            matched = match_flex_tariff(flex_tariffs, list_cost, fecha)
-            if matched:
-                envio = flex_cost_with_iva(matched)
+        if logistic_type in {"home_delivery", "self_service"} and flex_tariffs:
+            match_ref = list_cost
+            if match_ref <= 0:
+                match_ref = bonificacion if bonificacion > 0 else (ingreso_envio if ingreso_envio > 0 else 0)
+            if match_ref > 0:
+                matched = match_flex_tariff(flex_tariffs, match_ref, fecha)
+                if matched:
+                    envio = flex_cost_with_iva(matched)
         items = []
         order_cmv = 0.0
         for i in o.get("order_items", []):
