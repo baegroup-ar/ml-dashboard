@@ -27,7 +27,7 @@ ADMIN_PASSWORD = os.environ["ADMIN_PASSWORD"]
 ML_AUTH_URL = "https://auth.mercadolibre.com.ar/authorization"
 ML_TOKEN_URL = "https://api.mercadolibre.com/oauth/token"
 ML_API_URL = "https://api.mercadolibre.com"
-SHIPPING_LOGIC_VERSION = "v27-flex-bonif-list-cost-minus-cost"
+SHIPPING_LOGIC_VERSION = "v28-bonif-explicit-only-plus-save"
 
 serializer = URLSafeTimedSerializer(SECRET_KEY)
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -667,6 +667,7 @@ async def get_shipping_cost(client, shipping_id, headers) -> dict:
     costs_gross_amount = 0.0
     receiver_cost = 0.0
     sender_discount = 0.0
+    sender_save = 0.0
     compensation = 0.0
     if r_costs.status_code == 200:
         cd = r_costs.json()
@@ -678,6 +679,7 @@ async def get_shipping_cost(client, shipping_id, headers) -> dict:
             s0 = senders[0]
             costs_sender_cost = amount_value(s0.get("cost"))
             sender_discount = discount_total(s0.get("discounts"))
+            sender_save = amount_value(s0.get("save"))
             compensation = amount_value(s0.get("compensation"))
 
     buyer_cost_from_costs = receiver_cost if receiver_cost > 0 else cost
@@ -732,24 +734,18 @@ async def get_shipping_cost(client, shipping_id, headers) -> dict:
     # NO una bonificación al vendedor. Cuando el vendedor NO paga
     # (sender.cost = 0, env. gratis bonificado), discounts[] sí representa
     # la bonificación de ML que cubre el envío.
+    # Bonificación: usamos primero los campos EXPLÍCITOS del API:
+    #   - senders[0].compensation         (lo que ML compensa al vendedor)
+    #   - senders[0].save                 (savings)
+    #   - senders[0].discounts[].amount   (descuentos en favor del vendedor)
+    #   - shipping_option.discount.promoted_amount
+    # Cuando el vendedor PAGA el envío (sender.cost > 0) NO incluimos
+    # sender_discount porque ahí discounts[] representa el descuento de
+    # tarifa (50% off colecta), no una bonificación al vendedor.
     if costs_sender_cost > 0:
-        bonificacion = max(compensation, option_discount_amount)
+        bonificacion = max(compensation, sender_save, option_discount_amount)
     else:
-        bonificacion = max(compensation, sender_discount, option_discount_amount)
-
-    # Para flex (no-colecta), ML no siempre expone la bonificación en
-    # compensation o discounts. La fórmula confiable: shipping_option.list_cost
-    # es la tarifa ML completa, shipping_option.cost es lo que paga el
-    # comprador, y la diferencia es la bonificación que ML otorga al vendedor.
-    # Ejemplos:
-    #   #2000013217950751 (env gratis Z. media):  list_cost $6.490, cost $0 → Bonif $6.490
-    #   #2000013214734089 (env gratis Z. lejana): list_cost $8.490, cost $0 → Bonif $8.490
-    #   #2000016658741204 (env con pago):         list_cost − cost = $690
-    # No usamos gross_amount porque incluye items extra (fees, seguros).
-    if not is_colecta and bonificacion == 0 and list_cost > 0:
-        implicit_bonif = max(0.0, list_cost - cost)
-        if implicit_bonif > 0:
-            bonificacion = implicit_bonif
+        bonificacion = max(compensation, sender_save, sender_discount, option_discount_amount)
 
     # Fallback sólo cuando /costs no devolvió data útil para esa venta
     # (ej. shipments cancelados o sin info de costos).
@@ -2809,6 +2805,62 @@ async def admin_create_user(request: Request, name: str = Form(...), email: str 
 
 
 # ── Debug ───────────────────────────────────────────────────────
+
+@app.get("/api/debug/promos/{account_id}")
+async def debug_promos(request: Request, account_id: int):
+    """Prueba múltiples endpoints de promos y devuelve los resultados crudos.
+    Sirve para entender qué expone realmente la API para esta cuenta."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = db_fetchone("SELECT * FROM ml_accounts WHERE id=:id AND user_id=:uid",
+                      {"id": account_id, "uid": user_id})
+    if not acc:
+        raise HTTPException(404)
+    token = await refresh_ml_token(account_id)
+    if not token:
+        raise HTTPException(502)
+    headers = {"Authorization": f"Bearer {token}"}
+    seller_id = acc["ml_user_id"]
+    attempts = [
+        ("seller-promotions list (sin type)",
+         f"{ML_API_URL}/seller-promotions/promotions",
+         {"app_version": "v2"}),
+        ("seller-promotions list (con type DEAL)",
+         f"{ML_API_URL}/seller-promotions/promotions",
+         {"app_version": "v2", "promotion_type": "DEAL"}),
+        ("seller-promotions search (DEAL)",
+         f"{ML_API_URL}/seller-promotions/promotions/search",
+         {"app_version": "v2", "promotion_type": "DEAL"}),
+        ("seller-promotions search (DEAL + status)",
+         f"{ML_API_URL}/seller-promotions/promotions/search",
+         {"app_version": "v2", "promotion_type": "DEAL", "status": "started"}),
+        ("seller-promotions search (sin params)",
+         f"{ML_API_URL}/seller-promotions/promotions/search",
+         {"app_version": "v2"}),
+        ("seller-promotions items (DEAL candidate)",
+         f"{ML_API_URL}/seller-promotions/items",
+         {"app_version": "v2", "promotion_type": "DEAL", "status": "candidate", "limit": 5}),
+        ("users/{id}/promotions (catch-all)",
+         f"{ML_API_URL}/users/{seller_id}/promotions",
+         {"app_version": "v2"}),
+        ("users/{id}/items con offers (catch-all)",
+         f"{ML_API_URL}/users/{seller_id}/items/search",
+         {"limit": 1, "include_attributes": "offers"}),
+    ]
+    out = []
+    async with httpx.AsyncClient(timeout=30) as client:
+        for label, url, params in attempts:
+            try:
+                r = await client.get(url, headers=headers, params=params)
+                body = r.text[:1500]
+                out.append({"label": label, "url": url, "params": params,
+                            "status": r.status_code, "body": body})
+            except Exception as e:
+                out.append({"label": label, "url": url, "params": params,
+                            "error": str(e)[:300]})
+    return {"attempts": out}
+
 
 @app.get("/api/debug/order/{order_id}")
 async def debug_order(request: Request, order_id: str):
