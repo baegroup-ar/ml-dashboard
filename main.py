@@ -27,7 +27,7 @@ ADMIN_PASSWORD = os.environ["ADMIN_PASSWORD"]
 ML_AUTH_URL = "https://auth.mercadolibre.com.ar/authorization"
 ML_TOKEN_URL = "https://api.mercadolibre.com/oauth/token"
 ML_API_URL = "https://api.mercadolibre.com"
-SHIPPING_LOGIC_VERSION = "v28-bonif-explicit-only-plus-save"
+SHIPPING_LOGIC_VERSION = "v29-bonif-no-save-when-seller-pays"
 
 serializer = URLSafeTimedSerializer(SECRET_KEY)
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -734,16 +734,26 @@ async def get_shipping_cost(client, shipping_id, headers) -> dict:
     # NO una bonificación al vendedor. Cuando el vendedor NO paga
     # (sender.cost = 0, env. gratis bonificado), discounts[] sí representa
     # la bonificación de ML que cubre el envío.
-    # Bonificación: usamos primero los campos EXPLÍCITOS del API:
-    #   - senders[0].compensation         (lo que ML compensa al vendedor)
-    #   - senders[0].save                 (savings)
-    #   - senders[0].discounts[].amount   (descuentos en favor del vendedor)
-    #   - shipping_option.discount.promoted_amount
-    # Cuando el vendedor PAGA el envío (sender.cost > 0) NO incluimos
-    # sender_discount porque ahí discounts[] representa el descuento de
-    # tarifa (50% off colecta), no una bonificación al vendedor.
+    # Bonificación: usamos los campos EXPLÍCITOS del API. La semántica
+    # depende de si el vendedor paga o no el envío:
+    #
+    # Caso A — vendedor PAGA envío (sender.cost > 0):
+    #   - Es colecta paga o env. gratis con cargo real al vendedor.
+    #   - 'compensation' y 'option.discount.promoted_amount' son los
+    #     únicos campos confiables. 'save' y 'discounts[]' representan
+    #     descuentos de tarifa (lo que pagaría sin descuento), NO
+    #     bonificaciones al vendedor. Incluirlos infla los números.
+    #   - Ej: #2000016645537442 (colecta paga $12.801,48) — Bonif debe ser $0.
+    #   - Ej: #2000013213985241 (env gratis charge $10.760) — Bonif debe ser $0.
+    #
+    # Caso B — vendedor NO paga envío (sender.cost = 0):
+    #   - Flex (paga su propia mensajería) o env. gratis con cobertura ML.
+    #   - 'compensation', 'save', 'discounts[]' y 'option.discount' son
+    #     todos potenciales transportes de la bonif. Tomamos el max.
+    #   - Ej: #2000016658741204 (flex, Bonif $649).
+    #   - Ej: #2000013214734089 (env gratis con bonif $8.490).
     if costs_sender_cost > 0:
-        bonificacion = max(compensation, sender_save, option_discount_amount)
+        bonificacion = max(compensation, option_discount_amount)
     else:
         bonificacion = max(compensation, sender_save, sender_discount, option_discount_amount)
 
