@@ -2801,13 +2801,21 @@ async def admin_create_user(request: Request, name: str = Form(...), email: str 
             {"e": email.lower().strip(), "h": hashed, "n": name}
         )
         return RedirectResponse("/admin?success=1", status_code=303)
-    except Exception:
+    except Exception as e:
+        # Antes tragaba TODOS los errores como "email ya existe", lo que
+        # confundía cuando el error real era otro (PK conflict, columna
+        # faltante, conexión DB, etc.). Ahora distingue.
+        err_text = str(e).lower()
+        if "duplicate" in err_text or "unique" in err_text:
+            error_msg = "Ese email ya está registrado"
+        else:
+            error_msg = f"Error al crear el usuario: {str(e)[:300]}"
         users = db_fetchall("""
             SELECT u.id, u.email, u.name, u.is_admin, u.created_at, COUNT(m.id) as ml_count
             FROM users u LEFT JOIN ml_accounts m ON m.user_id = u.id
             GROUP BY u.id ORDER BY u.created_at DESC
         """)
-        return templates.TemplateResponse("admin.html", {"request": request, "users": users, "error": "El email ya existe", "success": None})
+        return templates.TemplateResponse("admin.html", {"request": request, "users": users, "error": error_msg, "success": None})
 
 
 # ── Debug ───────────────────────────────────────────────────────
@@ -2836,40 +2844,63 @@ async def debug_promos(request: Request, account_ref: str):
         ("seller-promotions list (sin type)",
          f"{ML_API_URL}/seller-promotions/promotions",
          {"app_version": "v2"}),
-        ("seller-promotions list (con type DEAL)",
+        ("seller-promotions list (con seller_id)",
          f"{ML_API_URL}/seller-promotions/promotions",
-         {"app_version": "v2", "promotion_type": "DEAL"}),
-        ("seller-promotions search (DEAL)",
-         f"{ML_API_URL}/seller-promotions/promotions/search",
-         {"app_version": "v2", "promotion_type": "DEAL"}),
-        ("seller-promotions search (DEAL + status)",
-         f"{ML_API_URL}/seller-promotions/promotions/search",
-         {"app_version": "v2", "promotion_type": "DEAL", "status": "started"}),
-        ("seller-promotions search (sin params)",
-         f"{ML_API_URL}/seller-promotions/promotions/search",
-         {"app_version": "v2"}),
-        ("seller-promotions items (DEAL candidate)",
-         f"{ML_API_URL}/seller-promotions/items",
-         {"app_version": "v2", "promotion_type": "DEAL", "status": "candidate", "limit": 5}),
-        ("users/{id}/promotions (catch-all)",
-         f"{ML_API_URL}/users/{seller_id}/promotions",
-         {"app_version": "v2"}),
-        ("users/{id}/items con offers (catch-all)",
+         {"app_version": "v2", "seller_id": seller_id}),
+        ("seller-promotions list (DEAL + seller_id)",
+         f"{ML_API_URL}/seller-promotions/promotions",
+         {"app_version": "v2", "promotion_type": "DEAL", "seller_id": seller_id}),
+        ("items search (1 item con offers)",
          f"{ML_API_URL}/users/{seller_id}/items/search",
          {"limit": 1, "include_attributes": "offers"}),
     ]
     out = []
+    first_item_id = None
     async with httpx.AsyncClient(timeout=30) as client:
         for label, url, params in attempts:
             try:
                 r = await client.get(url, headers=headers, params=params)
-                body = r.text[:1500]
+                body = r.text[:2000]
+                ct = r.headers.get("content-type", "")
+                cl = r.headers.get("content-length", "")
                 out.append({"label": label, "url": url, "params": params,
-                            "status": r.status_code, "body": body})
+                            "status": r.status_code, "content_type": ct,
+                            "content_length": cl, "body": body})
+                # Capturar el primer item_id para probar /items/{id}?attributes=offers
+                if not first_item_id and r.status_code == 200 and label.startswith("items search"):
+                    try:
+                        data = r.json()
+                        results = data.get("results") or []
+                        if results:
+                            first_item_id = results[0] if isinstance(results[0], str) else results[0].get("id")
+                    except Exception:
+                        pass
             except Exception as e:
                 out.append({"label": label, "url": url, "params": params,
                             "error": str(e)[:300]})
-    return {"attempts": out}
+
+        # Probar también el item específico para ver sus offers/promos
+        if first_item_id:
+            extra = [
+                (f"items/{first_item_id} (attributes=offers)",
+                 f"{ML_API_URL}/items/{first_item_id}",
+                 {"attributes": "offers"}),
+                (f"items/{first_item_id} (full)",
+                 f"{ML_API_URL}/items/{first_item_id}",
+                 {}),
+            ]
+            for label, url, params in extra:
+                try:
+                    r = await client.get(url, headers=headers, params=params)
+                    body = r.text[:2500]
+                    out.append({"label": label, "url": url, "params": params,
+                                "status": r.status_code,
+                                "content_type": r.headers.get("content-type", ""),
+                                "body": body})
+                except Exception as e:
+                    out.append({"label": label, "url": url, "params": params,
+                                "error": str(e)[:300]})
+    return {"first_item_tested": first_item_id, "attempts": out}
 
 
 @app.get("/api/debug/order/{order_id}")
