@@ -37,6 +37,48 @@ serializer = URLSafeTimedSerializer(SECRET_KEY)
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
 
+def clean_env_secret(value: Optional[str]) -> str:
+    value = (value or "").strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        value = value[1:-1].strip()
+    return value
+
+
+def master_credentials() -> tuple[str, str, str]:
+    email = clean_env_secret(MASTER_EMAIL).lower()
+    password = clean_env_secret(MASTER_PASSWORD)
+    name = clean_env_secret(MASTER_NAME) or "Maestro"
+    return email, password, name
+
+
+def upsert_master_user(conn=None) -> bool:
+    master_email, master_password, master_name = master_credentials()
+    if not master_email or not master_password:
+        return False
+
+    master_hash = bcrypt.hashpw(master_password.encode(), bcrypt.gensalt()).decode()
+    params = {"e": master_email, "h": master_hash, "n": master_name}
+    query = text("""
+        INSERT INTO users (email, password_hash, name, is_admin, is_master, role_label, permissions)
+        VALUES (:e, :h, :n, TRUE, TRUE, 'Maestro', '[]'::JSONB)
+        ON CONFLICT (email) DO UPDATE SET
+            password_hash = EXCLUDED.password_hash,
+            name = EXCLUDED.name,
+            is_admin = TRUE,
+            is_master = TRUE,
+            role_label = 'Maestro',
+            reset_token = NULL,
+            reset_expires_at = NULL
+    """)
+    if conn is not None:
+        conn.execute(query, params)
+        return True
+    with engine.connect() as c:
+        c.execute(query, params)
+        c.commit()
+    return True
+
+
 def init_db():
     with engine.connect() as conn:
         conn.execute(text("""
@@ -205,21 +247,7 @@ def init_db():
             conn.execute(text(
                 "INSERT INTO users (email, password_hash, name, is_admin) VALUES (:e,:h,:n,:a)"
             ), {"e": ADMIN_EMAIL, "h": hashed, "n": "Administrador", "a": True})
-        if MASTER_EMAIL and MASTER_PASSWORD:
-            master_email = MASTER_EMAIL.lower().strip()
-            master_hash = bcrypt.hashpw(MASTER_PASSWORD.encode(), bcrypt.gensalt()).decode()
-            conn.execute(text("""
-                INSERT INTO users (email, password_hash, name, is_admin, is_master, role_label, permissions)
-                VALUES (:e, :h, :n, TRUE, TRUE, 'Maestro', '[]'::JSONB)
-                ON CONFLICT (email) DO UPDATE SET
-                    password_hash = EXCLUDED.password_hash,
-                    name = EXCLUDED.name,
-                    is_admin = TRUE,
-                    is_master = TRUE,
-                    role_label = 'Maestro',
-                    reset_token = NULL,
-                    reset_expires_at = NULL
-            """), {"e": master_email, "h": master_hash, "n": MASTER_NAME})
+        upsert_master_user(conn)
         conn.commit()
 
 
@@ -823,7 +851,11 @@ async def index(request: Request):
 
 @app.post("/", response_class=HTMLResponse)
 async def do_login(request: Request, email: str = Form(...), password: str = Form(...)):
-    user = db_fetchone("SELECT * FROM users WHERE email=:e", {"e": email.lower().strip()})
+    login_email = email.lower().strip()
+    master_email, _, _ = master_credentials()
+    if master_email and login_email == master_email:
+        upsert_master_user()
+    user = db_fetchone("SELECT * FROM users WHERE email=:e", {"e": login_email})
     if not user or not user.get("password_hash") or not bcrypt.checkpw(password.encode(), user["password_hash"].encode()):
         return templates.TemplateResponse("login.html", {"request": request, "error": "Email o contraseña incorrectos"})
     session_token = serializer.dumps(user["id"])
