@@ -2923,8 +2923,68 @@ def require_page(user: dict, page: str):
         raise HTTPException(403, "No tenés permiso para acceder a esta sección")
 
 
+def password_reset_email_content(name: str, reset_link: str) -> tuple[str, str]:
+    text_body = (
+        f"Hola {name},\n\n"
+        f"Un administrador del Panel ML solicito que establezcas o renueves tu contrasena.\n\n"
+        f"Hace click aca para hacerlo:\n{reset_link}\n\n"
+        f"El link expira en 24 horas.\n\n"
+        f"Si no esperabas este mail, ignoralo; tu contrasena actual sigue intacta."
+    )
+    html_body = (
+        f"<p>Hola {name},</p>"
+        "<p>Un administrador del Panel ML solicito que establezcas o renueves tu contrasena.</p>"
+        f'<p><a href="{reset_link}">Establecer contrasena</a></p>'
+        "<p>El link expira en 24 horas.</p>"
+        "<p>Si no esperabas este mail, ignoralo; tu contrasena actual sigue intacta.</p>"
+    )
+    return text_body, html_body
+
+
+def send_password_reset_email_resend(to_email: str, name: str, reset_link: str) -> tuple[bool, str]:
+    api_key = (os.environ.get("RESEND_API_KEY") or "").strip()
+    if not api_key:
+        return False, "Falta RESEND_API_KEY"
+    sender = (
+        os.environ.get("RESEND_FROM")
+        or os.environ.get("EMAIL_FROM")
+        or os.environ.get("SMTP_FROM")
+        or os.environ.get("SMTP_USER")
+        or ""
+    ).strip()
+    if not sender:
+        return False, "Falta RESEND_FROM o EMAIL_FROM"
+
+    text_body, html_body = password_reset_email_content(name, reset_link)
+    try:
+        with httpx.Client(timeout=15) as client:
+            resp = client.post(
+                "https://api.resend.com/emails",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={
+                    "from": sender,
+                    "to": [to_email],
+                    "subject": "Panel ML - Establecer / renovar tu contrasena",
+                    "text": text_body,
+                    "html": html_body,
+                },
+            )
+        if 200 <= resp.status_code < 300:
+            return True, "Mail enviado por Resend"
+        try:
+            detail = resp.json()
+        except Exception:
+            detail = resp.text
+        return False, f"Error Resend {resp.status_code}: {str(detail)[:220]}"
+    except Exception as e:
+        return False, f"Error Resend: {str(e)[:180]}"
+
+
 def send_password_reset_email(to_email: str, name: str, reset_link: str) -> tuple[bool, str]:
-    """Envia el mail de reset usando SMTP. Devuelve (ok, detalle)."""
+    """Envia el mail de reset. Prefiere API HTTPS; SMTP queda como fallback."""
+    if (os.environ.get("RESEND_API_KEY") or "").strip():
+        return send_password_reset_email_resend(to_email, name, reset_link)
+
     host = (os.environ.get("SMTP_HOST") or "").strip()
     port_raw = (os.environ.get("SMTP_PORT") or "587").strip()
     smtp_user = (os.environ.get("SMTP_USER") or "").strip()
@@ -2963,7 +3023,10 @@ def send_password_reset_email(to_email: str, name: str, reset_link: str) -> tupl
         return True, "Mail enviado"
     except Exception as e:
         print(f"[email] Error enviando reset: {e}")
-        return False, f"Error SMTP: {str(e)[:180]}"
+        detail = str(e)
+        if "Network is unreachable" in detail or "Errno 101" in detail:
+            detail += ". Railway bloquea SMTP en planes Free/Trial/Hobby; configura RESEND_API_KEY y RESEND_FROM para enviar por HTTPS."
+        return False, f"Error SMTP: {detail[:260]}"
 
 
 @app.get("/admin", response_class=HTMLResponse)
