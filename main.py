@@ -3067,8 +3067,7 @@ async def admin_create_user(
     role_label: Optional[str] = Form(None),
     permissions: list = Form(default=[]),
 ):
-    """Crea un usuario SIN contraseña inicial. Genera un token de setup y
-    se lo manda al usuario por mail. El admin nunca ve la contraseña."""
+    """Crea un usuario sin contrasena inicial y genera un token de setup."""
     user_id = get_session_user_id(request)
     if not user_id:
         return RedirectResponse("/")
