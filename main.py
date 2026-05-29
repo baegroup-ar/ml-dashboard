@@ -2328,10 +2328,13 @@ async def api_promociones_list(request: Request, account_id: int):
         async def fetch_batch(batch_ids):
             async with sem:
                 try:
+                    # Sin filtrar attributes para que vengan todos los campos
+                    # donde ML pueda exponer promos: offers, discounts,
+                    # marketplace_campaigns, sale_terms, etc.
                     r = await client.get(
                         f"{ML_API_URL}/items",
                         headers=headers,
-                        params={"ids": ",".join(batch_ids), "attributes": "id,price,offers,seller_custom_field"},
+                        params={"ids": ",".join(batch_ids)},
                     )
                     if r.status_code != 200:
                         return None, f"items batch: HTTP {r.status_code}: {r.text[:200]}"
@@ -2342,6 +2345,10 @@ async def api_promociones_list(request: Request, account_id: int):
         batches = [all_item_ids[i:i+20] for i in range(0, len(all_item_ids), 20)]
         outcomes = await asyncio.gather(*[fetch_batch(b) for b in batches])
 
+        # Buscar en varios campos posibles donde ML expone promos
+        # según el tipo (offers / discounts / marketplace_campaigns / etc.)
+        offer_fields = ["offers", "discounts", "marketplace_campaigns",
+                        "promotions", "promotion_decorations", "sale_terms"]
         for data, err in outcomes:
             if err:
                 if len(debug) < 8:
@@ -2355,18 +2362,26 @@ async def api_promociones_list(request: Request, account_id: int):
                 body = entry.get("body") if entry.get("code") == 200 else None
                 if not body:
                     continue
-                offers = body.get("offers") or []
-                for offer in offers:
+                # Recolectar offers/promos de TODOS los campos posibles
+                collected = []
+                for fld in offer_fields:
+                    v = body.get(fld)
+                    if isinstance(v, list):
+                        collected.extend(v)
+                    elif isinstance(v, dict):
+                        collected.append(v)
+                for offer in collected:
                     if not isinstance(offer, dict):
                         continue
-                    pid = offer.get("id") or offer.get("promotion_id")
+                    pid = (offer.get("id") or offer.get("promotion_id")
+                           or offer.get("campaign_id"))
                     if not pid:
                         continue
                     if pid not in promos:
                         promos[pid] = {
                             "id": pid,
-                            "name": offer.get("name") or offer.get("description") or pid,
-                            "type": offer.get("type") or offer.get("promotion_type"),
+                            "name": offer.get("name") or offer.get("description") or offer.get("title") or pid,
+                            "type": offer.get("type") or offer.get("promotion_type") or offer.get("campaign_type"),
                             "status": offer.get("status"),
                             "start_date": offer.get("start_date"),
                             "finish_date": offer.get("finish_date"),
@@ -3167,6 +3182,48 @@ async def reset_password_submit(
 
 
 # ── Debug ───────────────────────────────────────────────────────
+
+@app.get("/api/debug/item-full/{account_ref}")
+async def debug_item_full(request: Request, account_ref: str):
+    """Devuelve el JSON crudo del primer item activo para inspeccionar
+    qué campos tiene (offers, discounts, marketplace_campaigns, etc.).
+    Sirve para identificar dónde ML expone realmente las promos."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = db_fetchone(
+        "SELECT * FROM ml_accounts WHERE user_id=:uid AND (CAST(id AS TEXT)=:ref OR ml_user_id=:ref)",
+        {"uid": user_id, "ref": account_ref},
+    )
+    if not acc:
+        raise HTTPException(404)
+    token = await refresh_ml_token(acc["id"])
+    if not token:
+        raise HTTPException(502)
+    headers = {"Authorization": f"Bearer {token}"}
+    seller_id = acc["ml_user_id"]
+    async with httpx.AsyncClient(timeout=30) as client:
+        # Tomar el primer item activo
+        r = await client.get(
+            f"{ML_API_URL}/users/{seller_id}/items/search",
+            headers=headers,
+            params={"status": "active", "limit": 1},
+        )
+        if r.status_code != 200:
+            return {"step": "items/search", "status": r.status_code, "body": r.text[:500]}
+        results = r.json().get("results", [])
+        if not results:
+            return {"step": "items/search", "status": 200, "body": "no results"}
+        item_id = results[0]
+        # Pedir el item completo SIN filtros para ver todos los campos
+        r2 = await client.get(f"{ML_API_URL}/items/{item_id}", headers=headers)
+        return {
+            "item_id": item_id,
+            "status": r2.status_code,
+            "available_fields": sorted(list(r2.json().keys())) if r2.status_code == 200 else None,
+            "full_item": r2.json() if r2.status_code == 200 else r2.text[:2000],
+        }
+
 
 @app.get("/api/debug/promos/{account_ref}")
 async def debug_promos(request: Request, account_ref: str):
