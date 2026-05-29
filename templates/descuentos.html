@@ -99,7 +99,7 @@
 
   <!-- ─── BASE DE DESCUENTOS ─── -->
   <div class="card">
-    <h3>1. Base de descuentos por SKU</h3>
+    <h3>1. Base de descuentos por MLA</h3>
     <div class="row" style="margin-bottom:10px;">
       <input type="file" id="file-input" accept=".xlsx,.xlsm,.csv" />
       <button onclick="uploadFile()" id="btn-upload" class="green">Subir archivo</button>
@@ -375,11 +375,14 @@
       if(!r.ok) throw new Error('Error al cargar promos');
       const data = await r.json();
       promos = data.items || [];
-      if(data.error) status.textContent = `(${data.error})`;
       if(!promos.length) {
-        tbody.innerHTML = '<tr><td colspan="5" class="empty">No hay promociones disponibles para esta cuenta.</td></tr>';
+        const errs = (data.errors || []).slice(0, 3).join(' · ');
+        tbody.innerHTML = `<tr><td colspan="5" class="empty">No hay promociones disponibles para esta cuenta.${errs ? '<br><span style="font-size:11px;color:#c0392b;">' + errs + '</span>' : ''}</td></tr>`;
+        if(data.errors && data.errors.length) status.textContent = `${data.errors.length} errores — ver consola`;
+        if(data.errors && data.errors.length) console.warn('Promo fetch errors:', data.errors);
         return;
       }
+      status.textContent = `${promos.length} promociones encontradas`;
       tbody.innerHTML = promos.map(p => {
         const vigencia = (p.start_date && p.finish_date)
           ? `${p.start_date.slice(0,10)} → ${p.finish_date.slice(0,10)}`

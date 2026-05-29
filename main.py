@@ -27,7 +27,7 @@ ADMIN_PASSWORD = os.environ["ADMIN_PASSWORD"]
 ML_AUTH_URL = "https://auth.mercadolibre.com.ar/authorization"
 ML_TOKEN_URL = "https://api.mercadolibre.com/oauth/token"
 ML_API_URL = "https://api.mercadolibre.com"
-SHIPPING_LOGIC_VERSION = "v26-flex-implicit-bonif"
+SHIPPING_LOGIC_VERSION = "v27-flex-bonif-list-cost-minus-cost"
 
 serializer = URLSafeTimedSerializer(SECRET_KEY)
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -737,14 +737,17 @@ async def get_shipping_cost(client, shipping_id, headers) -> dict:
     else:
         bonificacion = max(compensation, sender_discount, option_discount_amount)
 
-    # Para flex (no-colecta), ML no siempre expone la bonificación en los
-    # campos explícitos. En esos casos gross_amount − sender − receiver da
-    # la bonificación correcta (en colecta este cálculo es inflado por
-    # fees adicionales, por eso se restringe a no-colecta). Ej:
-    #   #2000013217950751 (env gratis Z. media):  Bonif $6.490
-    #   #2000013214734089 (env gratis Z. lejana): Bonif $8.490
-    if not is_colecta and bonificacion == 0:
-        implicit_bonif = max(0.0, costs_gross_amount - costs_sender_cost - receiver_cost)
+    # Para flex (no-colecta), ML no siempre expone la bonificación en
+    # compensation o discounts. La fórmula confiable: shipping_option.list_cost
+    # es la tarifa ML completa, shipping_option.cost es lo que paga el
+    # comprador, y la diferencia es la bonificación que ML otorga al vendedor.
+    # Ejemplos:
+    #   #2000013217950751 (env gratis Z. media):  list_cost $6.490, cost $0 → Bonif $6.490
+    #   #2000013214734089 (env gratis Z. lejana): list_cost $8.490, cost $0 → Bonif $8.490
+    #   #2000016658741204 (env con pago):         list_cost − cost = $690
+    # No usamos gross_amount porque incluye items extra (fees, seguros).
+    if not is_colecta and bonificacion == 0 and list_cost > 0:
+        implicit_bonif = max(0.0, list_cost - cost)
         if implicit_bonif > 0:
             bonificacion = implicit_bonif
 
@@ -2145,8 +2148,8 @@ def _parse_csv_discounts(content: bytes) -> list:
     return items
 
 
-# Tipos de promociones que ML expone. Hay que consultar uno por uno
-# porque /seller-promotions/promotions/search exige promotion_type.
+# Tipos de promociones que ML expone. Iteramos en paralelo porque
+# /seller-promotions/promotions/search exige promotion_type.
 PROMO_TYPES = [
     "DEAL",
     "PRICE_DISCOUNT",
@@ -2166,9 +2169,8 @@ PROMO_TYPES = [
 
 @app.get("/api/promociones/{account_id}")
 async def api_promociones_list(request: Request, account_id: int):
-    """Lista las promociones disponibles para la cuenta vía ML API.
-    El endpoint /seller-promotions/promotions/search exige promotion_type,
-    así que iteramos sobre los tipos conocidos en paralelo y agregamos."""
+    """Lista las promociones disponibles. Probamos múltiples endpoints y
+    estrategias de query para maximizar lo que se trae."""
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
@@ -2179,31 +2181,50 @@ async def api_promociones_list(request: Request, account_id: int):
     if not token:
         raise HTTPException(502)
     headers = {"Authorization": f"Bearer {token}"}
+    seller_id = acc["ml_user_id"]
 
-    async with httpx.AsyncClient(timeout=60) as client:
-        async def fetch_type(ptype):
-            try:
-                r = await client.get(
-                    f"{ML_API_URL}/seller-promotions/promotions/search",
-                    headers=headers,
-                    params={"app_version": "v2", "promotion_type": ptype},
-                )
-                if r.status_code != 200:
-                    return (ptype, [], f"{r.status_code}")
-                data = r.json()
-                results = data.get("results", []) if isinstance(data, dict) else (data or [])
-                return (ptype, results, None)
-            except Exception as e:
-                return (ptype, [], str(e)[:60])
+    async def fetch(url, params, label):
+        try:
+            r = await client.get(url, headers=headers, params=params)
+            if r.status_code != 200:
+                body = (r.text or "")[:300]
+                return (label, [], f"HTTP {r.status_code}: {body}")
+            data = r.json()
+            results = data.get("results", []) if isinstance(data, dict) else (data or [])
+            return (label, results, None)
+        except Exception as e:
+            return (label, [], str(e)[:200])
 
-        outcomes = await asyncio.gather(*[fetch_type(t) for t in PROMO_TYPES])
-
+    debug = []
     seen = set()
     items = []
-    errors = []
-    for ptype, results, err in outcomes:
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        # Estrategia 1: /seller-promotions/promotions/search por cada tipo
+        type_tasks = [
+            fetch(
+                f"{ML_API_URL}/seller-promotions/promotions/search",
+                {"app_version": "v2", "promotion_type": t},
+                f"search:{t}",
+            )
+            for t in PROMO_TYPES
+        ]
+        # Estrategia 2: /users/{seller_id}/promotions (catch-all si está disponible)
+        user_tasks = [
+            fetch(
+                f"{ML_API_URL}/users/{seller_id}/promotions",
+                {"app_version": "v2"},
+                "users-promotions",
+            )
+        ]
+        outcomes = await asyncio.gather(*type_tasks, *user_tasks)
+
+    for label, results, err in outcomes:
         if err:
-            errors.append(f"{ptype}: {err}")
+            debug.append(f"{label}: {err}")
+            continue
+        # Inferir tipo desde la label si la promo no lo trae
+        inferred_type = label.split(":", 1)[1] if label.startswith("search:") else None
         for p in results:
             pid = p.get("id")
             if not pid or pid in seen:
@@ -2212,18 +2233,17 @@ async def api_promociones_list(request: Request, account_id: int):
             items.append({
                 "id": pid,
                 "name": p.get("name") or pid,
-                # ML devuelve el tipo dentro de la promo pero a veces falta;
-                # usamos el tipo que estábamos consultando como fallback.
-                "type": p.get("type") or ptype,
+                "type": p.get("type") or inferred_type,
                 "status": p.get("status"),
                 "start_date": p.get("start_date"),
                 "finish_date": p.get("finish_date"),
                 "deadline_date": p.get("deadline_date"),
                 "benefits": p.get("benefits"),
             })
+
     # Ordenar: started primero, después por nombre
     items.sort(key=lambda x: (x.get("status") != "started", (x.get("name") or "").lower()))
-    return {"items": items, "errors": errors}
+    return {"items": items, "errors": debug if not items else []}
 
 
 @app.get("/api/promociones/{account_id}/{promotion_id}/items")
