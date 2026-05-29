@@ -12,39 +12,57 @@
     .nav-brand { font-weight: 600; font-size: 15px; display: flex; align-items: center; gap: 8px; }
     .badge-admin { background: #3483FA; color: #fff; border-radius: 6px; padding: 2px 8px; font-size: 11px; }
     .btn-nav { padding: 6px 14px; border: 1px solid #ddd; border-radius: 8px; background: #fff; font-size: 13px; cursor: pointer; text-decoration: none; color: #111; }
-    main { max-width: 900px; margin: 0 auto; padding: 2rem 1.5rem; }
+    main { max-width: 1100px; margin: 0 auto; padding: 2rem 1.5rem; }
     h1 { font-size: 22px; font-weight: 600; margin-bottom: 1.5rem; }
 
     .card { background: #fff; border: 1px solid #e5e5e3; border-radius: 12px; overflow: hidden; margin-bottom: 1.5rem; }
-    .card-header { padding: 1rem 1.25rem; border-bottom: 1px solid #e5e5e3; display: flex; align-items: center; justify-content: space-between; }
+    .card-header { padding: 1rem 1.25rem; border-bottom: 1px solid #e5e5e3; }
     .card-header h2 { font-size: 15px; font-weight: 600; }
     .card-body { padding: 1.25rem; }
+    .help { font-size: 12px; color: #888; margin-top: 6px; }
 
-    .form-row { display: grid; grid-template-columns: 1fr 1fr 1fr auto; gap: 10px; align-items: end; }
-    @media (max-width: 680px) { .form-row { grid-template-columns: 1fr; } }
-    .field label { font-size: 12px; color: #666; display: block; margin-bottom: 5px; }
-    input[type=text], input[type=email], input[type=password] {
+    .create-grid {
+      display: grid; gap: 12px;
+      grid-template-columns: 1fr 1fr;
+    }
+    @media (max-width: 680px) { .create-grid { grid-template-columns: 1fr; } }
+    .field label { font-size: 12px; color: #666; display: block; margin-bottom: 5px; font-weight: 500; }
+    input[type=text], input[type=email] {
       width: 100%; padding: 8px 10px; border: 1px solid #ddd; border-radius: 8px;
       font-size: 13px; font-family: 'Inter', sans-serif;
     }
     input:focus { outline: none; border-color: #3483FA; }
-    .btn-create { padding: 8px 18px; background: #3483FA; border: none; border-radius: 8px; color: #fff; font-size: 13px; font-weight: 500; cursor: pointer; white-space: nowrap; height: 36px; }
+    .perms-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px; margin-top: 6px; }
+    .perm-chk { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border: 1px solid #e5e5e3; border-radius: 8px; font-size: 13px; background: #fafaf8; cursor: pointer; }
+    .perm-chk input { margin: 0; }
+    .perm-chk:has(input:checked) { border-color: #3483FA; background: #e8f1fd; color: #185FA5; }
+    .btn-create { padding: 9px 20px; background: #3483FA; border: none; border-radius: 8px; color: #fff; font-size: 13px; font-weight: 500; cursor: pointer; }
     .btn-create:hover { background: #2970e0; }
 
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    th { padding: 10px 14px; text-align: left; color: #888; font-weight: 500; border-bottom: 1px solid #eee; }
-    td { padding: 10px 14px; border-bottom: 1px solid #f0f0ee; }
+    th { padding: 10px 14px; text-align: left; color: #888; font-weight: 500; border-bottom: 1px solid #eee; background: #fafaf8; }
+    td { padding: 12px 14px; border-bottom: 1px solid #f0f0ee; vertical-align: top; }
     tr:last-child td { border-bottom: none; }
     .badge { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 99px; font-weight: 500; }
     .badge-blue { background: #e6f0fb; color: #185FA5; }
-    .badge-gray { background: #f0f0ee; color: #666; }
-    .btn-del { padding: 5px 12px; background: #fff; border: 1px solid #fcc; border-radius: 6px; color: #c0392b; font-size: 12px; cursor: pointer; }
+    .badge-yellow { background: #FFF8CC; color: #7a6000; }
+    .row-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+    .btn-sm { padding: 5px 10px; border-radius: 6px; font-size: 12px; cursor: pointer; border: 1px solid transparent; background: #fff; }
+    .btn-save { border-color: #3483FA; color: #3483FA; }
+    .btn-save:hover { background: #e8f1fd; }
+    .btn-reset { border-color: #c47a1e; color: #c47a1e; }
+    .btn-reset:hover { background: #fef4e6; }
+    .btn-del { border-color: #fcc; color: #c0392b; }
     .btn-del:hover { background: #fce9e9; }
     .alert { border-radius: 8px; padding: 10px 14px; font-size: 13px; margin-bottom: 1rem; }
-    .alert-error { background: #fce9e9; color: #c0392b; }
-    .alert-success { background: #e6f5ee; color: #1a8a5a; }
-    .ml-accounts-cell { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-    .ml-pill { background: #FFF8CC; color: #7a6000; border-radius: 99px; padding: 2px 9px; font-size: 11px; font-weight: 500; }
+    .alert-error { background: #fce9e9; color: #c0392b; border: 1px solid #f5c6c6; }
+    .alert-success { background: #e6f5ee; color: #1a8a5a; border: 1px solid #c5e9d8; }
+    .alert-info { background: #e8f1fd; color: #185FA5; border: 1px solid #c0d8f5; word-break: break-all; }
+    .user-row-perms { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 6px; }
+    .user-row-perms label { display: flex; align-items: center; gap: 5px; font-size: 12px; color: #555; padding: 5px 8px; border: 1px solid #eee; border-radius: 6px; cursor: pointer; }
+    .user-row-perms label:has(input:checked) { border-color: #3483FA; background: #f0f6ff; color: #185FA5; }
+    .role-input { width: 140px; padding: 6px 9px; border: 1px solid #ddd; border-radius: 6px; font-size: 12px; font-family: 'Inter', sans-serif; }
+    .pending-badge { font-size: 10px; background: #fef4e6; color: #c47a1e; padding: 2px 6px; border-radius: 99px; }
     .empty { text-align: center; padding: 2rem; color: #aaa; font-size: 13px; }
   </style>
 </head>
@@ -61,16 +79,20 @@
 </nav>
 
 <main>
-  <h1>Gestión de usuarios</h1>
+  <h1>Gestión de usuarios y permisos</h1>
 
   {% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}
-  {% if success %}<div class="alert alert-success">Usuario creado correctamente.</div>{% endif %}
+  {% if success %}<div class="alert alert-success">{{ success }}</div>{% endif %}
+  {% if info %}<div class="alert alert-info">{{ info }}</div>{% endif %}
 
   <div class="card">
-    <div class="card-header"><h2>Crear usuario</h2></div>
+    <div class="card-header">
+      <h2>Crear nuevo usuario</h2>
+      <p class="help">El usuario va a recibir un mail para establecer su propia contraseña. El admin no la ve nunca.</p>
+    </div>
     <div class="card-body">
       <form method="post" action="/admin/users/create">
-        <div class="form-row">
+        <div class="create-grid">
           <div class="field">
             <label>Nombre</label>
             <input type="text" name="name" placeholder="Juan García" required />
@@ -79,20 +101,31 @@
             <label>Email</label>
             <input type="email" name="email" placeholder="juan@email.com" required />
           </div>
-          <div class="field">
-            <label>Contraseña</label>
-            <input type="password" name="password" placeholder="Mínimo 8 caracteres" minlength="8" required />
+        </div>
+        <div class="field" style="margin-top:12px;">
+          <label>Nombre del rol</label>
+          <input type="text" name="role_label" placeholder="Colaborador" value="Colaborador" maxlength="40" />
+        </div>
+        <div class="field" style="margin-top:12px;">
+          <label>Permisos (qué pestañas puede ver)</label>
+          <div class="perms-grid">
+            {% for key, label in pages %}
+            <label class="perm-chk">
+              <input type="checkbox" name="permissions" value="{{ key }}" />
+              {{ label }}
+            </label>
+            {% endfor %}
           </div>
-          <button type="submit" class="btn-create">Crear usuario</button>
+        </div>
+        <div style="margin-top:14px; text-align:right;">
+          <button type="submit" class="btn-create">Crear usuario y enviar invitación</button>
         </div>
       </form>
     </div>
   </div>
 
   <div class="card">
-    <div class="card-header">
-      <h2>Usuarios ({{ users | length }})</h2>
-    </div>
+    <div class="card-header"><h2>Usuarios ({{ users | length }})</h2></div>
     {% if users %}
     <table>
       <thead>
@@ -100,7 +133,7 @@
           <th>Nombre</th>
           <th>Email</th>
           <th>Rol</th>
-          <th>Cuentas ML</th>
+          <th>Permisos</th>
           <th>Creado</th>
           <th></th>
         </tr>
@@ -108,26 +141,45 @@
       <tbody>
         {% for u in users %}
         <tr>
-          <td style="font-weight:500;">{{ u.name }}</td>
+          <td style="font-weight:500;">
+            {{ u.name }}
+            {% if u.pending_setup %}<br><span class="pending-badge">Pendiente de setup</span>{% endif %}
+          </td>
           <td style="color:#555;">{{ u.email }}</td>
+          {% if u.is_admin %}
+          <td><span class="badge badge-blue">Admin</span></td>
+          <td style="color:#888;font-size:12px;">Acceso a todas las pestañas</td>
+          <td style="color:#888;">{{ u.created_at.strftime('%d/%m/%Y') if u.created_at else '' }}</td>
+          <td>—</td>
+          {% else %}
           <td>
-            {% if u.is_admin %}
-              <span class="badge badge-blue">Admin</span>
-            {% else %}
-              <span class="badge badge-gray">Usuario</span>
-            {% endif %}
+            <form method="post" action="/admin/users/{{ u.id }}/permissions" id="form-{{ u.id }}">
+              <input type="text" name="role_label" class="role-input" value="{{ u.role_label or 'Colaborador' }}" maxlength="40" />
           </td>
           <td>
-            <span class="ml-pill">{{ u.ml_count }} cuenta{% if u.ml_count != 1 %}s{% endif %} ML</span>
+            <div class="user-row-perms">
+              {% for key, label in pages %}
+              <label>
+                <input type="checkbox" name="permissions" value="{{ key }}" form="form-{{ u.id }}" {% if key in u.permissions %}checked{% endif %} />
+                {{ label }}
+              </label>
+              {% endfor %}
+            </div>
           </td>
-          <td style="color:#888;">{{ u.created_at.strftime('%d/%m/%Y') }}</td>
+          <td style="color:#888;">{{ u.created_at.strftime('%d/%m/%Y') if u.created_at else '' }}</td>
           <td>
-            {% if not u.is_admin %}
-            <form method="post" action="/admin/users/delete/{{ u.id }}" style="margin:0;" onsubmit="return confirm('¿Eliminar a {{ u.name }}? Se van a desconectar todas sus cuentas de ML.')">
-              <button type="submit" class="btn-del">Eliminar</button>
-            </form>
-            {% endif %}
+            <div class="row-actions">
+              <button type="submit" class="btn-sm btn-save" form="form-{{ u.id }}">Guardar</button>
+              </form>
+              <form method="post" action="/admin/users/{{ u.id }}/reset-password" style="margin:0;" onsubmit="return confirm('¿Mandar mail de renovación de contraseña a {{ u.name }}?')">
+                <button type="submit" class="btn-sm btn-reset">Renovar contraseña</button>
+              </form>
+              <form method="post" action="/admin/users/delete/{{ u.id }}" style="margin:0;" onsubmit="return confirm('¿Eliminar a {{ u.name }}? Se van a desconectar todas sus cuentas de ML.')">
+                <button type="submit" class="btn-sm btn-del">Eliminar</button>
+              </form>
+            </div>
           </td>
+          {% endif %}
         </tr>
         {% endfor %}
       </tbody>

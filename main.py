@@ -45,6 +45,13 @@ def init_db():
                 created_at TIMESTAMP DEFAULT NOW()
             )
         """))
+        # Permisos por usuario + reset de contraseña sin que el admin la vea.
+        conn.execute(text("ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL"))
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS role_label TEXT DEFAULT 'Colaborador'"))
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS permissions JSONB DEFAULT '[]'::JSONB"))
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_token TEXT"))
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_expires_at TIMESTAMP"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_users_reset_token ON users(reset_token)"))
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS ml_accounts (
                 id SERIAL PRIMARY KEY,
@@ -799,14 +806,75 @@ async def logout():
 
 # ── Dashboard ───────────────────────────────────────────────────
 
+def _account_for_user(account_id: int, user_id: int):
+    """Devuelve la cuenta ML si el usuario puede operarla. Admin sólo
+    accede a las propias; colaboradores acceden a las del admin."""
+    user = get_user(user_id)
+    if not user:
+        return None
+    # Cuenta propia
+    acc = db_fetchone(
+        "SELECT * FROM ml_accounts WHERE id=:id AND user_id=:uid",
+        {"id": account_id, "uid": user_id},
+    )
+    if acc:
+        return acc
+    # Colaborador: puede usar cuentas del admin
+    if not user.get("is_admin"):
+        acc = db_fetchone("""
+            SELECT a.* FROM ml_accounts a
+            JOIN users u ON u.id = a.user_id AND u.is_admin = TRUE
+            WHERE a.id=:id
+        """, {"id": account_id})
+        if acc:
+            return acc
+    return None
+
+
+def get_visible_accounts(user_id: int, user: dict) -> list:
+    """Cuentas ML que un usuario puede ver. El admin ve las suyas. Los
+    colaboradores (no admin) ven las del admin de su organización."""
+    if user.get("is_admin"):
+        return db_fetchall(
+            "SELECT id, nickname, ml_user_id FROM ml_accounts WHERE user_id=:uid ORDER BY id",
+            {"uid": user_id},
+        )
+    return db_fetchall("""
+        SELECT a.id, a.nickname, a.ml_user_id FROM ml_accounts a
+        JOIN users u ON u.id = a.user_id AND u.is_admin = TRUE
+        ORDER BY a.id
+    """)
+
+
+def can_access_account(account_id: int, user_id: int, user: dict) -> bool:
+    """¿El usuario puede operar sobre esta cuenta de ML?"""
+    if user.get("is_admin"):
+        acc = db_fetchone(
+            "SELECT id FROM ml_accounts WHERE id=:id AND user_id=:uid",
+            {"id": account_id, "uid": user_id},
+        )
+        return acc is not None
+    # Colaborador: puede operar sobre cuentas del admin
+    acc = db_fetchone("""
+        SELECT a.id FROM ml_accounts a
+        JOIN users u ON u.id = a.user_id AND u.is_admin = TRUE
+        WHERE a.id=:id
+    """, {"id": account_id})
+    return acc is not None
+
+
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard(request: Request):
     user_id = get_session_user_id(request)
     if not user_id:
         return RedirectResponse("/")
     user = get_user(user_id)
-    accounts = db_fetchall("SELECT id, nickname, ml_user_id FROM ml_accounts WHERE user_id=:uid ORDER BY id", {"uid": user_id})
-    return templates.TemplateResponse("dashboard.html", {"request": request, "user": user, "accounts": accounts})
+    require_page(user, "dashboard")
+    accounts = get_visible_accounts(user_id, user)
+    return templates.TemplateResponse("dashboard.html", {
+        "request": request, "user": user, "accounts": accounts,
+        "perms": user_permissions(user),
+    })
 
 
 # ── ML OAuth ────────────────────────────────────────────────────
@@ -1139,11 +1207,12 @@ async def costos_page(request: Request):
     if not user_id:
         return RedirectResponse("/")
     user = get_user(user_id)
-    accounts = db_fetchall(
-        "SELECT id, nickname FROM ml_accounts WHERE user_id=:uid ORDER BY id",
-        {"uid": user_id},
-    )
-    return templates.TemplateResponse("costos.html", {"request": request, "user": user, "accounts": accounts})
+    require_page(user, "costos")
+    accounts = get_visible_accounts(user_id, user)
+    return templates.TemplateResponse("costos.html", {
+        "request": request, "user": user, "accounts": accounts,
+        "perms": user_permissions(user),
+    })
 
 
 @app.get("/api/costos/template")
@@ -1224,7 +1293,7 @@ async def api_costos_list(request: Request, account_id: int):
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
-    acc = db_fetchone("SELECT id FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
+    acc = _account_for_user(account_id, user_id)
     if not acc:
         raise HTTPException(404)
     rows = db_fetchall(
@@ -1257,7 +1326,7 @@ async def api_costos_upsert(
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
-    acc = db_fetchone("SELECT id FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
+    acc = _account_for_user(account_id, user_id)
     if not acc:
         raise HTTPException(404)
     try:
@@ -1289,7 +1358,7 @@ async def api_costos_edit(
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
-    acc = db_fetchone("SELECT id FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
+    acc = _account_for_user(account_id, user_id)
     if not acc:
         raise HTTPException(404)
     try:
@@ -1316,7 +1385,7 @@ async def api_costos_delete(request: Request, account_id: int, sku: str, valid_f
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
-    acc = db_fetchone("SELECT id FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
+    acc = _account_for_user(account_id, user_id)
     if not acc:
         raise HTTPException(404)
     if valid_from:
@@ -1340,7 +1409,7 @@ async def api_costos_upload(request: Request, account_id: int):
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
-    acc = db_fetchone("SELECT id FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
+    acc = _account_for_user(account_id, user_id)
     if not acc:
         raise HTTPException(404)
     form = await request.form()
@@ -1386,14 +1455,12 @@ async def envios_flex_page(request: Request):
     if not user_id:
         return RedirectResponse("/")
     user = get_user(user_id)
-    accounts = db_fetchall(
-        "SELECT id, nickname FROM ml_accounts WHERE user_id=:uid ORDER BY id",
-        {"uid": user_id},
-    )
-    return templates.TemplateResponse(
-        "envios_flex.html",
-        {"request": request, "user": user, "accounts": accounts, "zones": FLEX_ZONES},
-    )
+    require_page(user, "envios_flex")
+    accounts = get_visible_accounts(user_id, user)
+    return templates.TemplateResponse("envios_flex.html", {
+        "request": request, "user": user, "accounts": accounts,
+        "zones": FLEX_ZONES, "perms": user_permissions(user),
+    })
 
 
 @app.get("/api/flex-tariffs/template")
@@ -1462,7 +1529,7 @@ async def api_flex_list(request: Request, account_id: int):
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
-    acc = db_fetchone("SELECT id FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
+    acc = _account_for_user(account_id, user_id)
     if not acc:
         raise HTTPException(404)
     rows = db_fetchall(
@@ -1633,7 +1700,7 @@ async def api_flex_upsert(
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
-    acc = db_fetchone("SELECT id FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
+    acc = _account_for_user(account_id, user_id)
     if not acc:
         raise HTTPException(404)
     try:
@@ -1667,7 +1734,7 @@ async def api_flex_edit(
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
-    acc = db_fetchone("SELECT id FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
+    acc = _account_for_user(account_id, user_id)
     if not acc:
         raise HTTPException(404)
     try:
@@ -1695,7 +1762,7 @@ async def api_flex_delete(request: Request, account_id: int, zona: str, valid_fr
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
-    acc = db_fetchone("SELECT id FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
+    acc = _account_for_user(account_id, user_id)
     if not acc:
         raise HTTPException(404)
     if valid_from:
@@ -1717,7 +1784,7 @@ async def api_flex_upload(request: Request, account_id: int):
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
-    acc = db_fetchone("SELECT id FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
+    acc = _account_for_user(account_id, user_id)
     if not acc:
         raise HTTPException(404)
     form = await request.form()
@@ -1846,14 +1913,12 @@ async def descuentos_page(request: Request):
     if not user_id:
         return RedirectResponse("/")
     user = get_user(user_id)
-    accounts = db_fetchall(
-        "SELECT id, nickname FROM ml_accounts WHERE user_id=:uid ORDER BY id",
-        {"uid": user_id},
-    )
-    return templates.TemplateResponse(
-        "descuentos.html",
-        {"request": request, "user": user, "accounts": accounts},
-    )
+    require_page(user, "descuentos")
+    accounts = get_visible_accounts(user_id, user)
+    return templates.TemplateResponse("descuentos.html", {
+        "request": request, "user": user, "accounts": accounts,
+        "perms": user_permissions(user),
+    })
 
 
 def _normalize_mla(value) -> str:
@@ -1964,7 +2029,7 @@ async def api_descuentos_list(request: Request, account_id: int):
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
-    acc = db_fetchone("SELECT id FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
+    acc = _account_for_user(account_id, user_id)
     if not acc:
         raise HTTPException(404)
     rows = db_fetchall(
@@ -1995,7 +2060,7 @@ async def api_descuentos_upsert(
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
-    acc = db_fetchone("SELECT id FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
+    acc = _account_for_user(account_id, user_id)
     if not acc:
         raise HTTPException(404)
     saved = db_save_product_discounts(
@@ -2015,7 +2080,7 @@ async def api_descuentos_edit(
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
-    acc = db_fetchone("SELECT id FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
+    acc = _account_for_user(account_id, user_id)
     if not acc:
         raise HTTPException(404)
     db_execute(
@@ -2033,7 +2098,7 @@ async def api_descuentos_delete(request: Request, account_id: int, mla: str):
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
-    acc = db_fetchone("SELECT id FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
+    acc = _account_for_user(account_id, user_id)
     if not acc:
         raise HTTPException(404)
     db_execute(
@@ -2048,7 +2113,7 @@ async def api_descuentos_upload(request: Request, account_id: int):
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
-    acc = db_fetchone("SELECT id FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
+    acc = _account_for_user(account_id, user_id)
     if not acc:
         raise HTTPException(404)
     form = await request.form()
@@ -2176,7 +2241,7 @@ async def api_promociones_list(request: Request, account_id: int):
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
-    acc = db_fetchone("SELECT * FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
+    acc = _account_for_user(account_id, user_id)
     if not acc:
         raise HTTPException(404)
     token = await refresh_ml_token(account_id)
@@ -2258,7 +2323,7 @@ async def api_promociones_items(
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
-    acc = db_fetchone("SELECT * FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
+    acc = _account_for_user(account_id, user_id)
     if not acc:
         raise HTTPException(404)
     token = await refresh_ml_token(account_id)
@@ -2388,7 +2453,7 @@ async def api_promociones_apply(
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
-    acc = db_fetchone("SELECT * FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
+    acc = _account_for_user(account_id, user_id)
     if not acc:
         raise HTTPException(404)
     body = await request.json()
@@ -2446,7 +2511,7 @@ async def api_orders(request: Request, account_id: int,
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
-    acc = db_fetchone("SELECT * FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
+    acc = _account_for_user(account_id, user_id)
     if not acc:
         raise HTTPException(404)
 
@@ -2767,7 +2832,74 @@ async def api_orders(request: Request, account_id: int,
     }
 
 
-# ── Admin ────────────────────────────────────────────────────────
+# ── Admin / Permisos ────────────────────────────────────────────
+
+# Páginas a las que se les puede dar/quitar permiso. Las keys son los
+# slugs internos; los labels los muestra la UI. El admin SIEMPRE las ve.
+PAGES = [
+    ("dashboard",   "Dashboard"),
+    ("costos",      "Costos (CMV)"),
+    ("envios_flex", "Envíos Flex"),
+    ("descuentos",  "Descuentos"),
+]
+PAGE_KEYS = {k for k, _ in PAGES}
+
+
+def user_permissions(user: dict) -> set:
+    """Devuelve el set de páginas que el usuario puede ver. Admin ve todas."""
+    if not user:
+        return set()
+    if user.get("is_admin"):
+        return PAGE_KEYS
+    perms = user.get("permissions")
+    if isinstance(perms, str):
+        try:
+            perms = json.loads(perms)
+        except Exception:
+            perms = []
+    return set(perms or [])
+
+
+def require_page(user: dict, page: str):
+    """Lanza 403 si el usuario no tiene acceso a esa página."""
+    if page not in user_permissions(user):
+        raise HTTPException(403, "No tenés permiso para acceder a esta sección")
+
+
+def send_password_reset_email(to_email: str, name: str, reset_link: str) -> bool:
+    """Envía el mail de reset usando SMTP. Devuelve True si se mandó.
+    Si no hay SMTP configurado (env vars SMTP_HOST/USER/PASS), devuelve False
+    y el admin podrá compartir el link manualmente."""
+    host = os.environ.get("SMTP_HOST")
+    if not host:
+        return False
+    try:
+        import smtplib
+        from email.message import EmailMessage
+        msg = EmailMessage()
+        msg["From"] = os.environ.get("SMTP_FROM", os.environ.get("SMTP_USER", "noreply@panel-ml.local"))
+        msg["To"] = to_email
+        msg["Subject"] = "Panel ML — Establecer / renovar tu contraseña"
+        msg.set_content(
+            f"Hola {name},\n\n"
+            f"Un administrador del Panel ML solicitó que establezcas o renueves tu contraseña.\n\n"
+            f"Hacé click acá para hacerlo:\n{reset_link}\n\n"
+            f"El link expira en 24 horas.\n\n"
+            f"Si no esperabas este mail, ignoralo — tu contraseña actual sigue intacta."
+        )
+        port = int(os.environ.get("SMTP_PORT", "587"))
+        with smtplib.SMTP(host, port, timeout=15) as s:
+            s.starttls()
+            smtp_user = os.environ.get("SMTP_USER")
+            smtp_pass = os.environ.get("SMTP_PASS")
+            if smtp_user and smtp_pass:
+                s.login(smtp_user, smtp_pass)
+            s.send_message(msg)
+        return True
+    except Exception as e:
+        print(f"[email] Error enviando reset: {e}")
+        return False
+
 
 @app.get("/admin", response_class=HTMLResponse)
 async def admin_panel(request: Request):
@@ -2778,44 +2910,189 @@ async def admin_panel(request: Request):
     if not user["is_admin"]:
         raise HTTPException(403)
     users = db_fetchall("""
-        SELECT u.id, u.email, u.name, u.is_admin, u.created_at, COUNT(m.id) as ml_count
-        FROM users u LEFT JOIN ml_accounts m ON m.user_id = u.id
-        GROUP BY u.id ORDER BY u.created_at DESC
+        SELECT id, email, name, is_admin, role_label, permissions, created_at,
+               (password_hash IS NULL) AS pending_setup
+        FROM users ORDER BY created_at DESC
     """)
+    # Normalizar permissions a lista de strings
+    for u in users:
+        perms = u.get("permissions")
+        if isinstance(perms, str):
+            try:
+                u["permissions"] = json.loads(perms)
+            except Exception:
+                u["permissions"] = []
+        elif perms is None:
+            u["permissions"] = []
     success = request.query_params.get("success")
-    return templates.TemplateResponse("admin.html", {"request": request, "users": users, "error": None, "success": success})
+    info = request.query_params.get("info")
+    return templates.TemplateResponse("admin.html", {
+        "request": request, "users": users, "pages": PAGES,
+        "error": None, "success": success, "info": info,
+    })
 
 
 @app.post("/admin/users/create", response_class=HTMLResponse)
-async def admin_create_user(request: Request, name: str = Form(...), email: str = Form(...), password: str = Form(...)):
+async def admin_create_user(
+    request: Request,
+    name: str = Form(...), email: str = Form(...),
+    role_label: Optional[str] = Form(None),
+    permissions: list = Form(default=[]),
+):
+    """Crea un usuario SIN contraseña inicial. Genera un token de setup y
+    se lo manda al usuario por mail. El admin nunca ve la contraseña."""
     user_id = get_session_user_id(request)
     if not user_id:
         return RedirectResponse("/")
-    user = get_user(user_id)
-    if not user["is_admin"]:
+    admin = get_user(user_id)
+    if not admin["is_admin"]:
         raise HTTPException(403)
-    hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+
+    # Validar permisos contra las páginas conocidas
+    perms = [p for p in (permissions or []) if p in PAGE_KEYS]
+    role = (role_label or "Colaborador").strip() or "Colaborador"
+
+    token = secrets.token_urlsafe(32)
+    expires = datetime.utcnow() + timedelta(hours=24)
     try:
-        db_execute(
-            "INSERT INTO users (email, password_hash, name) VALUES (:e,:h,:n)",
-            {"e": email.lower().strip(), "h": hashed, "n": name}
-        )
-        return RedirectResponse("/admin?success=1", status_code=303)
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO users (email, name, role_label, permissions,"
+                    " reset_token, reset_expires_at, password_hash)"
+                    " VALUES (:e, :n, :r, CAST(:p AS JSONB), :t, :ex, NULL)"
+                ),
+                {"e": email.lower().strip(), "n": name, "r": role,
+                 "p": json.dumps(perms), "t": token, "ex": expires},
+            )
+            conn.commit()
     except Exception as e:
-        # Antes tragaba TODOS los errores como "email ya existe", lo que
-        # confundía cuando el error real era otro (PK conflict, columna
-        # faltante, conexión DB, etc.). Ahora distingue.
-        err_text = str(e).lower()
-        if "duplicate" in err_text or "unique" in err_text:
+        err = str(e).lower()
+        if "duplicate" in err or "unique" in err:
             error_msg = "Ese email ya está registrado"
         else:
             error_msg = f"Error al crear el usuario: {str(e)[:300]}"
-        users = db_fetchall("""
-            SELECT u.id, u.email, u.name, u.is_admin, u.created_at, COUNT(m.id) as ml_count
-            FROM users u LEFT JOIN ml_accounts m ON m.user_id = u.id
-            GROUP BY u.id ORDER BY u.created_at DESC
-        """)
-        return templates.TemplateResponse("admin.html", {"request": request, "users": users, "error": error_msg, "success": None})
+        users = db_fetchall("SELECT id, email, name, is_admin, role_label, permissions FROM users ORDER BY created_at DESC")
+        for u in users:
+            perms = u.get("permissions")
+            if isinstance(perms, str):
+                try: u["permissions"] = json.loads(perms)
+                except Exception: u["permissions"] = []
+        return templates.TemplateResponse("admin.html", {
+            "request": request, "users": users, "pages": PAGES,
+            "error": error_msg, "success": None, "info": None,
+        })
+
+    reset_link = f"{APP_URL}/reset/{token}"
+    sent = send_password_reset_email(email, name, reset_link)
+    if sent:
+        return RedirectResponse(f"/admin?success=Usuario creado. Link de setup enviado a {email}", status_code=303)
+    else:
+        # SMTP no configurado → mostrar el link para que el admin lo comparta manualmente
+        return RedirectResponse(
+            f"/admin?info=Usuario creado. SMTP no configurado, compartile este link al usuario (válido 24hs): {reset_link}",
+            status_code=303,
+        )
+
+
+@app.post("/admin/users/{target_id}/permissions")
+async def admin_update_permissions(
+    request: Request, target_id: int,
+    role_label: Optional[str] = Form(None),
+    permissions: list = Form(default=[]),
+):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    admin = get_user(user_id)
+    if not admin["is_admin"]:
+        raise HTTPException(403)
+    perms = [p for p in (permissions or []) if p in PAGE_KEYS]
+    role = (role_label or "Colaborador").strip() or "Colaborador"
+    with engine.connect() as conn:
+        conn.execute(
+            text("UPDATE users SET role_label=:r, permissions=CAST(:p AS JSONB) WHERE id=:id"),
+            {"r": role, "p": json.dumps(perms), "id": target_id},
+        )
+        conn.commit()
+    return RedirectResponse(f"/admin?success=Permisos actualizados", status_code=303)
+
+
+@app.post("/admin/users/{target_id}/reset-password")
+async def admin_reset_password(request: Request, target_id: int):
+    """Genera un token de reset y se lo manda al mail del usuario.
+    El admin NO ve la contraseña en ningún momento."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    admin = get_user(user_id)
+    if not admin["is_admin"]:
+        raise HTTPException(403)
+    target = db_fetchone("SELECT id, email, name FROM users WHERE id=:id", {"id": target_id})
+    if not target:
+        raise HTTPException(404)
+    token = secrets.token_urlsafe(32)
+    expires = datetime.utcnow() + timedelta(hours=24)
+    db_execute(
+        "UPDATE users SET reset_token=:t, reset_expires_at=:ex WHERE id=:id",
+        {"t": token, "ex": expires, "id": target_id},
+    )
+    reset_link = f"{APP_URL}/reset/{token}"
+    sent = send_password_reset_email(target["email"], target["name"], reset_link)
+    if sent:
+        msg = f"Mail de renovación enviado a {target['email']}"
+    else:
+        msg = f"SMTP no configurado. Compartile este link (24hs): {reset_link}"
+    return RedirectResponse(f"/admin?info={msg}", status_code=303)
+
+
+@app.get("/reset/{token}", response_class=HTMLResponse)
+async def reset_password_page(request: Request, token: str):
+    """Página pública donde el usuario establece su nueva contraseña."""
+    user = db_fetchone(
+        "SELECT id, email, name FROM users WHERE reset_token=:t AND reset_expires_at > NOW()",
+        {"t": token},
+    )
+    return templates.TemplateResponse("reset_password.html", {
+        "request": request, "token": token,
+        "user": user, "error": None, "done": False,
+    })
+
+
+@app.post("/reset/{token}", response_class=HTMLResponse)
+async def reset_password_submit(
+    request: Request, token: str,
+    password: str = Form(...), password2: str = Form(...),
+):
+    user = db_fetchone(
+        "SELECT id, email, name FROM users WHERE reset_token=:t AND reset_expires_at > NOW()",
+        {"t": token},
+    )
+    if not user:
+        return templates.TemplateResponse("reset_password.html", {
+            "request": request, "token": token, "user": None,
+            "error": "El link expiró o no es válido. Pedile al admin que genere uno nuevo.",
+            "done": False,
+        })
+    if password != password2:
+        return templates.TemplateResponse("reset_password.html", {
+            "request": request, "token": token, "user": user,
+            "error": "Las contraseñas no coinciden", "done": False,
+        })
+    if len(password) < 6:
+        return templates.TemplateResponse("reset_password.html", {
+            "request": request, "token": token, "user": user,
+            "error": "La contraseña debe tener al menos 6 caracteres", "done": False,
+        })
+    hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+    db_execute(
+        "UPDATE users SET password_hash=:h, reset_token=NULL, reset_expires_at=NULL WHERE id=:id",
+        {"h": hashed, "id": user["id"]},
+    )
+    return templates.TemplateResponse("reset_password.html", {
+        "request": request, "token": token, "user": user,
+        "error": None, "done": True,
+    })
 
 
 # ── Debug ───────────────────────────────────────────────────────
