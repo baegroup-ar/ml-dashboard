@@ -3,6 +3,7 @@ import httpx
 import secrets
 import asyncio
 import json
+from urllib.parse import urlencode
 from datetime import datetime, timedelta
 from typing import Optional
 from contextlib import asynccontextmanager
@@ -796,7 +797,7 @@ async def index(request: Request):
 @app.post("/", response_class=HTMLResponse)
 async def do_login(request: Request, email: str = Form(...), password: str = Form(...)):
     user = db_fetchone("SELECT * FROM users WHERE email=:e", {"e": email.lower().strip()})
-    if not user or not bcrypt.checkpw(password.encode(), user["password_hash"].encode()):
+    if not user or not user.get("password_hash") or not bcrypt.checkpw(password.encode(), user["password_hash"].encode()):
         return templates.TemplateResponse("login.html", {"request": request, "error": "Email o contraseña incorrectos"})
     session_token = serializer.dumps(user["id"])
     response = RedirectResponse("/dashboard", status_code=303)
@@ -814,62 +815,32 @@ async def logout():
 # ── Dashboard ───────────────────────────────────────────────────
 
 def _account_for_user(account_id: int, user_id: int):
-    """Devuelve la cuenta ML si el usuario puede operarla. Admin sólo
-    accede a las propias; colaboradores acceden a las del admin."""
+    """Devuelve la cuenta ML propia del usuario si puede operarla."""
     user = get_user(user_id)
     if not user:
         return None
-    # Cuenta propia
-    acc = db_fetchone(
+    return db_fetchone(
         "SELECT * FROM ml_accounts WHERE id=:id AND user_id=:uid",
         {"id": account_id, "uid": user_id},
     )
-    if acc:
-        return acc
-    # Colaborador: puede usar cuentas del admin
-    if not user.get("is_admin"):
-        acc = db_fetchone("""
-            SELECT a.* FROM ml_accounts a
-            JOIN users u ON u.id = a.user_id AND u.is_admin = TRUE
-            WHERE a.id=:id
-        """, {"id": account_id})
-        if acc:
-            return acc
-    return None
 
 
 def get_visible_accounts(user_id: int, user: dict) -> list:
-    """Cuentas ML que un usuario puede ver. El admin ve las suyas. Los
-    colaboradores (no admin) ven las del admin de su organización."""
-    if user.get("is_admin"):
-        return db_fetchall(
-            "SELECT id, nickname, ml_user_id FROM ml_accounts"
-            " WHERE user_id=:uid AND COALESCE(access_token, '') <> ''"
-            " ORDER BY id",
-            {"uid": user_id},
-        )
-    return db_fetchall("""
-        SELECT a.id, a.nickname, a.ml_user_id FROM ml_accounts a
-        JOIN users u ON u.id = a.user_id AND u.is_admin = TRUE
-        WHERE COALESCE(a.access_token, '') <> ''
-        ORDER BY a.id
-    """)
+    """Cuentas ML propias del usuario. Los permisos solo controlan pestanas."""
+    return db_fetchall(
+        "SELECT id, nickname, ml_user_id FROM ml_accounts"
+        " WHERE user_id=:uid AND COALESCE(access_token, '') <> ''"
+        " ORDER BY id",
+        {"uid": user_id},
+    )
 
 
 def can_access_account(account_id: int, user_id: int, user: dict) -> bool:
-    """¿El usuario puede operar sobre esta cuenta de ML?"""
-    if user.get("is_admin"):
-        acc = db_fetchone(
-            "SELECT id FROM ml_accounts WHERE id=:id AND user_id=:uid",
-            {"id": account_id, "uid": user_id},
-        )
-        return acc is not None
-    # Colaborador: puede operar sobre cuentas del admin
-    acc = db_fetchone("""
-        SELECT a.id FROM ml_accounts a
-        JOIN users u ON u.id = a.user_id AND u.is_admin = TRUE
-        WHERE a.id=:id
-    """, {"id": account_id})
+    """El usuario solo puede operar cuentas ML propias."""
+    acc = db_fetchone(
+        "SELECT id FROM ml_accounts WHERE id=:id AND user_id=:uid",
+        {"id": account_id, "uid": user_id},
+    )
     return acc is not None
 
 
@@ -2952,18 +2923,29 @@ def require_page(user: dict, page: str):
         raise HTTPException(403, "No tenés permiso para acceder a esta sección")
 
 
-def send_password_reset_email(to_email: str, name: str, reset_link: str) -> bool:
-    """Envía el mail de reset usando SMTP. Devuelve True si se mandó.
-    Si no hay SMTP configurado (env vars SMTP_HOST/USER/PASS), devuelve False
-    y el admin podrá compartir el link manualmente."""
-    host = os.environ.get("SMTP_HOST")
-    if not host:
-        return False
+def send_password_reset_email(to_email: str, name: str, reset_link: str) -> tuple[bool, str]:
+    """Envia el mail de reset usando SMTP. Devuelve (ok, detalle)."""
+    host = (os.environ.get("SMTP_HOST") or "").strip()
+    port_raw = (os.environ.get("SMTP_PORT") or "587").strip()
+    smtp_user = (os.environ.get("SMTP_USER") or "").strip()
+    smtp_pass = (os.environ.get("SMTP_PASS") or "").replace(" ", "").strip()
+    smtp_from = (os.environ.get("SMTP_FROM") or smtp_user).strip()
+    missing = [
+        key for key, value in {
+            "SMTP_HOST": host,
+            "SMTP_USER": smtp_user,
+            "SMTP_PASS": smtp_pass,
+            "SMTP_FROM": smtp_from,
+        }.items()
+        if not value
+    ]
+    if missing:
+        return False, "Faltan variables SMTP: " + ", ".join(missing)
     try:
         import smtplib
         from email.message import EmailMessage
         msg = EmailMessage()
-        msg["From"] = os.environ.get("SMTP_FROM", os.environ.get("SMTP_USER", "noreply@panel-ml.local"))
+        msg["From"] = smtp_from
         msg["To"] = to_email
         msg["Subject"] = "Panel ML — Establecer / renovar tu contraseña"
         msg.set_content(
@@ -2973,18 +2955,15 @@ def send_password_reset_email(to_email: str, name: str, reset_link: str) -> bool
             f"El link expira en 24 horas.\n\n"
             f"Si no esperabas este mail, ignoralo — tu contraseña actual sigue intacta."
         )
-        port = int(os.environ.get("SMTP_PORT", "587"))
+        port = int(port_raw)
         with smtplib.SMTP(host, port, timeout=15) as s:
             s.starttls()
-            smtp_user = os.environ.get("SMTP_USER")
-            smtp_pass = os.environ.get("SMTP_PASS")
-            if smtp_user and smtp_pass:
-                s.login(smtp_user, smtp_pass)
+            s.login(smtp_user, smtp_pass)
             s.send_message(msg)
-        return True
+        return True, "Mail enviado"
     except Exception as e:
         print(f"[email] Error enviando reset: {e}")
-        return False
+        return False, f"Error SMTP: {str(e)[:180]}"
 
 
 @app.get("/admin", response_class=HTMLResponse)
@@ -3070,13 +3049,16 @@ async def admin_create_user(
         })
 
     reset_link = f"{APP_URL}/reset/{token}"
-    sent = send_password_reset_email(email, name, reset_link)
+    sent, mail_detail = send_password_reset_email(email, name, reset_link)
     if sent:
-        return RedirectResponse(f"/admin?success=Usuario creado. Link de setup enviado a {email}", status_code=303)
-    else:
-        # SMTP no configurado → mostrar el link para que el admin lo comparta manualmente
         return RedirectResponse(
-            f"/admin?info=Usuario creado. SMTP no configurado, compartile este link al usuario (válido 24hs): {reset_link}",
+            "/admin?" + urlencode({"success": f"Usuario creado. Link de setup enviado a {email}"}),
+            status_code=303,
+        )
+    else:
+        msg = f"Usuario creado. {mail_detail}. Compartile este link al usuario (valido 24hs): {reset_link}"
+        return RedirectResponse(
+            "/admin?" + urlencode({"info": msg}),
             status_code=303,
         )
 
@@ -3124,12 +3106,12 @@ async def admin_reset_password(request: Request, target_id: int):
         {"t": token, "ex": expires, "id": target_id},
     )
     reset_link = f"{APP_URL}/reset/{token}"
-    sent = send_password_reset_email(target["email"], target["name"], reset_link)
+    sent, mail_detail = send_password_reset_email(target["email"], target["name"], reset_link)
     if sent:
         msg = f"Mail de renovación enviado a {target['email']}"
     else:
-        msg = f"SMTP no configurado. Compartile este link (24hs): {reset_link}"
-    return RedirectResponse(f"/admin?info={msg}", status_code=303)
+        msg = f"{mail_detail}. Compartile este link (24hs): {reset_link}"
+    return RedirectResponse("/admin?" + urlencode({"info": msg}), status_code=303)
 
 
 @app.get("/reset/{token}", response_class=HTMLResponse)
