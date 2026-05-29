@@ -24,6 +24,9 @@ SECRET_KEY = os.environ.get("SECRET_KEY", secrets.token_hex(32))
 DATABASE_URL = os.environ["DATABASE_URL"].replace("postgres://", "postgresql+pg8000://").replace("postgresql://", "postgresql+pg8000://")
 ADMIN_EMAIL = os.environ["ADMIN_EMAIL"]
 ADMIN_PASSWORD = os.environ["ADMIN_PASSWORD"]
+MASTER_EMAIL = os.environ.get("MASTER_EMAIL")
+MASTER_PASSWORD = os.environ.get("MASTER_PASSWORD")
+MASTER_NAME = os.environ.get("MASTER_NAME", "Maestro")
 
 ML_AUTH_URL = "https://auth.mercadolibre.com.ar/authorization"
 ML_TOKEN_URL = "https://api.mercadolibre.com/oauth/token"
@@ -52,6 +55,7 @@ def init_db():
         conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS permissions JSONB DEFAULT '[]'::JSONB"))
         conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_token TEXT"))
         conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_expires_at TIMESTAMP"))
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_master BOOLEAN DEFAULT FALSE"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_users_reset_token ON users(reset_token)"))
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS ml_accounts (
@@ -201,6 +205,21 @@ def init_db():
             conn.execute(text(
                 "INSERT INTO users (email, password_hash, name, is_admin) VALUES (:e,:h,:n,:a)"
             ), {"e": ADMIN_EMAIL, "h": hashed, "n": "Administrador", "a": True})
+        if MASTER_EMAIL and MASTER_PASSWORD:
+            master_email = MASTER_EMAIL.lower().strip()
+            master_hash = bcrypt.hashpw(MASTER_PASSWORD.encode(), bcrypt.gensalt()).decode()
+            conn.execute(text("""
+                INSERT INTO users (email, password_hash, name, is_admin, is_master, role_label, permissions)
+                VALUES (:e, :h, :n, TRUE, TRUE, 'Maestro', '[]'::JSONB)
+                ON CONFLICT (email) DO UPDATE SET
+                    password_hash = EXCLUDED.password_hash,
+                    name = EXCLUDED.name,
+                    is_admin = TRUE,
+                    is_master = TRUE,
+                    role_label = 'Maestro',
+                    reset_token = NULL,
+                    reset_expires_at = NULL
+            """), {"e": master_email, "h": master_hash, "n": MASTER_NAME})
         conn.commit()
 
 
@@ -320,6 +339,14 @@ def get_session_user_id(request: Request) -> Optional[int]:
 
 def get_user(user_id: int):
     return db_fetchone("SELECT * FROM users WHERE id=:id", {"id": user_id})
+
+
+def is_master_user(user: Optional[dict]) -> bool:
+    return bool(user and user.get("is_master"))
+
+
+def is_admin_user(user: Optional[dict]) -> bool:
+    return bool(user and (user.get("is_admin") or user.get("is_master")))
 
 
 async def refresh_ml_token(account_id: int) -> Optional[str]:
@@ -2906,7 +2933,7 @@ def user_permissions(user: dict) -> set:
     """Devuelve el set de páginas que el usuario puede ver. Admin ve todas."""
     if not user:
         return set()
-    if user.get("is_admin"):
+    if is_admin_user(user):
         return PAGE_KEYS
     perms = user.get("permissions")
     if isinstance(perms, str):
@@ -3035,12 +3062,14 @@ async def admin_panel(request: Request):
     if not user_id:
         return RedirectResponse("/")
     user = get_user(user_id)
-    if not user["is_admin"]:
+    if not is_admin_user(user):
         raise HTTPException(403)
     users = db_fetchall("""
         SELECT id, email, name, is_admin, role_label, permissions, created_at,
                (password_hash IS NULL) AS pending_setup
-        FROM users ORDER BY created_at DESC
+        FROM users
+        WHERE COALESCE(is_master, FALSE) = FALSE
+        ORDER BY created_at DESC
     """)
     # Normalizar permissions a lista de strings
     for u in users:
@@ -3055,7 +3084,7 @@ async def admin_panel(request: Request):
     success = request.query_params.get("success")
     info = request.query_params.get("info")
     return templates.TemplateResponse("admin.html", {
-        "request": request, "users": users, "pages": PAGES,
+        "request": request, "user": user, "users": users, "pages": PAGES,
         "error": None, "success": success, "info": info,
     })
 
@@ -3072,7 +3101,7 @@ async def admin_create_user(
     if not user_id:
         return RedirectResponse("/")
     admin = get_user(user_id)
-    if not admin["is_admin"]:
+    if not is_admin_user(admin):
         raise HTTPException(403)
 
     # Validar permisos contra las páginas conocidas
@@ -3099,14 +3128,19 @@ async def admin_create_user(
             error_msg = "Ese email ya está registrado"
         else:
             error_msg = f"Error al crear el usuario: {str(e)[:300]}"
-        users = db_fetchall("SELECT id, email, name, is_admin, role_label, permissions FROM users ORDER BY created_at DESC")
+        users = db_fetchall("""
+            SELECT id, email, name, is_admin, role_label, permissions
+            FROM users
+            WHERE COALESCE(is_master, FALSE) = FALSE
+            ORDER BY created_at DESC
+        """)
         for u in users:
             perms = u.get("permissions")
             if isinstance(perms, str):
                 try: u["permissions"] = json.loads(perms)
                 except Exception: u["permissions"] = []
         return templates.TemplateResponse("admin.html", {
-            "request": request, "users": users, "pages": PAGES,
+            "request": request, "user": admin, "users": users, "pages": PAGES,
             "error": error_msg, "success": None, "info": None,
         })
 
@@ -3135,13 +3169,17 @@ async def admin_update_permissions(
     if not user_id:
         raise HTTPException(401)
     admin = get_user(user_id)
-    if not admin["is_admin"]:
+    if not is_admin_user(admin):
         raise HTTPException(403)
     perms = [p for p in (permissions or []) if p in PAGE_KEYS]
     role = (role_label or "Colaborador").strip() or "Colaborador"
     with engine.connect() as conn:
         conn.execute(
-            text("UPDATE users SET role_label=:r, permissions=CAST(:p AS JSONB) WHERE id=:id"),
+            text("""
+                UPDATE users
+                SET role_label=:r, permissions=CAST(:p AS JSONB)
+                WHERE id=:id AND COALESCE(is_master, FALSE) = FALSE
+            """),
             {"r": role, "p": json.dumps(perms), "id": target_id},
         )
         conn.commit()
@@ -3156,9 +3194,12 @@ async def admin_reset_password(request: Request, target_id: int):
     if not user_id:
         raise HTTPException(401)
     admin = get_user(user_id)
-    if not admin["is_admin"]:
+    if not is_admin_user(admin):
         raise HTTPException(403)
-    target = db_fetchone("SELECT id, email, name FROM users WHERE id=:id", {"id": target_id})
+    target = db_fetchone(
+        "SELECT id, email, name FROM users WHERE id=:id AND COALESCE(is_master, FALSE) = FALSE",
+        {"id": target_id},
+    )
     if not target:
         raise HTTPException(404)
     token = secrets.token_urlsafe(32)
@@ -3445,9 +3486,9 @@ async def admin_delete_user(request: Request, target_id: int):
     if not user_id:
         raise HTTPException(401)
     user = get_user(user_id)
-    if not user["is_admin"]:
+    if not is_admin_user(user):
         raise HTTPException(403)
     if target_id == user_id:
         raise HTTPException(400, "No podés eliminarte a vos mismo")
-    db_execute("DELETE FROM users WHERE id=:id", {"id": target_id})
+    db_execute("DELETE FROM users WHERE id=:id AND COALESCE(is_master, FALSE) = FALSE", {"id": target_id})
     return RedirectResponse("/admin", status_code=303)
