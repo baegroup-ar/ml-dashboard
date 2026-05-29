@@ -2267,24 +2267,25 @@ async def api_promociones_list(request: Request, account_id: int):
     items = []
 
     async with httpx.AsyncClient(timeout=60) as client:
-        # Estrategia 1: /seller-promotions/promotions/search por cada tipo
-        type_tasks = [
+        # El endpoint /seller-promotions/promotions/search devuelve 400
+        # "Invalid promotion id/type" consistentemente y no se usa más.
+        # El endpoint /seller-promotions/promotions (sin /search) responde
+        # 200 pero a veces vacío — depende del scope OAuth de la app.
+        outcomes = await asyncio.gather(
+            *[
+                fetch(
+                    f"{ML_API_URL}/seller-promotions/promotions",
+                    {"app_version": "v2", "promotion_type": t},
+                    f"type:{t}",
+                )
+                for t in PROMO_TYPES
+            ],
             fetch(
-                f"{ML_API_URL}/seller-promotions/promotions/search",
-                {"app_version": "v2", "promotion_type": t},
-                f"search:{t}",
-            )
-            for t in PROMO_TYPES
-        ]
-        # Estrategia 2: /users/{seller_id}/promotions (catch-all si está disponible)
-        user_tasks = [
-            fetch(
-                f"{ML_API_URL}/users/{seller_id}/promotions",
+                f"{ML_API_URL}/seller-promotions/promotions",
                 {"app_version": "v2"},
-                "users-promotions",
-            )
-        ]
-        outcomes = await asyncio.gather(*type_tasks, *user_tasks)
+                "all-types",
+            ),
+        )
 
     for label, results, err in outcomes:
         if err:
