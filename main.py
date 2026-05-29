@@ -2816,17 +2816,21 @@ async def admin_create_user(request: Request, name: str = Form(...), email: str 
 
 # ── Debug ───────────────────────────────────────────────────────
 
-@app.get("/api/debug/promos/{account_id}")
-async def debug_promos(request: Request, account_id: int):
+@app.get("/api/debug/promos/{account_ref}")
+async def debug_promos(request: Request, account_ref: str):
     """Prueba múltiples endpoints de promos y devuelve los resultados crudos.
-    Sirve para entender qué expone realmente la API para esta cuenta."""
+    Acepta tanto el account_id interno (1, 2, ...) como el ml_user_id (1142561912)."""
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
-    acc = db_fetchone("SELECT * FROM ml_accounts WHERE id=:id AND user_id=:uid",
-                      {"id": account_id, "uid": user_id})
+    # Buscar por id interno o por ml_user_id
+    acc = db_fetchone(
+        "SELECT * FROM ml_accounts WHERE user_id=:uid AND (CAST(id AS TEXT)=:ref OR ml_user_id=:ref)",
+        {"uid": user_id, "ref": account_ref},
+    )
     if not acc:
-        raise HTTPException(404)
+        raise HTTPException(404, f"No encontré cuenta con id o ml_user_id = {account_ref}")
+    account_id = acc["id"]
     token = await refresh_ml_token(account_id)
     if not token:
         raise HTTPException(502)
