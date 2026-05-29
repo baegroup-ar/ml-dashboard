@@ -2271,8 +2271,11 @@ PROMO_TYPES = [
 
 @app.get("/api/promociones/{account_id}")
 async def api_promociones_list(request: Request, account_id: int):
-    """Lista las promociones disponibles. Probamos múltiples endpoints y
-    estrategias de query para maximizar lo que se trae."""
+    """Descubre las promociones inspeccionando el atributo 'offers' de
+    cada publicación del vendedor. ML devuelve `/seller-promotions/
+    promotions` con body vacío para muchas cuentas, así que esta es la
+    forma confiable de saber qué promos están realmente disponibles
+    o activas para este seller."""
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
@@ -2285,69 +2288,100 @@ async def api_promociones_list(request: Request, account_id: int):
     headers = {"Authorization": f"Bearer {token}"}
     seller_id = acc["ml_user_id"]
 
-    async def fetch(url, params, label):
-        try:
-            r = await client.get(url, headers=headers, params=params)
-            if r.status_code != 200:
-                body = (r.text or "")[:300]
-                return (label, [], f"HTTP {r.status_code}: {body}")
-            data = r.json()
-            results = data.get("results", []) if isinstance(data, dict) else (data or [])
-            return (label, results, None)
-        except Exception as e:
-            return (label, [], str(e)[:200])
-
     debug = []
-    seen = set()
-    items = []
+    all_item_ids: list = []
 
-    async with httpx.AsyncClient(timeout=60) as client:
-        # El endpoint /seller-promotions/promotions/search devuelve 400
-        # "Invalid promotion id/type" consistentemente y no se usa más.
-        # El endpoint /seller-promotions/promotions (sin /search) responde
-        # 200 pero a veces vacío — depende del scope OAuth de la app.
-        outcomes = await asyncio.gather(
-            *[
-                fetch(
-                    f"{ML_API_URL}/seller-promotions/promotions",
-                    {"app_version": "v2", "promotion_type": t},
-                    f"type:{t}",
+    async with httpx.AsyncClient(timeout=90) as client:
+        # Paso 1: listar todos los items activos (paginando hasta el cap de 1000)
+        offset = 0
+        while True:
+            try:
+                r = await client.get(
+                    f"{ML_API_URL}/users/{seller_id}/items/search",
+                    headers=headers,
+                    params={"status": "active", "limit": 100, "offset": offset},
                 )
-                for t in PROMO_TYPES
-            ],
-            fetch(
-                f"{ML_API_URL}/seller-promotions/promotions",
-                {"app_version": "v2"},
-                "all-types",
-            ),
-        )
+                if r.status_code != 200:
+                    debug.append(f"items/search offset={offset}: HTTP {r.status_code}: {r.text[:200]}")
+                    break
+                data = r.json()
+            except Exception as e:
+                debug.append(f"items/search offset={offset}: {str(e)[:200]}")
+                break
+            results = data.get("results", []) or []
+            if not results:
+                break
+            all_item_ids.extend(results)
+            if len(results) < 100:
+                break
+            offset += 100
+            if offset >= 1000:  # cap duro de ML
+                break
 
-    for label, results, err in outcomes:
-        if err:
-            debug.append(f"{label}: {err}")
-            continue
-        # Inferir tipo desde la label si la promo no lo trae
-        inferred_type = label.split(":", 1)[1] if label.startswith("search:") else None
-        for p in results:
-            pid = p.get("id")
-            if not pid or pid in seen:
+        if not all_item_ids:
+            return {"items": [], "errors": debug or ["No se encontraron publicaciones activas en la cuenta"]}
+
+        # Paso 2: en batches de 20, traer los items con el attribute `offers`.
+        promos: dict = {}
+        sem = asyncio.Semaphore(8)
+
+        async def fetch_batch(batch_ids):
+            async with sem:
+                try:
+                    r = await client.get(
+                        f"{ML_API_URL}/items",
+                        headers=headers,
+                        params={"ids": ",".join(batch_ids), "attributes": "id,price,offers,seller_custom_field"},
+                    )
+                    if r.status_code != 200:
+                        return None, f"items batch: HTTP {r.status_code}: {r.text[:200]}"
+                    return r.json(), None
+                except Exception as e:
+                    return None, f"items batch: {str(e)[:200]}"
+
+        batches = [all_item_ids[i:i+20] for i in range(0, len(all_item_ids), 20)]
+        outcomes = await asyncio.gather(*[fetch_batch(b) for b in batches])
+
+        for data, err in outcomes:
+            if err:
+                if len(debug) < 8:
+                    debug.append(err)
                 continue
-            seen.add(pid)
-            items.append({
-                "id": pid,
-                "name": p.get("name") or pid,
-                "type": p.get("type") or inferred_type,
-                "status": p.get("status"),
-                "start_date": p.get("start_date"),
-                "finish_date": p.get("finish_date"),
-                "deadline_date": p.get("deadline_date"),
-                "benefits": p.get("benefits"),
-            })
+            if not isinstance(data, list):
+                continue
+            for entry in data:
+                if not isinstance(entry, dict):
+                    continue
+                body = entry.get("body") if entry.get("code") == 200 else None
+                if not body:
+                    continue
+                offers = body.get("offers") or []
+                for offer in offers:
+                    if not isinstance(offer, dict):
+                        continue
+                    pid = offer.get("id") or offer.get("promotion_id")
+                    if not pid:
+                        continue
+                    if pid not in promos:
+                        promos[pid] = {
+                            "id": pid,
+                            "name": offer.get("name") or offer.get("description") or pid,
+                            "type": offer.get("type") or offer.get("promotion_type"),
+                            "status": offer.get("status"),
+                            "start_date": offer.get("start_date"),
+                            "finish_date": offer.get("finish_date"),
+                            "deadline_date": offer.get("deadline_date"),
+                            "applicable_items": 0,
+                        }
+                    promos[pid]["applicable_items"] += 1
 
-    # Ordenar: started primero, después por nombre
-    items.sort(key=lambda x: (x.get("status") != "started", (x.get("name") or "").lower()))
-    # Siempre devolver debug para diagnosticar (la UI sólo lo muestra si items está vacío).
-    return {"items": items, "errors": debug}
+    items = list(promos.values())
+    items.sort(key=lambda x: (x.get("status") != "started", -x.get("applicable_items", 0), (x.get("name") or "").lower()))
+    return {
+        "items": items,
+        "errors": debug,
+        "items_scanned": len(all_item_ids),
+    }
 
 
 @app.get("/api/promociones/{account_id}/{promotion_id}/items")

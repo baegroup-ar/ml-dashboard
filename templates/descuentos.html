@@ -149,10 +149,10 @@
     <div style="overflow-x:auto;margin-top:8px;">
       <table>
         <thead><tr>
-          <th>Promoción</th><th>Tipo</th><th>Estado</th><th>Vigencia</th><th style="text-align:right;">Acción</th>
+          <th>Promoción</th><th>Tipo</th><th>Items aplicables</th><th>Estado</th><th>Vigencia</th><th style="text-align:right;">Acción</th>
         </tr></thead>
         <tbody id="promos-tbody">
-          <tr><td colspan="5" class="empty">Hacé click en "Refrescar promos" para ver las disponibles.</td></tr>
+          <tr><td colspan="6" class="empty">Hacé click en "Refrescar promos" para ver las disponibles.</td></tr>
         </tbody>
       </table>
     </div>
@@ -228,7 +228,7 @@
     currentAccountId = document.getElementById('account-select').value;
     loadBase();
     document.getElementById('preview-card').style.display = 'none';
-    document.getElementById('promos-tbody').innerHTML = `<tr><td colspan="5" class="empty">Hacé click en "Refrescar promos" para ver las disponibles.</td></tr>`;
+    document.getElementById('promos-tbody').innerHTML = `<tr><td colspan="6" class="empty">Hacé click en "Refrescar promos" para ver las disponibles.</td></tr>`;
   }
 
   // ── BASE DE DESCUENTOS ──
@@ -378,15 +378,17 @@
       if(!promos.length) {
         const errs = (data.errors || []).slice(0, 5);
         const errsHtml = errs.length ? `<div style="margin-top:10px;font-size:11px;color:#c0392b;text-align:left;background:#fef6f6;padding:8px 12px;border-radius:6px;">${errs.map(e => '• ' + e).join('<br>')}</div>` : '';
-        tbody.innerHTML = `<tr><td colspan="5" class="empty">
-          La API de ML no devolvió promociones para esta cuenta.<br>
-          <span style="font-size:11px;color:#888;">Si recién activaste el scope, asegurate de DESCONECTAR y volver a CONECTAR la cuenta para refrescar el token con los nuevos permisos.</span>
+        const scanned = data.items_scanned || 0;
+        tbody.innerHTML = `<tr><td colspan="6" class="empty">
+          No se encontraron promociones aplicables en tus publicaciones.<br>
+          <span style="font-size:11px;color:#888;">Se escanearon ${scanned} publicaciones activas. Si tenés promos en el panel web de ML pero no aparecen acá, puede ser que ML las exponga sólo en su UI privada.</span>
           ${errsHtml}
         </td></tr>`;
         status.textContent = data.errors && data.errors.length ? `${data.errors.length} errores` : '';
         return;
       }
-      status.textContent = `${promos.length} promociones encontradas`;
+      const scanned = data.items_scanned || 0;
+      status.textContent = `${promos.length} promociones encontradas en ${scanned} publicaciones`;
       tbody.innerHTML = promos.map(p => {
         const vigencia = (p.start_date && p.finish_date)
           ? `${p.start_date.slice(0,10)} → ${p.finish_date.slice(0,10)}`
@@ -395,6 +397,7 @@
           <tr>
             <td><b>${p.name}</b></td>
             <td><span class="badge gray">${p.type || '—'}</span></td>
+            <td style="text-align:center;font-weight:500;">${p.applicable_items || 0}</td>
             <td><span class="badge ${p.status === 'started' ? 'ok' : 'gray'}">${p.status || '—'}</span></td>
             <td style="font-size:12px;">${vigencia}</td>
             <td style="text-align:right;">
@@ -403,7 +406,7 @@
           </tr>`;
       }).join('');
     } catch(e) {
-      tbody.innerHTML = `<tr><td colspan="5" class="empty">Error: ${e.message}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="6" class="empty">Error: ${e.message}</td></tr>`;
     } finally {
       btn.disabled = false; btn.textContent = 'Refrescar promos';
     }
