@@ -376,12 +376,14 @@
       const data = await r.json();
       promos = data.items || [];
       if(!promos.length) {
+        const errs = (data.errors || []).slice(0, 5);
+        const errsHtml = errs.length ? `<div style="margin-top:10px;font-size:11px;color:#c0392b;text-align:left;background:#fef6f6;padding:8px 12px;border-radius:6px;">${errs.map(e => '• ' + e).join('<br>')}</div>` : '';
         tbody.innerHTML = `<tr><td colspan="5" class="empty">
-          La API de ML no devuelve promociones para esta cuenta vía endpoint público.<br>
-          <span style="font-size:11px;color:#888;">Esto suele pasar cuando la app de ML no tiene activado el scope de seller-promotions, o cuando las promos están sólo en el panel web (no expuestas vía API). Estamos investigando un endpoint alternativo.</span>
+          La API de ML no devolvió promociones para esta cuenta.<br>
+          <span style="font-size:11px;color:#888;">Si recién activaste el scope, asegurate de DESCONECTAR y volver a CONECTAR la cuenta para refrescar el token con los nuevos permisos.</span>
+          ${errsHtml}
         </td></tr>`;
-        if(data.errors && data.errors.length) console.warn('Promo fetch errors:', data.errors);
-        status.textContent = '';
+        status.textContent = data.errors && data.errors.length ? `${data.errors.length} errores` : '';
         return;
       }
       status.textContent = `${promos.length} promociones encontradas`;

@@ -325,7 +325,11 @@ async def refresh_ml_token(account_id: int) -> Optional[str]:
     acc = db_fetchone("SELECT * FROM ml_accounts WHERE id=:id", {"id": account_id})
     if not acc:
         return None
-    if datetime.utcnow() < acc["expires_at"] - timedelta(minutes=5):
+    # Si los tokens están vacíos (cuenta desconectada/soft delete), no
+    # hay forma de refrescarlos — el usuario tiene que reconectar OAuth.
+    if not acc.get("refresh_token") or not acc.get("access_token"):
+        return None
+    if acc["expires_at"] and datetime.utcnow() < acc["expires_at"] - timedelta(minutes=5):
         return acc["access_token"]
     async with httpx.AsyncClient() as client:
         resp = await client.post(ML_TOKEN_URL, data={
@@ -839,12 +843,15 @@ def get_visible_accounts(user_id: int, user: dict) -> list:
     colaboradores (no admin) ven las del admin de su organización."""
     if user.get("is_admin"):
         return db_fetchall(
-            "SELECT id, nickname, ml_user_id FROM ml_accounts WHERE user_id=:uid ORDER BY id",
+            "SELECT id, nickname, ml_user_id FROM ml_accounts"
+            " WHERE user_id=:uid AND COALESCE(access_token, '') <> ''"
+            " ORDER BY id",
             {"uid": user_id},
         )
     return db_fetchall("""
         SELECT a.id, a.nickname, a.ml_user_id FROM ml_accounts a
         JOIN users u ON u.id = a.user_id AND u.is_admin = TRUE
+        WHERE COALESCE(a.access_token, '') <> ''
         ORDER BY a.id
     """)
 
@@ -930,10 +937,35 @@ async def ml_callback(request: Request, code: str, state: str):
 
 @app.post("/ml/disconnect/{account_id}")
 async def ml_disconnect(request: Request, account_id: int):
+    """Soft disconnect: limpia tokens pero conserva el registro y todos
+    los datos asociados (costos, tarifas flex, descuentos, snapshots).
+    Al reconectar (OAuth callback) hace UPSERT sobre el mismo account_id
+    y todo sigue funcionando sin tener que volver a cargar nada."""
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
-    db_execute("DELETE FROM ml_accounts WHERE id=:id AND user_id=:uid", {"id": account_id, "uid": user_id})
+    # Vaciar los tokens pero NO eliminar el registro
+    db_execute(
+        "UPDATE ml_accounts SET access_token='', refresh_token='',"
+        " expires_at = NOW() - INTERVAL '1 day'"
+        " WHERE id=:id AND user_id=:uid",
+        {"id": account_id, "uid": user_id},
+    )
+    return RedirectResponse("/dashboard", status_code=303)
+
+
+@app.post("/ml/delete/{account_id}")
+async def ml_delete_account(request: Request, account_id: int):
+    """Eliminación DEFINITIVA del registro y todos sus datos asociados
+    (costos, tarifas flex, descuentos, snapshots de órdenes). Sólo para
+    casos en los que el admin realmente quiere borrar todo."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    db_execute(
+        "DELETE FROM ml_accounts WHERE id=:id AND user_id=:uid",
+        {"id": account_id, "uid": user_id},
+    )
     return RedirectResponse("/dashboard", status_code=303)
 
 
@@ -2314,7 +2346,8 @@ async def api_promociones_list(request: Request, account_id: int):
 
     # Ordenar: started primero, después por nombre
     items.sort(key=lambda x: (x.get("status") != "started", (x.get("name") or "").lower()))
-    return {"items": items, "errors": debug if not items else []}
+    # Siempre devolver debug para diagnosticar (la UI sólo lo muestra si items está vacío).
+    return {"items": items, "errors": debug}
 
 
 @app.get("/api/promociones/{account_id}/{promotion_id}/items")
