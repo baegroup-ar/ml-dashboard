@@ -27,7 +27,7 @@ ADMIN_PASSWORD = os.environ["ADMIN_PASSWORD"]
 ML_AUTH_URL = "https://auth.mercadolibre.com.ar/authorization"
 ML_TOKEN_URL = "https://api.mercadolibre.com/oauth/token"
 ML_API_URL = "https://api.mercadolibre.com"
-SHIPPING_LOGIC_VERSION = "v30-bonif-save-only-if-less-than-cost"
+SHIPPING_LOGIC_VERSION = "v31-trust-zero-from-costs-api"
 
 serializer = URLSafeTimedSerializer(SECRET_KEY)
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -676,7 +676,8 @@ async def get_shipping_cost(client, shipping_id, headers) -> dict:
     sender_discount = 0.0
     sender_save = 0.0
     compensation = 0.0
-    if r_costs.status_code == 200:
+    costs_responded = r_costs.status_code == 200
+    if costs_responded:
         cd = r_costs.json()
         costs_gross_amount = amount_value(cd.get("gross_amount"))
         receiver = cd.get("receiver") or {}
@@ -760,9 +761,11 @@ async def get_shipping_cost(client, shipping_id, headers) -> dict:
         # Todos los campos representan bonificaciones reales aquí.
         bonificacion = max(compensation, sender_save, sender_discount, option_discount_amount)
 
-    # Fallback sólo cuando /costs no devolvió data útil para esa venta
-    # (ej. shipments cancelados o sin info de costos).
-    if seller_cost == 0 and bonificacion == 0 and buyer_cost == 0 and is_colecta:
+    # Fallback al 50% del list_cost SÓLO cuando /costs no respondió
+    # (ej. shipments cancelados sin info). Si /costs respondió y devolvió
+    # sender.cost = 0, confiamos en eso: ML genuinamente no le cobró
+    # envío al vendedor (caso #2000016669490932, panel sin línea de envío).
+    if not costs_responded and seller_cost == 0 and bonificacion == 0 and buyer_cost == 0 and is_colecta:
         if option_discount_rate and list_cost > 0:
             seller_cost = list_cost * (1.0 - option_discount_rate)
         elif list_cost > 0 or base_cost > 0:
