@@ -31,7 +31,7 @@ MASTER_NAME = os.environ.get("MASTER_NAME", "Maestro")
 ML_AUTH_URL = "https://auth.mercadolibre.com.ar/authorization"
 ML_TOKEN_URL = "https://api.mercadolibre.com/oauth/token"
 ML_API_URL = "https://api.mercadolibre.com"
-SHIPPING_LOGIC_VERSION = "v32-coupon-into-bonif-display"
+SHIPPING_LOGIC_VERSION = "v33-no-coupon-in-ganancia"
 
 serializer = URLSafeTimedSerializer(SECRET_KEY)
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -2875,14 +2875,12 @@ async def api_orders(request: Request, account_id: int,
         else:
             # Ing. Envío = sólo lo que paga el comprador por envío.
             ingreso_envio = raw["shipping_buyer"]
-            # La columna "Bonif" muestra TODO lo que ML aporta al vendedor
-            # (bonificación de envío + cupones que ML reintegra). Antes el
-            # cupón se sumaba a la ganancia sin aparecer en ninguna columna,
-            # lo que hacía que los números no cerraran al mirar la tabla.
-            bonif_display = round(raw["bonificacion"] + raw["coupon_amt"], 2)
+            # Bonif = SÓLO la bonificación de envío que recibe el vendedor.
+            # El cupón ML NO se cuenta: lo aporta ML para que el comprador
+            # pague menos, pero NO es ingreso del vendedor.
             sku_col = " / ".join(i["sku"] or i["titulo"] for i in raw["items"])
             ganancia = round(
-                raw["monto"] + ingreso_envio + bonif_display
+                raw["monto"] + ingreso_envio + raw["bonificacion"]
                 - raw["comision"] - raw["envio"] - raw["cmv"], 2
             )
             orders.append({
@@ -2891,7 +2889,7 @@ async def api_orders(request: Request, account_id: int,
                 "producto": sku_col,
                 "monto": raw["monto"], "comision": raw["comision"],
                 "ingreso_envio": ingreso_envio,
-                "bonificacion": bonif_display,
+                "bonificacion": raw["bonificacion"],
                 "envio": raw["envio"],
                 "cmv": raw["cmv"],
                 "ganancia": ganancia,
@@ -2902,11 +2900,9 @@ async def api_orders(request: Request, account_id: int,
     for pid, p in pack_map.items():
         ingreso_envio = p["shipping_buyer"]
         p["ingreso_envio"] = ingreso_envio
-        # Mismo criterio para packs: Bonif visible = bonus envío + cupones
-        bonif_display = round(p["bonificacion"] + p["coupon_total"], 2)
-        p["bonificacion"] = bonif_display
+        # Cupón ML NO se suma: lo aporta ML para el comprador, no es ingreso del vendedor.
         p["ganancia"] = round(
-            p["monto"] + ingreso_envio + bonif_display
+            p["monto"] + ingreso_envio + p["bonificacion"]
             - p["comision"] - p["envio"] - p["cmv"], 2
         )
         if len(p["items"]) == 1:
