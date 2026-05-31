@@ -3045,7 +3045,7 @@ async def api_orders(request: Request, account_id: int,
             p["is_pack"] = False
             p["producto"] = p["items"][0]["sku"] or p["items"][0]["titulo"]
         else:
-            p["producto"] = f"Paquete ({len(p['items'])} productos)"
+            p["producto"] = f"Paquete x{p['cantidad']}"
         del p["shipping_buyer"], p["coupon_total"]
         orders.append(p)
 
