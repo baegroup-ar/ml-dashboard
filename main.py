@@ -894,6 +894,55 @@ def get_visible_accounts(user_id: int, user: dict) -> list:
     )
 
 
+async def fetch_ml_nickname(client: httpx.AsyncClient, token: str, ml_user_id: str) -> Optional[str]:
+    headers = {"Authorization": f"Bearer {token}"}
+    for path in ("/users/me", f"/users/{ml_user_id}"):
+        try:
+            resp = await client.get(f"{ML_API_URL}{path}", headers=headers)
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+            nickname = (data.get("nickname") or "").strip()
+            if nickname:
+                return nickname
+        except Exception:
+            continue
+    return None
+
+
+async def refresh_visible_account_nicknames(accounts: list) -> list:
+    """Completa apodos de cuentas viejas que quedaron guardadas con el ID numerico."""
+    pending = [
+        acc for acc in accounts
+        if not str(acc.get("nickname") or "").strip()
+        or str(acc.get("nickname") or "").strip() == str(acc.get("ml_user_id") or "").strip()
+    ]
+    if not pending:
+        return accounts
+
+    sem = asyncio.Semaphore(4)
+
+    async with httpx.AsyncClient(timeout=5) as client:
+        async def refresh_one(acc: dict) -> None:
+            current = str(acc.get("nickname") or "").strip()
+            ml_user_id = str(acc.get("ml_user_id") or "").strip()
+            async with sem:
+                token = await refresh_ml_token(acc["id"])
+                if not token:
+                    return
+                nickname = await fetch_ml_nickname(client, token, ml_user_id)
+            if not nickname or nickname == current:
+                return
+            db_execute(
+                "UPDATE ml_accounts SET nickname=:nick WHERE id=:id",
+                {"nick": nickname, "id": acc["id"]},
+            )
+            acc["nickname"] = nickname
+
+        await asyncio.gather(*(refresh_one(acc) for acc in pending))
+    return accounts
+
+
 def can_access_account(account_id: int, user_id: int, user: dict) -> bool:
     """El usuario solo puede operar cuentas ML propias."""
     acc = db_fetchone(
@@ -911,6 +960,7 @@ async def dashboard(request: Request):
     user = get_user(user_id)
     require_page(user, "dashboard")
     accounts = get_visible_accounts(user_id, user)
+    accounts = await refresh_visible_account_nicknames(accounts)
     return templates.TemplateResponse("dashboard.html", {
         "request": request, "user": user, "accounts": accounts,
         "perms": user_permissions(user),
@@ -950,8 +1000,8 @@ async def ml_callback(request: Request, code: str, state: str):
         if resp.status_code != 200:
             raise HTTPException(400, f"Error ML: {resp.text}")
         tokens = resp.json()
-    ml_user_id = str(tokens["user_id"])
-    nickname = tokens.get("nickname", ml_user_id)
+        ml_user_id = str(tokens["user_id"])
+        nickname = tokens.get("nickname") or await fetch_ml_nickname(client, tokens["access_token"], ml_user_id) or ml_user_id
     expires_at = datetime.utcnow() + timedelta(seconds=tokens["expires_in"])
     db_execute("""
         INSERT INTO ml_accounts (user_id, ml_user_id, nickname, access_token, refresh_token, expires_at)
@@ -1274,6 +1324,7 @@ async def costos_page(request: Request):
     user = get_user(user_id)
     require_page(user, "costos")
     accounts = get_visible_accounts(user_id, user)
+    accounts = await refresh_visible_account_nicknames(accounts)
     return templates.TemplateResponse("costos.html", {
         "request": request, "user": user, "accounts": accounts,
         "perms": user_permissions(user),
@@ -1522,6 +1573,7 @@ async def envios_flex_page(request: Request):
     user = get_user(user_id)
     require_page(user, "envios_flex")
     accounts = get_visible_accounts(user_id, user)
+    accounts = await refresh_visible_account_nicknames(accounts)
     return templates.TemplateResponse("envios_flex.html", {
         "request": request, "user": user, "accounts": accounts,
         "zones": FLEX_ZONES, "perms": user_permissions(user),
@@ -1980,6 +2032,7 @@ async def descuentos_page(request: Request):
     user = get_user(user_id)
     require_page(user, "descuentos")
     accounts = get_visible_accounts(user_id, user)
+    accounts = await refresh_visible_account_nicknames(accounts)
     return templates.TemplateResponse("descuentos.html", {
         "request": request, "user": user, "accounts": accounts,
         "perms": user_permissions(user),
@@ -1994,6 +2047,7 @@ async def ranking_page(request: Request):
     user = get_user(user_id)
     require_page(user, "ranking")
     accounts = get_visible_accounts(user_id, user)
+    accounts = await refresh_visible_account_nicknames(accounts)
     return templates.TemplateResponse("ranking.html", {
         "request": request, "user": user, "accounts": accounts,
         "perms": user_permissions(user),
@@ -3045,7 +3099,8 @@ async def api_orders(request: Request, account_id: int,
             p["is_pack"] = False
             p["producto"] = p["items"][0]["sku"] or p["items"][0]["titulo"]
         else:
-            p["producto"] = f"Paquete ({len(p['items'])} productos)"
+            pack_units = sum(item.get("cantidad", 1) for item in p["items"])
+            p["producto"] = f"Paquete x{pack_units}"
         del p["shipping_buyer"], p["coupon_total"]
         orders.append(p)
 
