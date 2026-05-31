@@ -1986,6 +1986,114 @@ async def descuentos_page(request: Request):
     })
 
 
+@app.get("/ranking", response_class=HTMLResponse)
+async def ranking_page(request: Request):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse("/")
+    user = get_user(user_id)
+    require_page(user, "ranking")
+    accounts = get_visible_accounts(user_id, user)
+    return templates.TemplateResponse("ranking.html", {
+        "request": request, "user": user, "accounts": accounts,
+        "perms": user_permissions(user),
+    })
+
+
+@app.get("/api/ranking/{account_id}")
+async def api_ranking(request: Request, account_id: int,
+                      date_from: Optional[str] = None,
+                      date_to: Optional[str] = None):
+    """Agrupa las ventas del período por SKU. Por cada SKU:
+      - unidades vendidas, ventas (cantidad), facturación
+      - comisión, ingreso envío, bonif, costo envío, CMV (ponderados por
+        la fracción del monto del item dentro de su orden)
+      - ganancia, margen ponderado (ganancia / facturación)
+    Ordenado por facturación descendente."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    user = get_user(user_id)
+    require_page(user, "ranking")
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+
+    # Reutilizamos los snapshots cacheados de órdenes para no volver a
+    # pegar a ML. Las órdenes ya vienen con ítems y cálculos resueltos.
+    today = datetime.utcnow().date()
+    df = date_from or str(today - timedelta(days=365))
+    dt = date_to or str(today)
+    if (datetime.strptime(dt, "%Y-%m-%d") - datetime.strptime(df, "%Y-%m-%d")).days > 365:
+        df = str(datetime.strptime(dt, "%Y-%m-%d").date() - timedelta(days=365))
+
+    cached_orders = db_fetch_order_snapshots(account_id, df, dt)
+    if not cached_orders:
+        return {"items": [], "period": {"from": df, "to": dt},
+                "info": "No hay datos cacheados para este período. Cargá el Dashboard primero para generar el caché."}
+
+    # Sólo ventas pagadas cuentan para ranking
+    paid = [o for o in cached_orders if o.get("estado") == "paid"]
+
+    rank: dict = {}
+    for order in paid:
+        items = order.get("items") or []
+        if not items:
+            continue
+        order_monto = sum(float(i.get("monto", 0) or 0) for i in items) or float(order.get("monto", 0) or 0)
+        order_envio = float(order.get("envio", 0) or 0)
+        order_ing = float(order.get("ingreso_envio", 0) or 0)
+        order_bonif = float(order.get("bonificacion", 0) or 0)
+        for item in items:
+            sku = (item.get("sku") or "").strip()
+            if not sku:
+                sku = (item.get("titulo") or "Sin SKU")[:40]
+            qty = int(item.get("cantidad", 1) or 1)
+            item_monto = float(item.get("monto", 0) or 0)
+            item_com = float(item.get("comision", 0) or 0)
+            item_cmv = float(item.get("cmv", 0) or 0)
+            # Prorratear envío, ingreso envío y bonif del pedido en base
+            # al peso del item dentro del monto total del pedido.
+            share = (item_monto / order_monto) if order_monto > 0 else (1.0 / len(items))
+            item_envio = order_envio * share
+            item_ing = order_ing * share
+            item_bonif = order_bonif * share
+            rec = rank.setdefault(sku, {
+                "sku": sku, "titulo": item.get("titulo") or "",
+                "ventas": 0, "unidades": 0,
+                "facturacion": 0.0, "comision": 0.0,
+                "ingreso_envio": 0.0, "bonificacion": 0.0,
+                "envio": 0.0, "cmv": 0.0, "ganancia": 0.0,
+            })
+            rec["ventas"] += 1
+            rec["unidades"] += qty
+            rec["facturacion"] += item_monto
+            rec["comision"] += item_com
+            rec["ingreso_envio"] += item_ing
+            rec["bonificacion"] += item_bonif
+            rec["envio"] += item_envio
+            rec["cmv"] += item_cmv
+            rec["ganancia"] += (
+                item_monto + item_ing + item_bonif
+                - item_com - item_envio - item_cmv
+            )
+
+    out = []
+    for r in rank.values():
+        # Redondeos
+        r["facturacion"] = round(r["facturacion"], 2)
+        r["comision"] = round(r["comision"], 2)
+        r["ingreso_envio"] = round(r["ingreso_envio"], 2)
+        r["bonificacion"] = round(r["bonificacion"], 2)
+        r["envio"] = round(r["envio"], 2)
+        r["cmv"] = round(r["cmv"], 2)
+        r["ganancia"] = round(r["ganancia"], 2)
+        r["margen_pct"] = round((r["ganancia"] / r["facturacion"]) * 100, 2) if r["facturacion"] > 0 else 0
+        out.append(r)
+    out.sort(key=lambda x: x["facturacion"], reverse=True)
+    return {"items": out, "period": {"from": df, "to": dt}}
+
+
 def _normalize_mla(value) -> str:
     """Devuelve el MLA en mayúsculas y sin espacios. Acepta también números
     sueltos asumiendo prefijo MLA."""
@@ -2987,6 +3095,7 @@ PAGES = [
     ("costos",      "Costos (CMV)"),
     ("envios_flex", "Envíos Flex"),
     ("descuentos",  "Descuentos"),
+    ("ranking",     "Ranking por SKU"),
 ]
 PAGE_KEYS = {k for k, _ in PAGES}
 

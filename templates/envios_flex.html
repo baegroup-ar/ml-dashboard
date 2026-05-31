@@ -66,6 +66,7 @@
     {% if 'costos' in perms %}<a href="/costos" class="btn-nav">Costos</a>{% endif %}
     <span style="color:#3483FA;font-weight:500;">Envíos Flex</span>
     {% if 'descuentos' in perms %}<a href="/descuentos" class="btn-nav">Descuentos</a>{% endif %}
+    {% if 'ranking' in perms %}<a href="/ranking" class="btn-nav">Ranking</a>{% endif %}
     <span style="color:#888;">{{ user.name }}</span>
     {% if user.is_admin %}<a href="/admin" style="font-size:12px;color:#3483FA;text-decoration:none;">Admin</a>{% endif %}
     <a href="/logout" class="btn-nav">Salir</a>

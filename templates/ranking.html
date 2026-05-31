@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Ranking por SKU · Panel ML</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Inter', sans-serif; background: #f5f5f3; color: #111; }
+    nav { background: #fff; border-bottom: 1px solid #e5e5e3; padding: 0 1.5rem; height: 56px; display: flex; align-items: center; justify-content: space-between; }
+    .nav-brand { font-weight: 600; font-size: 15px; display: flex; align-items: center; gap: 8px; }
+    .nav-brand span { background: #FFE600; border-radius: 6px; padding: 2px 8px; font-size: 12px; }
+    .nav-right { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+    .btn-nav { padding: 6px 14px; border: 1px solid #ddd; border-radius: 8px; background: #fff; font-size: 13px; cursor: pointer; text-decoration: none; color: #111; }
+    main { max-width: 1300px; margin: 0 auto; padding: 1.5rem; }
+    h1 { font-size: 20px; font-weight: 600; margin-bottom: 6px; }
+    p.lead { font-size: 13px; color: #888; margin-bottom: 1.25rem; }
+
+    .card { background: #fff; border: 1px solid #e5e5e3; border-radius: 12px; padding: 1.25rem; margin-bottom: 1.25rem; }
+    .account-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .account-bar label { font-size: 13px; color: #666; }
+    .account-bar select { min-width: 220px; padding: 7px 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 14px; font-family: 'Inter', sans-serif; }
+
+    .filter-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .filter-bar label { font-size: 13px; color: #666; }
+    .filter-bar input[type=date] { padding: 6px 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 13px; font-family: 'Inter', sans-serif; }
+    .period-btn { padding: 6px 12px; border: 1px solid #ddd; border-radius: 8px; background: #fff; font-size: 13px; cursor: pointer; color: #555; }
+    .period-btn.active { background: #3483FA; color: #fff; border-color: #3483FA; }
+
+    .search-row { display: flex; gap: 8px; margin-bottom: 10px; }
+    .search-row input { flex: 1; padding: 8px 12px; border: 1px solid #ddd; border-radius: 8px; font-size: 13px; font-family: inherit; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th { padding: 10px 12px; text-align: left; color: #888; font-weight: 500; border-bottom: 1px solid #eee; background: #fafaf8; white-space: nowrap; font-size: 12px; }
+    th.num { text-align: right; }
+    td { padding: 10px 12px; border-bottom: 1px solid #f0f0ee; color: #333; vertical-align: top; }
+    td.num { text-align: right; white-space: nowrap; }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: #fafaf8; }
+    .rank-pill { display: inline-block; width: 28px; height: 28px; line-height: 28px; text-align: center; border-radius: 50%; font-size: 11px; font-weight: 600; background: #f0f0ee; color: #555; }
+    .rank-pill.gold { background: #FFE600; color: #7a6000; }
+    .rank-pill.silver { background: #e0e0e0; color: #555; }
+    .rank-pill.bronze { background: #f4d4b8; color: #8a4a1c; }
+    .empty { text-align: center; padding: 3rem; color: #aaa; font-size: 13px; }
+    .last-update { font-size: 12px; color: #aaa; margin-top: 1rem; text-align: right; }
+    .no-accounts { text-align: center; padding: 4rem; color: #888; font-size: 14px; }
+    .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid #ddd; border-top-color: #3483FA; border-radius: 50%; animation: spin 0.7s linear infinite; vertical-align: -2px; margin-right: 6px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .info-box { background: #e8f1fd; border: 1px solid #c0d8f5; border-radius: 8px; padding: 10px 14px; font-size: 13px; color: #185FA5; margin-bottom: 1rem; }
+    .info-box code { background: #fff; padding: 1px 5px; border-radius: 4px; font-family: monospace; font-size: 12px; }
+  </style>
+</head>
+<body>
+<nav>
+  <div class="nav-brand">
+    <div style="width:24px;height:24px;background:#FFE600;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;">ML</div>
+    Panel de ventas <span>Beta</span>
+  </div>
+  <div class="nav-right">
+    {% if 'dashboard' in perms %}<a href="/dashboard" class="btn-nav">Dashboard</a>{% endif %}
+    {% if 'costos' in perms %}<a href="/costos" class="btn-nav">Costos</a>{% endif %}
+    {% if 'envios_flex' in perms %}<a href="/costos/envios-flex" class="btn-nav">Envíos Flex</a>{% endif %}
+    {% if 'descuentos' in perms %}<a href="/descuentos" class="btn-nav">Descuentos</a>{% endif %}
+    <span style="color:#3483FA;font-weight:500;">Ranking</span>
+    <span style="color:#888;">{{ user.name }}</span>
+    {% if user.is_admin %}<a href="/admin" style="font-size:12px;color:#3483FA;text-decoration:none;">Admin</a>{% endif %}
+    <a href="/logout" class="btn-nav">Salir</a>
+  </div>
+</nav>
+
+<main>
+  <h1>Ranking por SKU</h1>
+  <p class="lead">
+    Agrupa todas las ventas pagadas del período por SKU. Margen ponderado = ganancia total / facturación total.
+    Ordenado por facturación de mayor a menor.
+  </p>
+
+  {% if accounts %}
+  <div class="card">
+    <div class="account-bar">
+      <label>Cuenta ML:</label>
+      <select id="account-select" onchange="onAccountChange()">
+        {% for acc in accounts %}
+        <option value="{{ acc.id }}">{{ acc.nickname }}</option>
+        {% endfor %}
+      </select>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="filter-bar">
+      <label>Período:</label>
+      <button class="period-btn" onclick="setPeriod('today', this)">Hoy</button>
+      <button class="period-btn" onclick="setPeriod('7d', this)">7 días</button>
+      <button class="period-btn active" onclick="setPeriod('30d', this)">30 días</button>
+      <button class="period-btn" onclick="setPeriod('90d', this)">90 días</button>
+      <button class="period-btn" onclick="setPeriod('365d', this)">1 año</button>
+      <span style="color:#ddd;">|</span>
+      <label>Desde:</label><input type="date" id="date-from" onchange="onDateChange()" />
+      <label>Hasta:</label><input type="date" id="date-to" onchange="onDateChange()" />
+      <button class="period-btn" onclick="loadRanking()" style="margin-left:auto;background:#3483FA;color:#fff;border-color:#3483FA;">
+        <span id="spinner" style="display:none;" class="spinner"></span>Actualizar
+      </button>
+    </div>
+  </div>
+
+  <div id="info-msg"></div>
+
+  <div class="card">
+    <div class="search-row">
+      <input type="text" id="filter-input" placeholder="Buscar por SKU..." oninput="renderTable()" />
+      <span id="count-label" style="font-size:13px;color:#888;align-self:center;"></span>
+    </div>
+    <div style="overflow-x:auto;">
+      <table>
+        <thead><tr>
+          <th>#</th>
+          <th>SKU</th>
+          <th class="num">Vtas.</th>
+          <th class="num">Unid.</th>
+          <th class="num">Facturación</th>
+          <th class="num">Comisión</th>
+          <th class="num">Ing. Envío</th>
+          <th class="num">Bonif.</th>
+          <th class="num">Costo Envío</th>
+          <th class="num">CMV</th>
+          <th class="num">Ganancia</th>
+          <th class="num">Margen</th>
+        </tr></thead>
+        <tbody id="ranking-tbody">
+          <tr><td colspan="12" class="empty">Cargando...</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="last-update" id="last-update"></p>
+  </div>
+
+  {% else %}
+  <div class="no-accounts">
+    <p style="font-size:18px;font-weight:500;margin-bottom:8px;">No tenés cuentas de MercadoLibre conectadas</p>
+    <p>Conectá una cuenta desde el <a href="/dashboard" style="color:#3483FA;">Dashboard</a>.</p>
+  </div>
+  {% endif %}
+</main>
+
+<script>
+  const fmt = n => '$' + Number(n).toLocaleString('es-AR', {minimumFractionDigits:2, maximumFractionDigits:2});
+  const fmtInt = n => Number(n).toLocaleString('es-AR');
+  let currentAccountId = document.getElementById('account-select')?.value;
+  let rankingCache = [];
+
+  function todayStr() { return new Intl.DateTimeFormat('sv', {timeZone:'America/Argentina/Buenos_Aires'}).format(new Date()); }
+  function addDays(d, n) { const dt = new Date(d + 'T12:00:00'); dt.setDate(dt.getDate()+n); return dt.toISOString().slice(0,10); }
+
+  function setPeriod(p, btn) {
+    document.querySelectorAll('.period-btn').forEach(b => b.classList.remove('active'));
+    if(btn) btn.classList.add('active');
+    const today = todayStr();
+    const df = document.getElementById('date-from');
+    const dt = document.getElementById('date-to');
+    if(p==='today'){ df.value=today; dt.value=today; }
+    else if(p==='7d'){ df.value=addDays(today,-6); dt.value=today; }
+    else if(p==='30d'){ df.value=addDays(today,-29); dt.value=today; }
+    else if(p==='90d'){ df.value=addDays(today,-89); dt.value=today; }
+    else if(p==='365d'){ df.value=addDays(today,-364); dt.value=today; }
+    loadRanking();
+  }
+
+  function onDateChange() {
+    document.querySelectorAll('.period-btn').forEach(b => b.classList.remove('active'));
+    loadRanking();
+  }
+  function onAccountChange() {
+    currentAccountId = document.getElementById('account-select').value;
+    loadRanking();
+  }
+
+  async function loadRanking() {
+    if(!currentAccountId) return;
+    const df = document.getElementById('date-from').value;
+    const dt = document.getElementById('date-to').value;
+    const spinner = document.getElementById('spinner');
+    const tbody = document.getElementById('ranking-tbody');
+    spinner.style.display = 'inline-block';
+    tbody.innerHTML = '<tr><td colspan="12" class="empty"><span class="spinner"></span> Calculando ranking...</td></tr>';
+    document.getElementById('info-msg').innerHTML = '';
+    try {
+      const params = new URLSearchParams();
+      if(df) params.set('date_from', df);
+      if(dt) params.set('date_to', dt);
+      const r = await fetch(`/api/ranking/${currentAccountId}?${params}`);
+      if(!r.ok) throw new Error('Error al cargar el ranking');
+      const data = await r.json();
+      rankingCache = data.items || [];
+      if(data.info) {
+        document.getElementById('info-msg').innerHTML = `<div class="info-box">${data.info}</div>`;
+      }
+      renderTable();
+      const ts = new Date().toLocaleString('es-AR',{dateStyle:'short',timeStyle:'short'});
+      document.getElementById('last-update').textContent = `Actualizado: ${ts}`;
+    } catch(e) {
+      tbody.innerHTML = `<tr><td colspan="12" class="empty" style="color:#c0392b;">Error: ${e.message}</td></tr>`;
+    } finally {
+      spinner.style.display = 'none';
+    }
+  }
+
+  function renderTable() {
+    const tbody = document.getElementById('ranking-tbody');
+    const filter = (document.getElementById('filter-input').value || '').trim().toUpperCase();
+    const items = filter
+      ? rankingCache.filter(it => (it.sku || '').toUpperCase().includes(filter))
+      : rankingCache;
+    document.getElementById('count-label').textContent =
+      `${items.length} de ${rankingCache.length} SKU${rankingCache.length===1?'':'s'}`;
+    if(!items.length) {
+      tbody.innerHTML = `<tr><td colspan="12" class="empty">${filter ? 'Sin resultados.' : 'Sin ventas en este período.'}</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = items.map((r, idx) => {
+      const realRank = rankingCache.indexOf(r) + 1;
+      let rankCls = '';
+      if(realRank === 1) rankCls = 'gold';
+      else if(realRank === 2) rankCls = 'silver';
+      else if(realRank === 3) rankCls = 'bronze';
+      const gColor = r.ganancia >= 0 ? '#1a8a5a' : '#c0392b';
+      const margenColor = r.margen_pct >= 0 ? '#1a8a5a' : '#c0392b';
+      return `
+        <tr>
+          <td><span class="rank-pill ${rankCls}">${realRank}</span></td>
+          <td><b>${r.sku}</b>${r.titulo ? `<br><span style="font-size:11px;color:#888;">${r.titulo.substring(0,60)}${r.titulo.length>60?'…':''}</span>` : ''}</td>
+          <td class="num">${fmtInt(r.ventas)}</td>
+          <td class="num">${fmtInt(r.unidades)}</td>
+          <td class="num"><b>${fmt(r.facturacion)}</b></td>
+          <td class="num" style="color:#c0392b;">${fmt(r.comision)}</td>
+          <td class="num" style="color:#1a8a5a;">${fmt(r.ingreso_envio)}</td>
+          <td class="num" style="color:#1a8a5a;">${fmt(r.bonificacion)}</td>
+          <td class="num" style="color:#c47a1e;">${fmt(r.envio)}</td>
+          <td class="num" style="color:${r.cmv>0?'#c0392b':'#aaa'};">${fmt(r.cmv)}</td>
+          <td class="num" style="color:${gColor};font-weight:600;">${fmt(r.ganancia)}</td>
+          <td class="num" style="color:${margenColor};font-weight:600;">${r.margen_pct.toFixed(1)}%</td>
+        </tr>
+      `;
+    }).join('');
+  }
+
+  // Init: período por default 30 días
+  if(currentAccountId) {
+    const today = todayStr();
+    document.getElementById('date-from').value = addDays(today, -29);
+    document.getElementById('date-to').value = today;
+    loadRanking();
+  }
+</script>
+</body>
+</html>

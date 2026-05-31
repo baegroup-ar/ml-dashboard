@@ -85,6 +85,7 @@
     {% if 'costos' in perms %}<a href="/costos" class="btn-nav">Costos</a>{% endif %}
     {% if 'envios_flex' in perms %}<a href="/costos/envios-flex" class="btn-nav">Envíos Flex</a>{% endif %}
     {% if 'descuentos' in perms %}<a href="/descuentos" class="btn-nav">Descuentos</a>{% endif %}
+    {% if 'ranking' in perms %}<a href="/ranking" class="btn-nav">Ranking</a>{% endif %}
     <span style="color:#888;">{{ user.name }}</span>
     {% if user.is_admin %}<a href="/admin" class="admin-link">Admin</a>{% endif %}
     <button class="btn-nav btn-blue" onclick="loadData(true)">
@@ -203,7 +204,7 @@
     'self_service': 'Flex',
     'xd_drop_off': 'Colecta',
     'drop_off': 'Colecta',
-    'cross_docking': 'Cross-docking',
+    'cross_docking': 'Colecta',
     'fulfillment': 'Full',
     'pickup': 'Retiro en persona',
     'mercadoenvios': 'Mercado Envíos',
