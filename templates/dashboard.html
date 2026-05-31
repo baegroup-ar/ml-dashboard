@@ -160,13 +160,23 @@
     </div>
 
     <div class="table-card">
-      <div class="table-header">
-        <h3>Ventas del período</h3>
-        <span id="orders-count"></span>
+      <div class="table-header" style="flex-direction:column;align-items:stretch;gap:10px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
+          <h3>Ventas del período</h3>
+          <span id="orders-count"></span>
+        </div>
+        {% if user.is_admin %}
+        <div style="display:flex;gap:8px;align-items:center;">
+          <input id="sku-filter" type="text" placeholder="Buscar por SKU... (sin importar la fecha)"
+                 style="flex:1;padding:7px 10px;border:1px solid #ddd;border-radius:8px;font-size:13px;font-family:inherit;"
+                 oninput="onSkuFilterChange()" />
+          <button onclick="clearSkuFilter()" id="btn-clear-sku" style="display:none;padding:6px 12px;border:1px solid #ddd;border-radius:8px;background:#fff;font-size:12px;cursor:pointer;">Limpiar</button>
+        </div>
+        {% endif %}
       </div>
       <div style="overflow-x:auto;">
         <table>
-          <thead><tr><th>Fecha</th><th>Hora</th><th>N° Venta</th><th>Producto</th><th>Unid.</th><th>Monto</th><th>Comisión</th><th>Ing. Envío</th><th>Bonif.</th><th>Costo Envío</th><th>CMV</th><th>Ganancia neta</th><th>Margen</th></tr></thead>
+          <thead><tr><th>Fecha</th><th>Hora</th><th>N° Venta</th><th>Producto</th>{% if user.is_admin %}<th>Envío</th>{% endif %}<th>Unid.</th><th>Monto</th><th>Comisión</th><th>Ing. Envío</th><th>Bonif.</th><th>Costo Envío</th><th>CMV</th><th>Ganancia neta</th><th>Margen</th></tr></thead>
           <tbody id="orders-tbody"></tbody>
         </table>
       </div>
@@ -186,14 +196,64 @@
 
 <script>
   const fmt = n => n == null ? '...' : '$' + Number(n).toLocaleString('es-AR', {minimumFractionDigits:2, maximumFractionDigits:2});
+  const IS_ADMIN = {{ 'true' if user and user.is_admin else 'false' }};
+  // Mapeo de logistic_type de ML a etiquetas legibles
+  const LOGISTIC_LABELS = {
+    'home_delivery': 'Flex',
+    'self_service': 'Flex',
+    'xd_drop_off': 'Colecta',
+    'drop_off': 'Colecta',
+    'cross_docking': 'Cross-docking',
+    'fulfillment': 'Full',
+    'pickup': 'Retiro en persona',
+    'mercadoenvios': 'Mercado Envíos',
+    'mercado_envios_lite': 'ME Lite',
+    'custom': 'Personalizado',
+    '': '—',
+  };
+  const LOGISTIC_COLORS = {
+    'home_delivery': '#1a8a5a', 'self_service': '#1a8a5a',  // verde
+    'xd_drop_off': '#3483FA', 'drop_off': '#3483FA',         // azul
+    'cross_docking': '#3483FA',
+    'fulfillment': '#7F77DD',                                // violeta
+    'pickup': '#c47a1e',                                     // naranja
+    'custom': '#888',
+  };
+  function logisticLabel(t) {
+    const lbl = LOGISTIC_LABELS[t || ''];
+    return lbl !== undefined ? lbl : (t || '—');
+  }
+  function logisticColor(t) { return LOGISTIC_COLORS[t || ''] || '#888'; }
+
   let currentAccountId = document.getElementById('account-select')?.value;
   let autoRefresh = null;
   let ordersCache = [];
+  let skuFilter = '';
   let currentPage = 1;
   const PAGE_SIZE = 50;
   let loadSeq = 0;
   // Períodos que ya se refrescaron contra ML en esta sesión.
   const refreshedRanges = new Set();
+
+  function applySkuFilter(orders) {
+    if(!skuFilter) return orders;
+    const f = skuFilter.toUpperCase();
+    return orders.filter(o => {
+      const items = o.items || [];
+      return items.some(i => (i.sku || '').toUpperCase().includes(f));
+    });
+  }
+
+  function onSkuFilterChange() {
+    skuFilter = (document.getElementById('sku-filter').value || '').trim();
+    document.getElementById('btn-clear-sku').style.display = skuFilter ? 'inline-block' : 'none';
+    currentPage = 1;
+    renderOrders(applySkuFilter(ordersCache));
+  }
+  function clearSkuFilter() {
+    document.getElementById('sku-filter').value = '';
+    onSkuFilterChange();
+  }
 
   // Fecha en timezone Argentina (UTC-3)
   function todayStr() { return new Intl.DateTimeFormat('sv', {timeZone:'America/Argentina/Buenos_Aires'}).format(new Date()); }
@@ -329,7 +389,7 @@
 
     currentPage = 1;
     ordersCache = data.orders;
-    renderOrders(data.orders);
+    renderOrders(applySkuFilter(data.orders));
     const total = data.orders.length;
     const canceladas = total - paidOrders.length;
     document.getElementById('orders-count').textContent = canceladas > 0
@@ -347,8 +407,10 @@
 
   function renderOrders(orders) {
     const tbody = document.getElementById('orders-tbody');
+    const totalCols = IS_ADMIN ? 14 : 13;
     if(!orders.length){
-      tbody.innerHTML='<tr><td colspan="13" style="text-align:center;color:#aaa;padding:2rem;">Sin ventas en este período.</td></tr>';
+      const msg = skuFilter ? `Sin ventas que coincidan con "${skuFilter}".` : 'Sin ventas en este período.';
+      tbody.innerHTML=`<tr><td colspan="${totalCols}" style="text-align:center;color:#aaa;padding:2rem;">${msg}</td></tr>`;
       document.getElementById('pagination').innerHTML='';
       return;
     }
@@ -365,6 +427,10 @@
       // Margen = ganancia / monto
       const pct = o.monto > 0 ? ((g/o.monto)*100).toFixed(1) : '0.0';
       const cancelPill = '';
+      // Celda del tipo de envío — solo para admin
+      const envioCell = IS_ADMIN
+        ? `<td style="font-size:11px;font-weight:500;color:${logisticColor(o.logistic_type)};white-space:nowrap;">${logisticLabel(o.logistic_type)}</td>`
+        : '';
       const commonCells = `
         <td style="text-align:center;">${units}</td>
         <td>${fmt(o.monto)}</td>
@@ -384,13 +450,17 @@
             <button id="btn-pack-${o.id}" onclick="togglePack('${o.id}')" style="background:none;border:none;cursor:pointer;font-size:11px;color:#3483FA;padding:0 4px 0 0;line-height:1;">▶</button>
             <span style="font-weight:500;">Paquete (${o.items.length} productos)</span>
           </td>
+          ${envioCell}
           ${commonCells}
         </tr>`);
+        // En las filas expandidas del paquete, dejamos el envío vacío
+        const packEnvioCell = IS_ADMIN ? '<td></td>' : '';
         o.items.forEach(item => {
           const label = item.sku ? `<b style="color:#333;">${item.sku}</b> — ${item.titulo}` : item.titulo;
           rows.push(`<tr class="pack-items-${o.id}" style="display:none;background:#f5f5f3;">
             <td colspan="3" style="border-bottom:1px solid #f0f0ee;"></td>
             <td style="padding-left:2rem;font-size:12px;color:#555;">${label}</td>
+            ${packEnvioCell}
             <td style="font-size:12px;text-align:center;">${item.cantidad||1}</td>
             <td style="font-size:12px;">${fmt(item.monto)}</td>
             <td style="font-size:12px;color:#c0392b;">${fmt(item.comision)}</td>
@@ -406,6 +476,7 @@
           <td style="color:#888;">${o.hora||'—'}</td>
           <td style="font-size:11px;color:#aaa;white-space:nowrap;">#${o.venta_id||o.id}${cancelPill}</td>
           <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${prod}">${prod}</td>
+          ${envioCell}
           ${commonCells}
         </tr>`);
       }
@@ -438,7 +509,7 @@
 
   function goPage(p) {
     currentPage = p;
-    renderOrders(ordersCache);
+    renderOrders(applySkuFilter(ordersCache));
     document.getElementById('orders-tbody').closest('.table-card').scrollIntoView({behavior:'smooth', block:'start'});
   }
 

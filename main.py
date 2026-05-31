@@ -31,7 +31,7 @@ MASTER_NAME = os.environ.get("MASTER_NAME", "Maestro")
 ML_AUTH_URL = "https://auth.mercadolibre.com.ar/authorization"
 ML_TOKEN_URL = "https://api.mercadolibre.com/oauth/token"
 ML_API_URL = "https://api.mercadolibre.com"
-SHIPPING_LOGIC_VERSION = "v33-no-coupon-in-ganancia"
+SHIPPING_LOGIC_VERSION = "v34-logistic-type-in-orders"
 
 serializer = URLSafeTimedSerializer(SECRET_KEY)
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -2843,6 +2843,7 @@ async def api_orders(request: Request, account_id: int,
             "bonificacion": round(bonificacion, 2),
             "coupon_amt": round(float((o.get("coupon") or {}).get("amount", 0)), 2),
             "cmv": round(order_cmv, 2),
+            "logistic_type": ship_info.get("logistic_type", "") if isinstance(ship_info, dict) else "",
             "estado": estado,
             "items": items,
         })
@@ -2863,6 +2864,7 @@ async def api_orders(request: Request, account_id: int,
                     "bonificacion": raw["bonificacion"],
                     "coupon_total": 0.0,
                     "cmv": 0.0,
+                    "logistic_type": raw.get("logistic_type", ""),
                     "estado": raw["estado"],
                     "is_pack": True, "items": [],
                 }
@@ -2893,6 +2895,7 @@ async def api_orders(request: Request, account_id: int,
                 "envio": raw["envio"],
                 "cmv": raw["cmv"],
                 "ganancia": ganancia,
+                "logistic_type": raw.get("logistic_type", ""),
                 "estado": raw["estado"],
                 "is_pack": False, "items": raw["items"],
             })
