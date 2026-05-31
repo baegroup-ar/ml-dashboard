@@ -31,7 +31,7 @@ MASTER_NAME = os.environ.get("MASTER_NAME", "Maestro")
 ML_AUTH_URL = "https://auth.mercadolibre.com.ar/authorization"
 ML_TOKEN_URL = "https://api.mercadolibre.com/oauth/token"
 ML_API_URL = "https://api.mercadolibre.com"
-SHIPPING_LOGIC_VERSION = "v35-unbounded-order-fetch"
+SHIPPING_LOGIC_VERSION = "v34-logistic-type-in-orders"
 
 serializer = URLSafeTimedSerializer(SECRET_KEY)
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -2789,12 +2789,25 @@ async def api_orders(request: Request, account_id: int,
 
     from_utc = datetime.strptime(df, "%Y-%m-%d") + timedelta(hours=3) - timedelta(hours=24)
     to_utc   = datetime.strptime(dt, "%Y-%m-%d") + timedelta(hours=27)  # 23:59:59 AR = ~03:00 UTC día siguiente
-    search_from_utc = from_utc
-    search_to_utc = to_utc
+    search_params: dict = {
+        "seller": acc["ml_user_id"],
+        "sort": "date_desc",
+        "limit": 50,
+        "order.date_created.from": from_utc.strftime("%Y-%m-%dT%H:%M:%S.000-00:00"),
+        "order.date_created.to":   to_utc.strftime("%Y-%m-%dT%H:%M:%S.000-00:00"),
+    }
 
-    # /orders/search no pagina de forma confiable por encima de 1000 resultados.
-    # Si una ventana llega a ese umbral, la dividimos por fecha/hora hasta
-    # poder traer todas las ventas del rango solicitado.
+    # Particionar el rango en chunks de 30 días para esquivar el tope de
+    # 1000 órdenes por búsqueda paginada que tiene /orders/search.
+    df_d = datetime.strptime(df, "%Y-%m-%d").date()
+    dt_d = datetime.strptime(dt, "%Y-%m-%d").date()
+    date_chunks: list = []
+    cur = df_d
+    while cur <= dt_d:
+        chunk_end = min(cur + timedelta(days=29), dt_d)
+        date_chunks.append((cur, chunk_end))
+        cur = chunk_end + timedelta(days=1)
+
     base_search = {
         "seller": acc["ml_user_id"],
         "sort": "date_desc",
@@ -2802,45 +2815,37 @@ async def api_orders(request: Request, account_id: int,
     }
 
     async with httpx.AsyncClient(timeout=120) as client:
-        async def fetch_window(start_dt: datetime, end_dt: datetime, depth: int = 0):
-            window_params = {
+        async def fetch_chunk(start_d, end_d):
+            from_utc = datetime.combine(start_d, datetime.min.time()) + timedelta(hours=3) - timedelta(hours=24)
+            to_utc = datetime.combine(end_d, datetime.min.time()) + timedelta(hours=27)
+            chunk_params = {
                 **base_search,
-                "order.date_created.from": start_dt.strftime("%Y-%m-%dT%H:%M:%S.000-00:00"),
-                "order.date_created.to": end_dt.strftime("%Y-%m-%dT%H:%M:%S.000-00:00"),
+                "order.date_created.from": from_utc.strftime("%Y-%m-%dT%H:%M:%S.000-00:00"),
+                "order.date_created.to":   to_utc.strftime("%Y-%m-%dT%H:%M:%S.000-00:00"),
             }
-            r = await client.get(f"{ML_API_URL}/orders/search", headers=headers, params={**window_params, "offset": 0})
+            r = await client.get(f"{ML_API_URL}/orders/search", headers=headers, params={**chunk_params, "offset": 0})
             if r.status_code != 200:
                 return []
             data = r.json()
-            total = data.get("paging", {}).get("total", 0)
-            if total >= 1000 and (end_dt - start_dt).total_seconds() > 60 and depth < 24:
-                mid_dt = start_dt + ((end_dt - start_dt) / 2)
-                left, right = await asyncio.gather(
-                    fetch_window(start_dt, mid_dt, depth + 1),
-                    fetch_window(mid_dt, end_dt, depth + 1),
-                )
-                return left + right
-
             results = list(data.get("results", []))
+            total = min(data.get("paging", {}).get("total", 0), 1000)  # cap duro de ML
             offsets = list(range(50, total, 50))
             if offsets:
                 sem = asyncio.Semaphore(8)
-
                 async def get_page(off):
                     async with sem:
-                        rp = await client.get(
-                            f"{ML_API_URL}/orders/search",
-                            headers=headers,
-                            params={**window_params, "offset": off},
-                        )
+                        rp = await client.get(f"{ML_API_URL}/orders/search", headers=headers, params={**chunk_params, "offset": off})
                         return rp.json().get("results", []) if rp.status_code == 200 else []
-
                 pages = await asyncio.gather(*[get_page(off) for off in offsets])
                 for page in pages:
                     results.extend(page)
             return results
 
-        all_results = await fetch_window(search_from_utc, search_to_utc)
+        # Chunks en paralelo. Para 1 año = 12 chunks corriendo a la vez.
+        chunk_results = await asyncio.gather(*[fetch_chunk(s, e) for s, e in date_chunks])
+        all_results: list = []
+        for results in chunk_results:
+            all_results.extend(results)
 
         # Deduplicar (por si una orden cae en el solapamiento de 24h entre chunks).
         seen: set = set()
