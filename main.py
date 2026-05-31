@@ -2840,13 +2840,7 @@ async def api_orders(request: Request, account_id: int,
                     results.extend(page)
             return results
 
-        try:
-            all_results = await fetch_window(search_from_utc, search_to_utc)
-        except Exception as e:
-            print(f"[orders] Error fetching orders account={account_id} {df}..{dt}: {e}")
-            if cached_orders:
-                return build_dashboard_payload(cached_orders, details_complete=True)
-            raise HTTPException(502, "No se pudo actualizar ventas desde MercadoLibre")
+        all_results = await fetch_window(search_from_utc, search_to_utc)
 
         # Deduplicar (por si una orden cae en el solapamiento de 24h entre chunks).
         seen: set = set()
@@ -2874,14 +2868,10 @@ async def api_orders(request: Request, account_id: int,
             uncached = [sid for sid in unique_sids if sid not in cost_cache]
 
             if uncached:
-                ship_sem = asyncio.Semaphore(20)
+                ship_sem = asyncio.Semaphore(40)
                 async def fetch_ship(sid):
                     async with ship_sem:
-                        try:
-                            return sid, await get_shipping_cost(client, sid, headers)
-                        except Exception as e:
-                            print(f"[orders] Error shipping {sid}: {e}")
-                            return sid, {"seller": 0.0, "buyer": 0.0, "bonificacion": 0.0}
+                        return sid, await get_shipping_cost(client, sid, headers)
                 new_shipping_costs = dict(await asyncio.gather(*[fetch_ship(sid) for sid in uncached]))
                 cost_cache.update(new_shipping_costs)
 
