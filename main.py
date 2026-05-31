@@ -2375,10 +2375,18 @@ async def api_promociones_list(request: Request, account_id: int):
         batches = [all_item_ids[i:i+20] for i in range(0, len(all_item_ids), 20)]
         outcomes = await asyncio.gather(*[fetch_batch(b) for b in batches])
 
-        # Buscar en varios campos posibles donde ML expone promos
-        # según el tipo (offers / discounts / marketplace_campaigns / etc.)
+        # Campos donde ML realmente expone promociones de marketing.
+        # IMPORTANTE: NO incluir sale_terms ni attributes — ahí ML guarda
+        # cosas como 'Tiempo de garantía', 'Tipo de garantía', 'Campaña de
+        # cuotas', etc. que son atributos del producto, NO promos.
+        # promotion_decorations también queda fuera (son decoraciones
+        # visuales, no promos accionables).
         offer_fields = ["offers", "discounts", "marketplace_campaigns",
-                        "promotions", "promotion_decorations", "sale_terms"]
+                        "promotions", "deal_ids", "promotional_offers"]
+        # Atributos típicos de sale_terms para descartar falsos positivos
+        # (por si alguno se cuela con name='Tiempo de garantía' etc).
+        SALE_TERM_HINTS = {"value_id", "value_name", "value_struct",
+                           "value_type", "values"}
         for data, err in outcomes:
             if err:
                 if len(debug) < 8:
@@ -2403,9 +2411,26 @@ async def api_promociones_list(request: Request, account_id: int):
                 for offer in collected:
                     if not isinstance(offer, dict):
                         continue
+                    # Descartar entradas que parezcan sale_terms
+                    # (warranty_time, warranty_type, etc.) — tienen
+                    # value_id/value_name característicos.
+                    if any(k in offer for k in SALE_TERM_HINTS):
+                        continue
                     pid = (offer.get("id") or offer.get("promotion_id")
                            or offer.get("campaign_id"))
                     if not pid:
+                        continue
+                    # Descartar IDs que son slugs de atributos en mayúsculas
+                    # (ej. 'WARRANTY_TIME', 'WARRANTY_TYPE') — los promo
+                    # IDs típicamente son numéricos o slugs distintos.
+                    if isinstance(pid, str) and pid.isupper() and "_" in pid:
+                        continue
+                    # Una promo real suele tener al menos uno de:
+                    # status / start_date / finish_date / type
+                    has_promo_shape = any(offer.get(k) for k in
+                                          ("status", "start_date", "finish_date",
+                                           "type", "promotion_type", "deal_id"))
+                    if not has_promo_shape:
                         continue
                     if pid not in promos:
                         promos[pid] = {
