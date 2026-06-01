@@ -2704,20 +2704,30 @@ async def api_promociones_items(
     def _extract_min_discount_pct(promo_item: dict, original_price) -> Optional[float]:
         """ML expone el mínimo aceptable de varias formas según el tipo de
         promo. Intentamos en orden:
-          1. `min_discount_percentage` directo
+          1. `min_discount_percentage` (o aliases) directo
           2. `suggested_price` / `top_deal_price` / `min_price` →
              calculamos el % vs `original_price`
           3. dentro de `offers[]`, buscamos el `new_price` más alto
-             aceptable y derivamos el %"""
-        # Caso 1: % explícito
-        for k in ("min_discount_percentage", "min_discount_pct",
-                  "minimum_discount_percentage"):
+             aceptable y derivamos el %
+          4. dentro de `benefits` / `prices` / `discount_breakdown`
+             buscamos campos anidados"""
+        # Caso 1: % explícito en distintos nombres
+        for k in (
+            "min_discount_percentage", "min_discount_pct",
+            "minimum_discount_percentage",
+            "seller_min_discount_percentage",
+            "min_seller_discount_percentage",
+            "nudge_meli_percentage",
+            "discount_percentage",
+        ):
             v = promo_item.get(k)
             if v is not None:
                 try:
-                    return round(float(v), 2)
+                    fv = float(v)
                 except (TypeError, ValueError):
-                    pass
+                    continue
+                if fv > 0:
+                    return round(fv, 2)
         if not original_price:
             return None
         try:
@@ -2728,7 +2738,7 @@ async def api_promociones_items(
             return None
         # Caso 2: precio sugerido / top_deal / min_price
         for k in ("suggested_price", "top_deal_price", "min_price",
-                  "minimum_price"):
+                  "minimum_price", "seller_min_top_deal_price"):
             v = promo_item.get(k)
             if v is None:
                 continue
@@ -2736,7 +2746,7 @@ async def api_promociones_items(
                 fv = float(v)
             except (TypeError, ValueError):
                 continue
-            if fv > 0:
+            if 0 < fv < op:
                 return round((1 - fv / op) * 100, 2)
         # Caso 3: dentro del array offers[]
         offers = promo_item.get("offers")
@@ -2751,8 +2761,23 @@ async def api_promociones_items(
                     fv = float(v)
                 except (TypeError, ValueError):
                     continue
-                if fv > 0:
+                if 0 < fv < op:
                     return round((1 - fv / op) * 100, 2)
+        # Caso 4: campos anidados (discount_breakdown, prices, benefits)
+        for nest_key in ("discount_breakdown", "prices", "benefits",
+                         "nudge", "rebate"):
+            nested = promo_item.get(nest_key)
+            if isinstance(nested, dict):
+                for k in ("min_discount_percentage", "minimum_percentage",
+                          "min_percentage", "min_seller_discount_percentage"):
+                    v = nested.get(k)
+                    if v is not None:
+                        try:
+                            fv = float(v)
+                        except (TypeError, ValueError):
+                            continue
+                        if fv > 0:
+                            return round(fv, 2)
         return None
 
     items_out = []
@@ -2794,8 +2819,11 @@ async def api_promociones_items(
         # Validar contra mínimo (sumando aporte ML — el mínimo es del
         # descuento visible al comprador)
         below_min = False
-        if min_discount_pct is not None and final_pct < min_discount_pct:
-            below_min = True
+        gap_pct = None
+        if min_discount_pct is not None:
+            gap_pct = round(max(0.0, min_discount_pct - final_pct), 2)
+            if final_pct < min_discount_pct:
+                below_min = True
         final_price = None
         if original_price:
             try:
@@ -2813,13 +2841,29 @@ async def api_promociones_items(
             "seller_discount_pct": seller_pct,
             "ml_contribution_pct": ml_contribution_pct,
             "final_discount_pct": round(final_pct, 2),
+            "gap_pct": gap_pct,
             "final_price": final_price,
             "below_min": below_min,
             "ml_contribution": ml_contribution_pct,
             "status": promo_item.get("status"),
             "promotion_type": promo_item.get("promotion_type") or promo_item.get("type"),
         })
-    return {"items": items_out, "discount_base_count": len(discount_map)}
+    # Para diagnóstico: devolvemos también las keys crudas del primer
+    # item que devolvió ML. Así podemos detectar nombres de campos no
+    # contemplados (en especial el "mínimo ML" para promos SMART).
+    raw_sample = None
+    if all_results:
+        first = all_results[0]
+        if isinstance(first, dict):
+            raw_sample = {
+                "keys": sorted(list(first.keys())),
+                "sample": {k: first[k] for k in list(first.keys())[:30]},
+            }
+    return {
+        "items": items_out,
+        "discount_base_count": len(discount_map),
+        "raw_sample": raw_sample,
+    }
 
 
 @app.post("/api/promociones/{account_id}/{promotion_id}/apply")
