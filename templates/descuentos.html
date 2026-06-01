@@ -166,6 +166,7 @@
     <div class="row" style="margin-bottom:10px;">
       <button onclick="loadPromoItems('candidate')" id="btn-preview-cand">Items elegibles</button>
       <button onclick="loadPromoItems('started')" id="btn-preview-started">Items participando</button>
+      <a href="#" id="btn-debug-json" onclick="openDebugJson(event)" style="margin-left:auto;font-size:11px;color:#888;text-decoration:underline;cursor:pointer;">Ver JSON crudo (debug)</a>
       <span id="preview-status" style="font-size:12px;color:#888;"></span>
     </div>
     <div class="summary" id="preview-summary"></div>
@@ -458,6 +459,18 @@
     document.getElementById('preview-summary').innerHTML = '';
     loadPromoItems('candidate');
     setTimeout(() => document.getElementById('preview-card').scrollIntoView({behavior:'smooth'}), 50);
+  }
+
+  function openDebugJson(ev) {
+    if(ev) ev.preventDefault();
+    if(!currentPromo || !currentAccountId) {
+      alert('Seleccioná una promo primero.');
+      return;
+    }
+    const params = new URLSearchParams({ status: currentStatus || 'candidate' });
+    if(currentPromo.type) params.set('promotion_type', currentPromo.type);
+    const url = `/api/promociones/${currentAccountId}/${encodeURIComponent(currentPromo.id)}/items?${params}`;
+    window.open(url, '_blank');
   }
 
   async function loadPromoItems(status) {
