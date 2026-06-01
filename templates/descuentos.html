@@ -177,7 +177,7 @@
           <th>SKU</th>
           <th class="num">Precio actual</th>
           <th class="num" title="Lo que vos ponés (de tu base de descuentos cargada)">Tu desc.</th>
-          <th class="num" title="Descuento total sugerido por ML — se descompone como 'lo que pide ML al vendedor + lo que aporta ML'. Cuando ML no aporta, sólo aparece la sugerencia del vendedor.">Descuento ML</th>
+          <th class="num" title="% que aporta Mercado Libre cuando la promo es co-fondeada (te lo regala, no sale de tu margen)">Aporte ML</th>
           <th class="num" title="Cuánto te falta agregar a tu descuento para llegar al mínimo que pide ML (sin contar el aporte de ML)">Diferencia</th>
           <th class="num">Precio final</th>
           <th>Estado</th>
@@ -503,23 +503,12 @@
       else estado = '<span class="badge ok">Listo para aplicar</span>';
       const checked = (!sinDescuento && !debajo) ? 'checked' : '';
 
-      // Descuento ML: muestra el total sugerido por ML descompuesto en
-      //   "total% (vendedor% + aporte%)" cuando ML co-fondea, o
-      //   "total%" cuando no hay aporte. Si no hay sugerencia para
-      //   ese item, "—".
+      // Aporte ML: sólo el % que co-fondea Mercado Libre (no sale de
+      // tu margen). Si no hay aporte para este item, "—".
       const aporte = it.ml_contribution_pct;
-      const sellerSugg = it.seller_suggested_pct;
-      let descMlCell;
-      if(sellerSugg != null && aporte) {
-        const total = Math.round((sellerSugg + aporte) * 10) / 10;
-        descMlCell = `<b>${total}%</b> <span style="font-size:11px;color:#6f3499;">(${sellerSugg}% + ${aporte}%)</span>`;
-      } else if(sellerSugg != null) {
-        descMlCell = `<b>${sellerSugg}%</b>`;
-      } else if(aporte) {
-        descMlCell = `<span style="color:#6f3499;font-weight:600;">+${aporte}% ML</span>`;
-      } else {
-        descMlCell = '<span style="color:#bbb;">—</span>';
-      }
+      const aporteCell = aporte
+        ? `<span style="color:#6f3499;font-weight:600;">+${aporte}%</span>`
+        : '<span style="color:#bbb;">—</span>';
 
       // Diferencia: cuánto le falta al vendedor para llegar al mínimo
       let diffCell = '<span style="color:#bbb;">—</span>';
@@ -537,7 +526,7 @@
           <td><b>${it.sku || '—'}</b></td>
           <td class="num">${fmt(it.original_price)}</td>
           <td class="num">${it.loaded_discount_pct != null ? it.loaded_discount_pct + '%' : '0%'}</td>
-          <td class="num">${descMlCell}</td>
+          <td class="num">${aporteCell}</td>
           <td class="num">${diffCell}</td>
           <td class="num" style="color:#1a8a5a;">${fmt(it.final_price)}</td>
           <td>${estado}</td>
