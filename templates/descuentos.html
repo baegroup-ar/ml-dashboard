@@ -174,16 +174,15 @@
           <th style="width:30px;"><input type="checkbox" id="select-all" onchange="toggleAll(this)" /></th>
           <th>MLA</th>
           <th>SKU</th>
-          <th>Título</th>
           <th class="num">Precio actual</th>
-          <th class="num">Mínimo ML</th>
-          <th class="num">Tu desc.</th>
-          <th class="num">Desc. final</th>
+          <th class="num" title="Descuento mínimo aceptable que pide ML para participar de esta promo">Mínimo ML</th>
+          <th class="num" title="Lo que vos ponés (de tu base de descuentos cargada)">Tu desc.</th>
+          <th class="num" title="Descuento total que ve el comprador = tu desc. + aporte de ML (si la promo es co-fondeada)">Desc. final</th>
           <th class="num">Precio final</th>
           <th>Estado</th>
         </tr></thead>
         <tbody id="preview-tbody">
-          <tr><td colspan="10" class="empty">Seleccioná una promo para ver los items.</td></tr>
+          <tr><td colspan="9" class="empty">Seleccioná una promo para ver los items.</td></tr>
         </tbody>
       </table>
     </div>
@@ -428,7 +427,7 @@
     currentStatus = status;
     const tbody = document.getElementById('preview-tbody');
     const statusEl = document.getElementById('preview-status');
-    tbody.innerHTML = '<tr><td colspan="10" class="empty">Cargando items...</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9" class="empty">Cargando items...</td></tr>';
     statusEl.textContent = '';
     try {
       const params = new URLSearchParams({ status });
@@ -447,7 +446,7 @@
   function renderPreview() {
     const tbody = document.getElementById('preview-tbody');
     if(!currentItems.length) {
-      tbody.innerHTML = `<tr><td colspan="10" class="empty">No hay items en este estado.</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="9" class="empty">No hay items en este estado.</td></tr>`;
       document.getElementById('preview-summary').innerHTML = '';
       document.getElementById('btn-apply').disabled = true;
       return;
@@ -464,18 +463,19 @@
       if(sinDescuento) estado = '<span class="badge gray">Sin descuento cargado</span>';
       else if(debajo) estado = `<span class="badge warn">Debajo del mínimo (${it.min_discount_pct}%)</span>`;
       else estado = '<span class="badge ok">Listo para aplicar</span>';
-      if(it.ml_contribution) estado += ' <span class="badge purple">+ Aporte ML</span>';
+      const aporte = it.ml_contribution_pct;
+      if(aporte) estado += ` <span class="badge purple" title="ML co-fondea ${aporte}%">+ ${aporte}% ML</span>`;
       const checked = (!sinDescuento && !debajo) ? 'checked' : '';
+      const finalDesc = `${it.final_discount_pct}%${aporte ? ` <span style="font-size:11px;color:#6f3499;">(${it.seller_discount_pct||0}% + ${aporte}%)</span>` : ''}`;
       return `
-        <tr class="${rowCls}" data-idx="${idx}">
+        <tr class="${rowCls}" data-idx="${idx}" title="${(it.title || '').replace(/"/g, '&quot;')}">
           <td><input type="checkbox" class="row-check" ${checked} onchange="updateSelectedCount()" /></td>
           <td style="font-family:monospace;font-size:12px;">${it.mla || '—'}</td>
           <td><b>${it.sku || '—'}</b></td>
-          <td style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${it.title || ''}">${it.title || '—'}</td>
           <td class="num">${fmt(it.original_price)}</td>
           <td class="num" style="color:#888;">${it.min_discount_pct != null ? it.min_discount_pct + '%' : '—'}</td>
           <td class="num">${it.loaded_discount_pct != null ? it.loaded_discount_pct + '%' : '0%'}</td>
-          <td class="num"><b>${it.final_discount_pct}%</b></td>
+          <td class="num"><b>${finalDesc}</b></td>
           <td class="num" style="color:#1a8a5a;">${fmt(it.final_price)}</td>
           <td>${estado}</td>
         </tr>

@@ -2648,13 +2648,15 @@ async def api_promociones_items(
             if offset >= total or len(results) < 50:
                 break
 
-        # Enriquecer con SKU y nombre desde /items/{id}?attributes=...
+        # Enriquecer con SKU y nombre desde /items/{id}. Sin filtrar
+        # attributes para que vengan también `attributes[]` y `variations[]`,
+        # donde muchas publicaciones tienen el SELLER_SKU.
         async def enrich(item_id):
             try:
                 ri = await client.get(
                     f"{ML_API_URL}/items/{item_id}",
                     headers=headers,
-                    params={"attributes": "id,title,seller_sku,price,available_quantity"},
+                    params={"attributes": "id,title,seller_sku,price,available_quantity,attributes,variations"},
                 )
                 if ri.status_code == 200:
                     return ri.json()
@@ -2669,30 +2671,128 @@ async def api_promociones_items(
                 return await enrich(iid)
         enriched = await asyncio.gather(*[fetch(i) for i in ids])
 
+    def _extract_sku(info: Optional[dict]) -> str:
+        """Saca el SELLER_SKU del item. ML lo expone en distintos lugares:
+        - `seller_sku` top-level (legacy)
+        - `attributes[]` con id='SELLER_SKU' (la mayoría de las publicaciones
+          actuales lo guardan acá)
+        - `variations[].seller_sku` o `variations[].attributes[]` con
+          id='SELLER_SKU' (para items con variantes)."""
+        if not info:
+            return ""
+        sku = (info.get("seller_sku") or "").strip()
+        if sku:
+            return sku
+        for attr in (info.get("attributes") or []):
+            if isinstance(attr, dict) and attr.get("id") in ("SELLER_SKU", "SELLER_CUSTOM_FIELD"):
+                v = (attr.get("value_name") or attr.get("value") or "").strip()
+                if v:
+                    return v
+        for var in (info.get("variations") or []):
+            if not isinstance(var, dict):
+                continue
+            v = (var.get("seller_sku") or "").strip()
+            if v:
+                return v
+            for attr in (var.get("attributes") or []):
+                if isinstance(attr, dict) and attr.get("id") in ("SELLER_SKU", "SELLER_CUSTOM_FIELD"):
+                    vv = (attr.get("value_name") or attr.get("value") or "").strip()
+                    if vv:
+                        return vv
+        return ""
+
+    def _extract_min_discount_pct(promo_item: dict, original_price) -> Optional[float]:
+        """ML expone el mínimo aceptable de varias formas según el tipo de
+        promo. Intentamos en orden:
+          1. `min_discount_percentage` directo
+          2. `suggested_price` / `top_deal_price` / `min_price` →
+             calculamos el % vs `original_price`
+          3. dentro de `offers[]`, buscamos el `new_price` más alto
+             aceptable y derivamos el %"""
+        # Caso 1: % explícito
+        for k in ("min_discount_percentage", "min_discount_pct",
+                  "minimum_discount_percentage"):
+            v = promo_item.get(k)
+            if v is not None:
+                try:
+                    return round(float(v), 2)
+                except (TypeError, ValueError):
+                    pass
+        if not original_price:
+            return None
+        try:
+            op = float(original_price)
+        except (TypeError, ValueError):
+            return None
+        if op <= 0:
+            return None
+        # Caso 2: precio sugerido / top_deal / min_price
+        for k in ("suggested_price", "top_deal_price", "min_price",
+                  "minimum_price"):
+            v = promo_item.get(k)
+            if v is None:
+                continue
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                continue
+            if fv > 0:
+                return round((1 - fv / op) * 100, 2)
+        # Caso 3: dentro del array offers[]
+        offers = promo_item.get("offers")
+        if isinstance(offers, list):
+            for off in offers:
+                if not isinstance(off, dict):
+                    continue
+                v = off.get("new_price") or off.get("price")
+                if v is None:
+                    continue
+                try:
+                    fv = float(v)
+                except (TypeError, ValueError):
+                    continue
+                if fv > 0:
+                    return round((1 - fv / op) * 100, 2)
+        return None
+
     items_out = []
     for promo_item, info in zip(all_results, enriched):
         item_id = promo_item.get("id")
-        original_price = promo_item.get("original_price") or (info.get("price") if info else None)
-        suggested_price = promo_item.get("suggested_price")
-        # Mínimo sugerido viene como precio sugerido. Calculamos % equivalente.
-        min_discount_pct = None
-        if original_price and suggested_price:
-            try:
-                min_discount_pct = round((1 - float(suggested_price) / float(original_price)) * 100, 2)
-            except Exception:
-                min_discount_pct = None
+        original_price = (promo_item.get("original_price")
+                          or promo_item.get("price")
+                          or (info.get("price") if info else None))
+        min_discount_pct = _extract_min_discount_pct(promo_item, original_price)
         title = ""
-        sku_from_ml = ""
+        sku_from_ml = _extract_sku(info)
         if info:
-            sku_from_ml = (info.get("seller_sku") or "").strip()
             title = info.get("title") or ""
         # Cruce DIRECTO por MLA (item_id). Sin fallback de SKU/cuotas.
         match = discount_map.get((item_id or "").upper())
         loaded_pct = match["pct"] if match else None
         sku_base = match["sku"] if match else ""
         sku = sku_base or sku_from_ml
-        final_pct = loaded_pct if loaded_pct is not None else 0.0
-        # Validar contra mínimo
+        # `loaded_pct` es lo que el vendedor pone (lo que se va a enviar
+        # a ML). `final_pct` es el descuento total que ve el comprador
+        # (tu % + aporte ML).
+        seller_pct = loaded_pct if loaded_pct is not None else 0.0
+        # Detectar aporte ML co-fondeado (sólo aplica a marketplace
+        # campaigns / smart). Lo expresamos siempre como porcentaje.
+        ml_contribution_pct = None
+        meli_pct = promo_item.get("meli_percentage")
+        if meli_pct is not None:
+            try:
+                ml_contribution_pct = float(meli_pct)
+            except (TypeError, ValueError):
+                ml_contribution_pct = None
+        elif promo_item.get("meli_amount") and original_price:
+            try:
+                ml_contribution_pct = round(
+                    float(promo_item["meli_amount"]) / float(original_price) * 100, 2)
+            except (TypeError, ValueError):
+                ml_contribution_pct = None
+        final_pct = seller_pct + (ml_contribution_pct or 0.0)
+        # Validar contra mínimo (sumando aporte ML — el mínimo es del
+        # descuento visible al comprador)
         below_min = False
         if min_discount_pct is not None and final_pct < min_discount_pct:
             below_min = True
@@ -2702,21 +2802,20 @@ async def api_promociones_items(
                 final_price = round(float(original_price) * (1 - final_pct / 100.0), 2)
             except Exception:
                 final_price = None
-        # Detectar aporte ML compartido
-        ml_contribution = promo_item.get("meli_percentage") or promo_item.get("meli_amount")
         items_out.append({
             "item_id": item_id,
             "mla": item_id,
             "sku": sku,
             "title": title,
             "original_price": float(original_price) if original_price else None,
-            "suggested_price": float(suggested_price) if suggested_price else None,
             "min_discount_pct": min_discount_pct,
             "loaded_discount_pct": loaded_pct,
-            "final_discount_pct": final_pct,
+            "seller_discount_pct": seller_pct,
+            "ml_contribution_pct": ml_contribution_pct,
+            "final_discount_pct": round(final_pct, 2),
             "final_price": final_price,
             "below_min": below_min,
-            "ml_contribution": ml_contribution,
+            "ml_contribution": ml_contribution_pct,
             "status": promo_item.get("status"),
             "promotion_type": promo_item.get("promotion_type") or promo_item.get("type"),
         })
