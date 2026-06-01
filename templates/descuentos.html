@@ -177,7 +177,7 @@
           <th>SKU</th>
           <th class="num">Precio actual</th>
           <th class="num" title="Lo que vos ponés (de tu base de descuentos cargada)">Tu desc.</th>
-          <th class="num" title="Descuento que pide ML. Si la promo es co-fondeada se muestra como 'X% + Y%' (lo que ponés vos + lo que pone ML)">Descuento ML</th>
+          <th class="num" title="Descuento total sugerido por ML — se descompone como 'lo que pide ML al vendedor + lo que aporta ML'. Cuando ML no aporta, sólo aparece la sugerencia del vendedor.">Descuento ML</th>
           <th class="num" title="Cuánto te falta agregar a tu descuento para llegar al mínimo que pide ML (sin contar el aporte de ML)">Diferencia</th>
           <th class="num">Precio final</th>
           <th>Estado</th>
@@ -503,19 +503,18 @@
       else estado = '<span class="badge ok">Listo para aplicar</span>';
       const checked = (!sinDescuento && !debajo) ? 'checked' : '';
 
-      // Descuento ML: lo que ML pide del vendedor + lo que aporta Meli.
-      // Formato según los datos disponibles:
-      //   - tiene min y aporte:   "5% + 2.7%"
-      //   - solo min:             "5%"
-      //   - solo aporte:          "+2.7% ML"
-      //   - nada:                 "—"
-      const minPct = it.min_discount_pct;
+      // Descuento ML: muestra el total sugerido por ML descompuesto en
+      //   "total% (vendedor% + aporte%)" cuando ML co-fondea, o
+      //   "total%" cuando no hay aporte. Si no hay sugerencia para
+      //   ese item, "—".
       const aporte = it.ml_contribution_pct;
+      const sellerSugg = it.seller_suggested_pct;
       let descMlCell;
-      if(minPct != null && aporte) {
-        descMlCell = `<b>${minPct}%</b> <span style="color:#6f3499;font-weight:600;">+ ${aporte}%</span>`;
-      } else if(minPct != null) {
-        descMlCell = `<b>${minPct}%</b>`;
+      if(sellerSugg != null && aporte) {
+        const total = Math.round((sellerSugg + aporte) * 10) / 10;
+        descMlCell = `<b>${total}%</b> <span style="font-size:11px;color:#6f3499;">(${sellerSugg}% + ${aporte}%)</span>`;
+      } else if(sellerSugg != null) {
+        descMlCell = `<b>${sellerSugg}%</b>`;
       } else if(aporte) {
         descMlCell = `<span style="color:#6f3499;font-weight:600;">+${aporte}% ML</span>`;
       } else {
