@@ -2664,12 +2664,60 @@ async def api_promociones_items(
                 pass
             return None
 
+        # Detalle completo de la promo por item — el endpoint que lista los
+        # items de la promo viene minimalista (sin top_deal_price ni
+        # discount_percentage). El endpoint por item devuelve TODAS las
+        # promos disponibles para el item, así que filtramos por el
+        # promotion_id actual y mergeamos los campos faltantes.
+        async def fetch_item_promo_detail(item_id):
+            try:
+                ri = await client.get(
+                    f"{ML_API_URL}/seller-promotions/items/{item_id}",
+                    headers=headers,
+                    params={"app_version": "v2"},
+                )
+                if ri.status_code != 200:
+                    return None
+                data = ri.json()
+                # La respuesta puede ser un array de promos o un dict con results
+                if isinstance(data, dict):
+                    offers = data.get("results") or data.get("offers") or []
+                    if not offers and (data.get("id") or data.get("promotion_id")):
+                        offers = [data]
+                elif isinstance(data, list):
+                    offers = data
+                else:
+                    return None
+                # Buscar la promo que coincide con promotion_id
+                for off in offers:
+                    if not isinstance(off, dict):
+                        continue
+                    pid = (off.get("id") or off.get("promotion_id")
+                           or off.get("offer_id"))
+                    if str(pid) == str(promotion_id):
+                        return off
+                # Si no matchea exact, devolver la primera con shape de promo
+                for off in offers:
+                    if isinstance(off, dict) and (
+                        off.get("status") or off.get("type")
+                        or off.get("promotion_type")):
+                        return off
+            except Exception:
+                pass
+            return None
+
         ids = [it.get("id") for it in all_results if it.get("id")]
         sem = asyncio.Semaphore(15)
         async def fetch(iid):
             async with sem:
                 return await enrich(iid)
-        enriched = await asyncio.gather(*[fetch(i) for i in ids])
+        async def fetch_detail(iid):
+            async with sem:
+                return await fetch_item_promo_detail(iid)
+        enriched, promo_details = await asyncio.gather(
+            asyncio.gather(*[fetch(i) for i in ids]),
+            asyncio.gather(*[fetch_detail(i) for i in ids]),
+        )
 
     def _extract_sku(info: Optional[dict]) -> str:
         """Saca el SELLER_SKU del item. ML lo expone en distintos lugares:
@@ -2781,12 +2829,20 @@ async def api_promociones_items(
         return None
 
     items_out = []
-    for promo_item, info in zip(all_results, enriched):
+    for promo_item, info, detail in zip(all_results, enriched, promo_details):
         item_id = promo_item.get("id")
-        original_price = (promo_item.get("original_price")
-                          or promo_item.get("price")
+        # Mergeamos detail (per-item endpoint) sobre promo_item — detail
+        # suele traer top_deal_price, discount_percentage y meli_percentage
+        # que faltan en la respuesta de listado.
+        merged = dict(promo_item or {})
+        if isinstance(detail, dict):
+            for k, v in detail.items():
+                if merged.get(k) in (None, "", 0) and v not in (None, ""):
+                    merged[k] = v
+        original_price = (merged.get("original_price")
+                          or merged.get("price")
                           or (info.get("price") if info else None))
-        min_discount_pct = _extract_min_discount_pct(promo_item, original_price)
+        min_discount_pct = _extract_min_discount_pct(merged, original_price)
         title = ""
         sku_from_ml = _extract_sku(info)
         if info:
@@ -2797,32 +2853,33 @@ async def api_promociones_items(
         sku_base = match["sku"] if match else ""
         sku = sku_base or sku_from_ml
         # `loaded_pct` es lo que el vendedor pone (lo que se va a enviar
-        # a ML). `final_pct` es el descuento total que ve el comprador
-        # (tu % + aporte ML).
+        # a ML).
         seller_pct = loaded_pct if loaded_pct is not None else 0.0
         # Detectar aporte ML co-fondeado (sólo aplica a marketplace
         # campaigns / smart). Lo expresamos siempre como porcentaje.
         ml_contribution_pct = None
-        meli_pct = promo_item.get("meli_percentage")
+        meli_pct = merged.get("meli_percentage")
         if meli_pct is not None:
             try:
                 ml_contribution_pct = float(meli_pct)
             except (TypeError, ValueError):
                 ml_contribution_pct = None
-        elif promo_item.get("meli_amount") and original_price:
+        elif merged.get("meli_amount") and original_price:
             try:
                 ml_contribution_pct = round(
-                    float(promo_item["meli_amount"]) / float(original_price) * 100, 2)
+                    float(merged["meli_amount"]) / float(original_price) * 100, 2)
             except (TypeError, ValueError):
                 ml_contribution_pct = None
+        # `final_pct` (descuento total que ve el comprador) = tu % + aporte ML
         final_pct = seller_pct + (ml_contribution_pct or 0.0)
-        # Validar contra mínimo (sumando aporte ML — el mínimo es del
-        # descuento visible al comprador)
+        # GAP: cuánto le falta al VENDEDOR para llegar al mínimo de ML.
+        # NO descontamos el aporte ML — el mínimo es lo que ML te pide a
+        # vos. El aporte es plus.
         below_min = False
         gap_pct = None
         if min_discount_pct is not None:
-            gap_pct = round(max(0.0, min_discount_pct - final_pct), 2)
-            if final_pct < min_discount_pct:
+            gap_pct = round(max(0.0, min_discount_pct - seller_pct), 2)
+            if seller_pct < min_discount_pct:
                 below_min = True
         final_price = None
         if original_price:
@@ -2845,20 +2902,24 @@ async def api_promociones_items(
             "final_price": final_price,
             "below_min": below_min,
             "ml_contribution": ml_contribution_pct,
-            "status": promo_item.get("status"),
-            "promotion_type": promo_item.get("promotion_type") or promo_item.get("type"),
+            "status": merged.get("status"),
+            "promotion_type": merged.get("promotion_type") or merged.get("type"),
         })
-    # Para diagnóstico: devolvemos también las keys crudas del primer
-    # item que devolvió ML. Así podemos detectar nombres de campos no
-    # contemplados (en especial el "mínimo ML" para promos SMART).
+    # Para diagnóstico: devolvemos las keys del primer item que devolvió
+    # ML tanto en la lista como en el endpoint per-item. Así detectamos
+    # nombres de campos no contemplados.
     raw_sample = None
     if all_results:
-        first = all_results[0]
-        if isinstance(first, dict):
-            raw_sample = {
-                "keys": sorted(list(first.keys())),
-                "sample": {k: first[k] for k in list(first.keys())[:30]},
-            }
+        first_list = all_results[0]
+        first_detail = promo_details[0] if promo_details else None
+        raw_sample = {
+            "list_keys": sorted(list(first_list.keys())) if isinstance(first_list, dict) else None,
+            "list_sample": ({k: first_list[k] for k in list(first_list.keys())[:30]}
+                            if isinstance(first_list, dict) else None),
+            "detail_keys": sorted(list(first_detail.keys())) if isinstance(first_detail, dict) else None,
+            "detail_sample": ({k: first_detail[k] for k in list(first_detail.keys())[:30]}
+                              if isinstance(first_detail, dict) else None),
+        }
     return {
         "items": items_out,
         "discount_base_count": len(discount_map),
