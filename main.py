@@ -2513,99 +2513,76 @@ async def api_promociones_list(request: Request, account_id: int):
         if not all_item_ids:
             return {"items": [], "errors": debug or ["No se encontraron publicaciones activas en la cuenta"]}
 
-        # Paso 2: en batches de 20, traer los items con el attribute `offers`.
+        # Paso 2: iterar cada item con /seller-promotions/items/{id} —
+        # este endpoint devuelve TODAS las promos disponibles para ese
+        # item (incluso si todavía no participa, en status="candidate").
+        # Es la forma en que ML expone marketplace campaigns, deals,
+        # price_discount, etc. (la misma que usa Zentor).
         promos: dict = {}
-        sem = asyncio.Semaphore(8)
+        sem = asyncio.Semaphore(10)
 
-        async def fetch_batch(batch_ids):
+        async def fetch_item_promos(item_id):
             async with sem:
                 try:
-                    # Sin filtrar attributes para que vengan todos los campos
-                    # donde ML pueda exponer promos: offers, discounts,
-                    # marketplace_campaigns, sale_terms, etc.
                     r = await client.get(
-                        f"{ML_API_URL}/items",
+                        f"{ML_API_URL}/seller-promotions/items/{item_id}",
                         headers=headers,
-                        params={"ids": ",".join(batch_ids)},
+                        params={"app_version": "v2"},
                     )
                     if r.status_code != 200:
-                        return None, f"items batch: HTTP {r.status_code}: {r.text[:200]}"
-                    return r.json(), None
+                        return item_id, None, f"seller-promotions/items/{item_id}: HTTP {r.status_code}: {r.text[:120]}"
+                    return item_id, r.json(), None
                 except Exception as e:
-                    return None, f"items batch: {str(e)[:200]}"
+                    return item_id, None, f"seller-promotions/items/{item_id}: {str(e)[:120]}"
 
-        batches = [all_item_ids[i:i+20] for i in range(0, len(all_item_ids), 20)]
-        outcomes = await asyncio.gather(*[fetch_batch(b) for b in batches])
+        outcomes = await asyncio.gather(*[fetch_item_promos(i) for i in all_item_ids])
 
-        # Campos donde ML realmente expone promociones de marketing.
-        # IMPORTANTE: NO incluir sale_terms ni attributes — ahí ML guarda
-        # cosas como 'Tiempo de garantía', 'Tipo de garantía', 'Campaña de
-        # cuotas', etc. que son atributos del producto, NO promos.
-        # promotion_decorations también queda fuera (son decoraciones
-        # visuales, no promos accionables).
-        offer_fields = ["offers", "discounts", "marketplace_campaigns",
-                        "promotions", "deal_ids", "promotional_offers"]
-        # Atributos típicos de sale_terms para descartar falsos positivos
-        # (por si alguno se cuela con name='Tiempo de garantía' etc).
-        SALE_TERM_HINTS = {"value_id", "value_name", "value_struct",
-                           "value_type", "values"}
-        for data, err in outcomes:
+        for item_id, data, err in outcomes:
             if err:
                 if len(debug) < 8:
                     debug.append(err)
                 continue
-            if not isinstance(data, list):
+            # La respuesta puede venir como lista o como dict con results
+            if isinstance(data, dict):
+                offers = data.get("results") or data.get("offers") or []
+                # A veces el dict raíz ES una promo individual
+                if not offers and (data.get("id") or data.get("promotion_id")):
+                    offers = [data]
+            elif isinstance(data, list):
+                offers = data
+            else:
                 continue
-            for entry in data:
-                if not isinstance(entry, dict):
+
+            for offer in offers:
+                if not isinstance(offer, dict):
                     continue
-                body = entry.get("body") if entry.get("code") == 200 else None
-                if not body:
+                pid = (offer.get("id") or offer.get("promotion_id")
+                       or offer.get("offer_id") or offer.get("campaign_id"))
+                if not pid:
                     continue
-                # Recolectar offers/promos de TODOS los campos posibles
-                collected = []
-                for fld in offer_fields:
-                    v = body.get(fld)
-                    if isinstance(v, list):
-                        collected.extend(v)
-                    elif isinstance(v, dict):
-                        collected.append(v)
-                for offer in collected:
-                    if not isinstance(offer, dict):
-                        continue
-                    # Descartar entradas que parezcan sale_terms
-                    # (warranty_time, warranty_type, etc.) — tienen
-                    # value_id/value_name característicos.
-                    if any(k in offer for k in SALE_TERM_HINTS):
-                        continue
-                    pid = (offer.get("id") or offer.get("promotion_id")
-                           or offer.get("campaign_id"))
-                    if not pid:
-                        continue
-                    # Descartar IDs que son slugs de atributos en mayúsculas
-                    # (ej. 'WARRANTY_TIME', 'WARRANTY_TYPE') — los promo
-                    # IDs típicamente son numéricos o slugs distintos.
-                    if isinstance(pid, str) and pid.isupper() and "_" in pid:
-                        continue
-                    # Una promo real suele tener al menos uno de:
-                    # status / start_date / finish_date / type
-                    has_promo_shape = any(offer.get(k) for k in
-                                          ("status", "start_date", "finish_date",
-                                           "type", "promotion_type", "deal_id"))
-                    if not has_promo_shape:
-                        continue
-                    if pid not in promos:
-                        promos[pid] = {
-                            "id": pid,
-                            "name": offer.get("name") or offer.get("description") or offer.get("title") or pid,
-                            "type": offer.get("type") or offer.get("promotion_type") or offer.get("campaign_type"),
-                            "status": offer.get("status"),
-                            "start_date": offer.get("start_date"),
-                            "finish_date": offer.get("finish_date"),
-                            "deadline_date": offer.get("deadline_date"),
-                            "applicable_items": 0,
-                        }
-                    promos[pid]["applicable_items"] += 1
+                ptype = (offer.get("type") or offer.get("promotion_type")
+                         or offer.get("campaign_type"))
+                pstatus = offer.get("status")
+                if pid not in promos:
+                    promos[pid] = {
+                        "id": pid,
+                        "name": (offer.get("name") or offer.get("description")
+                                 or offer.get("title") or str(pid)),
+                        "type": ptype,
+                        "status": pstatus,
+                        "start_date": offer.get("start_date"),
+                        "finish_date": offer.get("finish_date"),
+                        "deadline_date": offer.get("deadline_date"),
+                        "applicable_items": 0,
+                        "participating_items": 0,
+                    }
+                promos[pid]["applicable_items"] += 1
+                # Si el item ya participa (no es candidato), contarlo aparte
+                if pstatus and pstatus.lower() not in ("candidate", "pending"):
+                    promos[pid]["participating_items"] += 1
+                # Si en una pasada llega el status "started", priorizarlo
+                if pstatus == "started" and promos[pid].get("status") != "started":
+                    promos[pid]["status"] = "started"
 
     items = list(promos.values())
     items.sort(key=lambda x: (x.get("status") != "started", -x.get("applicable_items", 0), (x.get("name") or "").lower()))
@@ -3598,6 +3575,12 @@ async def debug_promos(request: Request, account_ref: str):
         # Probar también el item específico para ver sus offers/promos
         if first_item_id:
             extra = [
+                (f"seller-promotions/items/{first_item_id} (v2)",
+                 f"{ML_API_URL}/seller-promotions/items/{first_item_id}",
+                 {"app_version": "v2"}),
+                (f"marketplace/seller-promotions/items/{first_item_id} (header version v2)",
+                 f"{ML_API_URL}/marketplace/seller-promotions/items/{first_item_id}",
+                 {"user_id": seller_id}),
                 (f"items/{first_item_id} (attributes=offers)",
                  f"{ML_API_URL}/items/{first_item_id}",
                  {"attributes": "offers"}),
