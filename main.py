@@ -3161,10 +3161,16 @@ async def api_promociones_apply(
             # (no `deal_id` como decían los docs viejos de Traditional
             # Campaigns). Si no se manda, ML responde
             # 400 "Promotion id is required".
+            # Para DEAL/SELLER_CAMPAIGN/PRICE_DISCOUNT mandamos
+            # BOTH `deal_price` y `top_deal_price` con el mismo valor —
+            # ML acepta cualquiera según versión / campaña y si manda
+            # solo uno que no reconoce defaultea a 0 (lo que dispara
+            # DISCOUNT_GT_ALLOWED por descuento de 100%).
             if ptype == "DEAL":
                 payload = {
                     "promotion_id": promotion_id,
                     "promotion_type": "DEAL",
+                    "deal_price": deal_price,
                     "top_deal_price": deal_price,
                 }
             elif ptype in ("SMART", "MARKETPLACE_CAMPAIGN"):
@@ -3178,6 +3184,7 @@ async def api_promociones_apply(
                     "promotion_id": promotion_id,
                     "promotion_type": "SELLER_CAMPAIGN",
                     "deal_price": deal_price,
+                    "top_deal_price": deal_price,
                 }
             elif ptype == "PRICE_DISCOUNT":
                 payload = {
@@ -3192,6 +3199,7 @@ async def api_promociones_apply(
                     "promotion_id": promotion_id,
                     "promotion_type": ptype,
                     "deal_price": deal_price,
+                    "top_deal_price": deal_price,
                 }
             # Limpiamos campos None
             payload = {k: v for k, v in payload.items() if v is not None}
