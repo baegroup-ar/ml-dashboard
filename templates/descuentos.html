@@ -126,7 +126,7 @@
     </div>
 
     <div style="margin-top:1rem;">
-      <input type="text" id="filter-input" placeholder="Filtrar por MLA o SKU..." oninput="renderBase()" style="padding:6px 10px;border:1px solid #ddd;border-radius:8px;font-size:13px;width:300px;" />
+      <input type="text" id="filter-input" placeholder="Filtrar por MLA o SKU..." oninput="onFilterChange()" style="padding:6px 10px;border:1px solid #ddd;border-radius:8px;font-size:13px;width:300px;" />
       <div style="overflow-x:auto;margin-top:8px;">
         <table>
           <thead><tr>
@@ -137,6 +137,7 @@
           </tbody>
         </table>
       </div>
+      <div id="base-pager" style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:10px;flex-wrap:wrap;"></div>
     </div>
   </div>
 
@@ -218,12 +219,19 @@
 
 <script>
   const fmt = n => n == null ? '—' : '$' + Number(n).toLocaleString('es-AR', {minimumFractionDigits:2, maximumFractionDigits:2});
+  const BASE_PAGE_SIZE = 15;
   let currentAccountId = document.getElementById('account-select')?.value;
   let baseItems = [];
+  let basePage = 1;
   let promos = [];
   let currentPromo = null;
   let currentItems = [];
   let currentStatus = 'candidate';
+
+  function onFilterChange() {
+    basePage = 1;
+    renderBase();
+  }
 
   function onAccountChange() {
     currentAccountId = document.getElementById('account-select').value;
@@ -250,6 +258,7 @@
 
   function renderBase() {
     const tbody = document.getElementById('base-tbody');
+    const pager = document.getElementById('base-pager');
     const filter = (document.getElementById('filter-input').value || '').trim().toUpperCase();
     const items = filter
       ? baseItems.filter(it => (it.mla||'').toUpperCase().includes(filter) || (it.sku||'').toUpperCase().includes(filter))
@@ -257,9 +266,15 @@
     document.getElementById('count-label').textContent = `${baseItems.length} MLA${baseItems.length===1?'':'s'} cargados`;
     if(!items.length) {
       tbody.innerHTML = `<tr><td colspan="5" class="empty">${filter ? 'Sin resultados.' : 'Todavía no hay descuentos cargados.'}</td></tr>`;
+      pager.innerHTML = '';
       return;
     }
-    tbody.innerHTML = items.map(it => {
+    const totalPages = Math.max(1, Math.ceil(items.length / BASE_PAGE_SIZE));
+    if(basePage > totalPages) basePage = totalPages;
+    if(basePage < 1) basePage = 1;
+    const start = (basePage - 1) * BASE_PAGE_SIZE;
+    const pageItems = items.slice(start, start + BASE_PAGE_SIZE);
+    tbody.innerHTML = pageItems.map(it => {
       const mlaEsc = (it.mla||'').replace(/'/g, "\\'");
       const skuEsc = (it.sku||'').replace(/'/g, "\\'");
       const rowId = (it.mla||'').replace(/[^a-zA-Z0-9_]/g, '_');
@@ -275,6 +290,29 @@
           </td>
         </tr>`;
     }).join('');
+    // Paginador
+    const from = start + 1;
+    const to = start + pageItems.length;
+    const info = `${from}–${to} de ${items.length}${filter ? ` (filtrado de ${baseItems.length})` : ''}`;
+    const prevDisabled = basePage <= 1 ? 'disabled' : '';
+    const nextDisabled = basePage >= totalPages ? 'disabled' : '';
+    pager.innerHTML = `
+      <span style="font-size:12px;color:#888;">${info}</span>
+      <div style="display:flex;align-items:center;gap:6px;">
+        <button onclick="goBasePage(1)" ${prevDisabled} style="padding:5px 10px;border:1px solid #ddd;border-radius:6px;background:#fff;font-size:12px;cursor:pointer;">«</button>
+        <button onclick="goBasePage(${basePage-1})" ${prevDisabled} style="padding:5px 10px;border:1px solid #ddd;border-radius:6px;background:#fff;font-size:12px;cursor:pointer;">‹ Anterior</button>
+        <span style="font-size:12px;color:#555;padding:0 6px;">Página ${basePage} de ${totalPages}</span>
+        <button onclick="goBasePage(${basePage+1})" ${nextDisabled} style="padding:5px 10px;border:1px solid #ddd;border-radius:6px;background:#fff;font-size:12px;cursor:pointer;">Siguiente ›</button>
+        <button onclick="goBasePage(${totalPages})" ${nextDisabled} style="padding:5px 10px;border:1px solid #ddd;border-radius:6px;background:#fff;font-size:12px;cursor:pointer;">»</button>
+      </div>
+    `;
+  }
+
+  function goBasePage(n) {
+    basePage = n;
+    renderBase();
+    // scroll suave al inicio de la tabla
+    document.getElementById('base-tbody').closest('table').scrollIntoView({behavior:'smooth', block:'start'});
   }
 
   function startEdit(rowId, mla, sku, pct) {
