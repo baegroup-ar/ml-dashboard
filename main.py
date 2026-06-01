@@ -2836,19 +2836,22 @@ async def api_promociones_items(
     def _extract_seller_suggested_pct(
         promo_item: dict, original_price, ml_contribution_pct
     ) -> Optional[float]:
-        """% que ML sugiere/pide AL VENDEDOR (su parte, sin contar
-        aporte ML). Dos caminos según el tipo de promo:
+        """% MÍNIMO que ML pide al VENDEDOR para participar de la promo.
+        NO la recomendación / `suggested_discounted_price` — ese campo
+        es el descuento que ML te sugiere para vender mejor, no el
+        umbral de aceptación. La data real que necesitamos es:
 
         1. SMART/co-fondeada: `seller_percentage` (lo que ML pide al
            vendedor). Ya viene neto, no hay que restar el aporte.
-        2. DEAL/SELLER_CAMPAIGN: `suggested_discounted_price` es el
-           precio final total — convertimos a % y restamos el aporte
-           ML si lo hubiese.
+        2. DEAL/SELLER_CAMPAIGN: `max_discounted_price` (precio MÁS
+           ALTO permitido con descuento) → convertir a % vs original
+           da el descuento MÍNIMO aceptable. Si ML aporta algo, lo
+           restamos para quedarnos con la parte del vendedor.
         """
         # 1. Campo directo del vendedor (SMART)
         for k in ("seller_percentage", "seller_min_discount_percentage",
-                  "seller_discount_percentage",
                   "min_seller_discount_percentage",
+                  "seller_discount_percentage",
                   "nudge_seller_percentage"):
             v = promo_item.get(k)
             if v is not None:
@@ -2858,28 +2861,28 @@ async def api_promociones_items(
                     continue
                 if fv > 0:
                     return round(fv, 2)
-        # 2. Precios sugeridos (DEAL): % total → restar aporte ML
+
         def _as_seller_part(total_pct):
             if total_pct is None or total_pct <= 0:
                 return None
             if ml_contribution_pct and ml_contribution_pct > 0:
                 return round(max(0.0, total_pct - ml_contribution_pct), 2)
             return round(total_pct, 2)
-        for k in ("suggested_discounted_price", "suggested_price",
-                  "recommended_discounted_price"):
+
+        # 2. DEAL: precios → % MÍNIMOS (max_discounted_price = precio
+        # más alto con descuento = mínimo descuento)
+        for k in ("max_discounted_price", "top_deal_price",
+                  "minimum_price", "min_price"):
             pct = _pct_from_price(promo_item.get(k), original_price)
             res = _as_seller_part(pct)
             if res is not None and res > 0:
                 return res
-        # 3. % totales explícitos → restar aporte
-        for k in ("suggested_discount_percentage",
-                  "discount_percentage",
+        # 3. % mínimos explícitos
+        for k in ("min_discount_percentage", "min_discount_pct",
+                  "minimum_discount_percentage",
                   "default_discount_percentage",
                   "expected_discount_percentage",
-                  "target_discount_percentage",
-                  "recommended_discount_percentage",
-                  "nudge_total_percentage",
-                  "total_discount_percentage"):
+                  "target_discount_percentage"):
             v = promo_item.get(k)
             if v is not None:
                 try:
@@ -2897,7 +2900,8 @@ async def api_promociones_items(
                     if not isinstance(off, dict):
                         continue
                     # Seller directo dentro del offer
-                    for pk in ("seller_percentage", "seller_discount_percentage"):
+                    for pk in ("seller_percentage", "seller_discount_percentage",
+                               "min_seller_discount_percentage"):
                         v = off.get(pk)
                         if v is not None:
                             try:
@@ -2906,16 +2910,15 @@ async def api_promociones_items(
                                 continue
                             if fv > 0:
                                 return round(fv, 2)
-                    # Precios → totales
-                    for pk in ("suggested_discounted_price", "new_price",
-                               "recommended_price"):
+                    # Precios mínimos → totales
+                    for pk in ("max_discounted_price", "top_deal_price"):
                         pct = _pct_from_price(off.get(pk), original_price)
                         res = _as_seller_part(pct)
                         if res is not None and res > 0:
                             return res
-                    # Totales explícitos
-                    for pk in ("suggested_discount_percentage",
-                               "discount_percentage", "target_percentage"):
+                    # % mínimos explícitos
+                    for pk in ("min_discount_percentage",
+                               "minimum_discount_percentage"):
                         v = off.get(pk)
                         if v is not None:
                             try:
@@ -2929,7 +2932,8 @@ async def api_promociones_items(
         for nest_key in ("nudge", "discount_breakdown", "rebate", "prices"):
             nested = promo_item.get(nest_key)
             if isinstance(nested, dict):
-                for k in ("seller_percentage", "seller_discount_percentage"):
+                for k in ("seller_percentage", "seller_discount_percentage",
+                          "min_seller_discount_percentage"):
                     v = nested.get(k)
                     if v is not None:
                         try:
@@ -2938,9 +2942,9 @@ async def api_promociones_items(
                             continue
                         if fv > 0:
                             return round(fv, 2)
-                for k in ("suggested_discount_percentage",
-                          "discount_percentage", "target_percentage",
-                          "suggested_percentage", "total_percentage"):
+                for k in ("min_discount_percentage",
+                          "minimum_discount_percentage",
+                          "minimum_percentage", "min_percentage"):
                     v = nested.get(k)
                     if v is not None:
                         try:
