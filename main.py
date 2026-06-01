@@ -3156,11 +3156,14 @@ async def api_promociones_apply(
                     deal_price = round(float(original_price) * (1 - pct / 100.0), 2)
                 except (TypeError, ValueError):
                     deal_price = None
-            # Cada tipo de promo tiene su shape de payload distinta
-            # (ML rechaza con 400 si mandás campos de más o de menos).
+            # Cada tipo de promo tiene su shape de payload distinta.
+            # IMPORTANTE: la API v2 unificada usa SIEMPRE `promotion_id`
+            # (no `deal_id` como decían los docs viejos de Traditional
+            # Campaigns). Si no se manda, ML responde
+            # 400 "Promotion id is required".
             if ptype == "DEAL":
                 payload = {
-                    "deal_id": promotion_id,
+                    "promotion_id": promotion_id,
                     "promotion_type": "DEAL",
                     "top_deal_price": deal_price,
                 }
