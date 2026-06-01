@@ -176,6 +176,15 @@
     loadRanking();
   }
 
+  async function fetchRanking(df, dt) {
+    const params = new URLSearchParams();
+    if(df) params.set('date_from', df);
+    if(dt) params.set('date_to', dt);
+    const r = await fetch(`/api/ranking/${currentAccountId}?${params}`);
+    if(!r.ok) throw new Error('Error al cargar el ranking');
+    return await r.json();
+  }
+
   async function loadRanking() {
     if(!currentAccountId) return;
     const df = document.getElementById('date-from').value;
@@ -186,14 +195,25 @@
     tbody.innerHTML = '<tr><td colspan="12" class="empty"><span class="spinner"></span> Calculando ranking...</td></tr>';
     document.getElementById('info-msg').innerHTML = '';
     try {
-      const params = new URLSearchParams();
-      if(df) params.set('date_from', df);
-      if(dt) params.set('date_to', dt);
-      const r = await fetch(`/api/ranking/${currentAccountId}?${params}`);
-      if(!r.ok) throw new Error('Error al cargar el ranking');
-      const data = await r.json();
+      let data = await fetchRanking(df, dt);
+
+      // Si no hay caché para esta cuenta + período, lo populamos
+      // automáticamente llamando al endpoint de órdenes y volvemos a
+      // pedir el ranking. Así no requiere abrir el Dashboard primero.
+      if(!data.items?.length && data.info) {
+        tbody.innerHTML = '<tr><td colspan="12" class="empty"><span class="spinner"></span> Trayendo ventas de ML para esta cuenta (puede demorar 30s-2min en la primera carga)...</td></tr>';
+        const orderParams = new URLSearchParams();
+        if(df) orderParams.set('date_from', df);
+        if(dt) orderParams.set('date_to', dt);
+        orderParams.set('refresh', '1');
+        const ordersResp = await fetch(`/api/orders/${currentAccountId}?${orderParams}`);
+        if(!ordersResp.ok) throw new Error('No pude traer las ventas de esta cuenta');
+        // Esperar a que se complete y refetchear ranking
+        data = await fetchRanking(df, dt);
+      }
+
       rankingCache = data.items || [];
-      if(data.info) {
+      if(data.info && !rankingCache.length) {
         document.getElementById('info-msg').innerHTML = `<div class="info-box">${data.info}</div>`;
       }
       renderTable();
@@ -229,7 +249,7 @@
       return `
         <tr>
           <td><span class="rank-pill ${rankCls}">${realRank}</span></td>
-          <td><b>${r.sku}</b>${r.titulo ? `<br><span style="font-size:11px;color:#888;">${r.titulo.substring(0,60)}${r.titulo.length>60?'…':''}</span>` : ''}</td>
+          <td><b>${r.sku}</b></td>
           <td class="num">${fmtInt(r.ventas)}</td>
           <td class="num">${fmtInt(r.unidades)}</td>
           <td class="num"><b>${fmt(r.facturacion)}</b></td>
