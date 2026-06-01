@@ -503,31 +503,44 @@
       else estado = '<span class="badge ok">Listo para aplicar</span>';
       const checked = (!sinDescuento && !debajo) ? 'checked' : '';
 
-      // Descuento ML: muestra el total sugerido por ML descompuesto en
-      //   "total% (vendedor% + aporte%)" cuando ML co-fondea, o
-      //   "total%" cuando no hay aporte. Si no hay sugerencia para
-      //   ese item, "—".
+      // Descuento ML: muestra el DESCUENTO TOTAL (lo que ve el comprador)
+      // con el desglose entre "parte del vendedor" y "aporte ML". El
+      // "vendedor%" es la sugerencia explícita de ML si la tenemos
+      // (seller_suggested_pct); si no, usamos lo que tengas cargado
+      // (loaded_discount_pct) — así el desglose siempre se ve cuando
+      // ML co-fondea algo.
       const aporte = it.ml_contribution_pct;
       const sellerSugg = it.seller_suggested_pct;
+      const loaded = it.loaded_discount_pct;
+      // Parte del vendedor para mostrar en el desglose
+      const sellerPart = sellerSugg != null ? sellerSugg
+                        : (loaded != null ? loaded : null);
       let descMlCell;
-      if(sellerSugg != null && aporte) {
-        const total = Math.round((sellerSugg + aporte) * 10) / 10;
-        descMlCell = `<b>${total}%</b> <span style="font-size:11px;color:#6f3499;">(${sellerSugg}% + ${aporte}%)</span>`;
+      if(sellerPart != null && aporte) {
+        const total = Math.round((sellerPart + aporte) * 10) / 10;
+        descMlCell = `<b>${total}%</b> <span style="font-size:11px;color:#6f3499;">(${sellerPart}% + ${aporte}%)</span>`;
       } else if(sellerSugg != null) {
         descMlCell = `<b>${sellerSugg}%</b>`;
       } else if(aporte) {
+        // Sólo aporte ML, sin parte del vendedor todavía
         descMlCell = `<span style="color:#6f3499;font-weight:600;">+${aporte}% ML</span>`;
       } else {
         descMlCell = '<span style="color:#bbb;">—</span>';
       }
 
-      // Diferencia: cuánto le falta al vendedor para llegar al mínimo
+      // Diferencia: cuánto le falta al vendedor para llegar al objetivo
+      // de ML. Si tenemos mínimo, usamos eso; si no, comparamos contra
+      // la sugerencia de ML para el vendedor.
+      const target = it.min_discount_pct != null ? it.min_discount_pct
+                    : (sellerSugg != null ? sellerSugg : null);
+      const currentLoaded = loaded != null ? loaded : 0;
       let diffCell = '<span style="color:#bbb;">—</span>';
-      if(it.gap_pct != null) {
-        if(it.gap_pct === 0) {
+      if(target != null) {
+        const gap = Math.max(0, Math.round((target - currentLoaded) * 10) / 10);
+        if(gap === 0) {
           diffCell = '<span style="color:#1a8a5a;font-weight:600;">OK</span>';
         } else {
-          diffCell = `<span style="color:#c47a1e;font-weight:600;">+${it.gap_pct}%</span>`;
+          diffCell = `<span style="color:#c47a1e;font-weight:600;">+${gap}%</span>`;
         }
       }
       return `
