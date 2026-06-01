@@ -2625,6 +2625,27 @@ async def api_promociones_items(
         params["promotion_type"] = promotion_type
 
     async with httpx.AsyncClient(timeout=60) as client:
+        # Detalle global de la promo (acá ML expone el default discount
+        # para DEAL/SELLER_CAMPAIGN, las fechas, el meli_percentage para
+        # SMART, etc.). Lo usamos como fallback cuando no aparece por
+        # item.
+        promo_global: dict = {}
+        try:
+            promo_url_params = {"app_version": "v2"}
+            if promotion_type:
+                promo_url_params["promotion_type"] = promotion_type
+            rg = await client.get(
+                f"{ML_API_URL}/seller-promotions/promotions/{promotion_id}",
+                headers=headers,
+                params=promo_url_params,
+            )
+            if rg.status_code == 200:
+                gdata = rg.json()
+                if isinstance(gdata, dict):
+                    promo_global = gdata
+        except Exception:
+            promo_global = {}
+
         all_results = []
         offset = 0
         while True:
@@ -2767,6 +2788,11 @@ async def api_promociones_items(
             "min_seller_discount_percentage",
             "nudge_meli_percentage",
             "discount_percentage",
+            "default_discount_percentage",
+            "seller_discount_percentage",
+            "expected_discount_percentage",
+            "target_discount_percentage",
+            "rebate_percentage",
         ):
             v = promo_item.get(k)
             if v is not None:
@@ -2828,6 +2854,22 @@ async def api_promociones_items(
                             return round(fv, 2)
         return None
 
+    # Fallback global: mínimo a nivel promo (DIA DEL PADRE trae el 5%
+    # por default acá, en `discount_percentage` o aliases).
+    default_min_pct = _extract_min_discount_pct(promo_global, None) if promo_global else None
+    # Para promos co-fondeadas SMART el aporte ML también puede venir
+    # a nivel promo en `meli_percentage`.
+    default_meli_pct = None
+    if promo_global:
+        for k in ("meli_percentage", "default_meli_percentage", "ml_percentage"):
+            v = promo_global.get(k)
+            if v is not None:
+                try:
+                    default_meli_pct = float(v)
+                    break
+                except (TypeError, ValueError):
+                    continue
+
     items_out = []
     for promo_item, info, detail in zip(all_results, enriched, promo_details):
         item_id = promo_item.get("id")
@@ -2843,6 +2885,9 @@ async def api_promociones_items(
                           or merged.get("price")
                           or (info.get("price") if info else None))
         min_discount_pct = _extract_min_discount_pct(merged, original_price)
+        # Fallback al default global de la promo si no encontramos per-item
+        if min_discount_pct is None and default_min_pct is not None:
+            min_discount_pct = default_min_pct
         title = ""
         sku_from_ml = _extract_sku(info)
         if info:
@@ -2870,6 +2915,9 @@ async def api_promociones_items(
                     float(merged["meli_amount"]) / float(original_price) * 100, 2)
             except (TypeError, ValueError):
                 ml_contribution_pct = None
+        # Fallback al meli_percentage global de la promo
+        if ml_contribution_pct is None and default_meli_pct is not None:
+            ml_contribution_pct = default_meli_pct
         # `final_pct` (descuento total que ve el comprador) = tu % + aporte ML
         final_pct = seller_pct + (ml_contribution_pct or 0.0)
         # GAP: cuánto le falta al VENDEDOR para llegar al mínimo de ML.
@@ -2908,18 +2956,24 @@ async def api_promociones_items(
     # Para diagnóstico: devolvemos las keys del primer item que devolvió
     # ML tanto en la lista como en el endpoint per-item. Así detectamos
     # nombres de campos no contemplados.
-    raw_sample = None
+    raw_sample = {
+        "promo_global_keys": sorted(list(promo_global.keys())) if isinstance(promo_global, dict) and promo_global else None,
+        "promo_global_sample": ({k: promo_global[k] for k in list(promo_global.keys())[:30]}
+                                if isinstance(promo_global, dict) and promo_global else None),
+        "default_min_pct": default_min_pct,
+        "default_meli_pct": default_meli_pct,
+    }
     if all_results:
         first_list = all_results[0]
         first_detail = promo_details[0] if promo_details else None
-        raw_sample = {
+        raw_sample.update({
             "list_keys": sorted(list(first_list.keys())) if isinstance(first_list, dict) else None,
             "list_sample": ({k: first_list[k] for k in list(first_list.keys())[:30]}
                             if isinstance(first_list, dict) else None),
             "detail_keys": sorted(list(first_detail.keys())) if isinstance(first_detail, dict) else None,
             "detail_sample": ({k: first_detail[k] for k in list(first_detail.keys())[:30]}
                               if isinstance(first_detail, dict) else None),
-        }
+        })
     return {
         "items": items_out,
         "discount_base_count": len(discount_map),
