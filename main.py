@@ -2833,28 +2833,23 @@ async def api_promociones_items(
                             return round(fv, 2)
         return None
 
-    def _extract_suggested_discount_pct(promo_item: dict, original_price) -> Optional[float]:
-        """% SUGERIDO por ML. Es la recomendación de descuento que ML hace
-        para que el item venda. Corresponde a `suggested_discounted_price`.
-        Fallback: discount_percentage explícito a nivel item o promo,
-        campos anidados (nudge/discount_breakdown), o el array offers[]."""
-        # Camino 1: precios sugeridos (per-item) → % vs original
-        for k in ("suggested_discounted_price", "suggested_price",
-                  "min_discounted_price", "recommended_discounted_price"):
-            pct = _pct_from_price(promo_item.get(k), original_price)
-            if pct is not None and pct > 0:
-                return pct
-        # Camino 2: % directo en distintos nombres
-        for k in ("suggested_discount_percentage",
-                  "discount_percentage",
-                  "default_discount_percentage",
+    def _extract_seller_suggested_pct(
+        promo_item: dict, original_price, ml_contribution_pct
+    ) -> Optional[float]:
+        """% que ML sugiere/pide AL VENDEDOR (su parte, sin contar
+        aporte ML). Dos caminos según el tipo de promo:
+
+        1. SMART/co-fondeada: `seller_percentage` (lo que ML pide al
+           vendedor). Ya viene neto, no hay que restar el aporte.
+        2. DEAL/SELLER_CAMPAIGN: `suggested_discounted_price` es el
+           precio final total — convertimos a % y restamos el aporte
+           ML si lo hubiese.
+        """
+        # 1. Campo directo del vendedor (SMART)
+        for k in ("seller_percentage", "seller_min_discount_percentage",
                   "seller_discount_percentage",
-                  "expected_discount_percentage",
-                  "target_discount_percentage",
-                  "recommended_discount_percentage",
-                  "nudge_seller_percentage",
-                  "nudge_total_percentage",
-                  "total_discount_percentage"):
+                  "min_seller_discount_percentage",
+                  "nudge_seller_percentage"):
             v = promo_item.get(k)
             if v is not None:
                 try:
@@ -2863,21 +2858,46 @@ async def api_promociones_items(
                     continue
                 if fv > 0:
                     return round(fv, 2)
-        # Camino 3: dentro de offers[] / discounts[] / nudge / breakdown
+        # 2. Precios sugeridos (DEAL): % total → restar aporte ML
+        def _as_seller_part(total_pct):
+            if total_pct is None or total_pct <= 0:
+                return None
+            if ml_contribution_pct and ml_contribution_pct > 0:
+                return round(max(0.0, total_pct - ml_contribution_pct), 2)
+            return round(total_pct, 2)
+        for k in ("suggested_discounted_price", "suggested_price",
+                  "recommended_discounted_price"):
+            pct = _pct_from_price(promo_item.get(k), original_price)
+            res = _as_seller_part(pct)
+            if res is not None and res > 0:
+                return res
+        # 3. % totales explícitos → restar aporte
+        for k in ("suggested_discount_percentage",
+                  "discount_percentage",
+                  "default_discount_percentage",
+                  "expected_discount_percentage",
+                  "target_discount_percentage",
+                  "recommended_discount_percentage",
+                  "nudge_total_percentage",
+                  "total_discount_percentage"):
+            v = promo_item.get(k)
+            if v is not None:
+                try:
+                    fv = float(v)
+                except (TypeError, ValueError):
+                    continue
+                res = _as_seller_part(fv)
+                if res is not None and res > 0:
+                    return res
+        # 4. Dentro de offers[] / discounts[] / rebates[]
         for arr_key in ("offers", "discounts", "rebates"):
             arr = promo_item.get(arr_key)
             if isinstance(arr, list):
                 for off in arr:
                     if not isinstance(off, dict):
                         continue
-                    for pk in ("suggested_discounted_price", "new_price",
-                               "recommended_price"):
-                        pct = _pct_from_price(off.get(pk), original_price)
-                        if pct is not None and pct > 0:
-                            return pct
-                    for pk in ("suggested_discount_percentage",
-                               "discount_percentage", "seller_percentage",
-                               "target_percentage"):
+                    # Seller directo dentro del offer
+                    for pk in ("seller_percentage", "seller_discount_percentage"):
                         v = off.get(pk)
                         if v is not None:
                             try:
@@ -2886,14 +2906,30 @@ async def api_promociones_items(
                                 continue
                             if fv > 0:
                                 return round(fv, 2)
+                    # Precios → totales
+                    for pk in ("suggested_discounted_price", "new_price",
+                               "recommended_price"):
+                        pct = _pct_from_price(off.get(pk), original_price)
+                        res = _as_seller_part(pct)
+                        if res is not None and res > 0:
+                            return res
+                    # Totales explícitos
+                    for pk in ("suggested_discount_percentage",
+                               "discount_percentage", "target_percentage"):
+                        v = off.get(pk)
+                        if v is not None:
+                            try:
+                                fv = float(v)
+                            except (TypeError, ValueError):
+                                continue
+                            res = _as_seller_part(fv)
+                            if res is not None and res > 0:
+                                return res
+        # 5. Objetos anidados
         for nest_key in ("nudge", "discount_breakdown", "rebate", "prices"):
             nested = promo_item.get(nest_key)
             if isinstance(nested, dict):
-                for k in ("suggested_discount_percentage",
-                          "discount_percentage", "seller_percentage",
-                          "seller_discount_percentage",
-                          "target_percentage", "suggested_percentage",
-                          "total_percentage"):
+                for k in ("seller_percentage", "seller_discount_percentage"):
                     v = nested.get(k)
                     if v is not None:
                         try:
@@ -2902,6 +2938,18 @@ async def api_promociones_items(
                             continue
                         if fv > 0:
                             return round(fv, 2)
+                for k in ("suggested_discount_percentage",
+                          "discount_percentage", "target_percentage",
+                          "suggested_percentage", "total_percentage"):
+                    v = nested.get(k)
+                    if v is not None:
+                        try:
+                            fv = float(v)
+                        except (TypeError, ValueError):
+                            continue
+                        res = _as_seller_part(fv)
+                        if res is not None and res > 0:
+                            return res
         return None
 
     # Fallback global: si los items vienen sin info, tomamos lo que
@@ -2909,7 +2957,6 @@ async def api_promociones_items(
     # suggested son por item), pero para SMART puede traer
     # meli_percentage global.
     default_min_pct = _extract_min_discount_pct(promo_global, None) if promo_global else None
-    default_suggested_pct = _extract_suggested_discount_pct(promo_global, None) if promo_global else None
     default_meli_pct = None
     if promo_global:
         for k in ("meli_percentage", "default_meli_percentage", "ml_percentage"):
@@ -2920,6 +2967,9 @@ async def api_promociones_items(
                     break
                 except (TypeError, ValueError):
                     continue
+    # Para el suggested global necesitamos un aporte ML para restar
+    default_suggested_pct = (_extract_seller_suggested_pct(
+        promo_global, None, default_meli_pct) if promo_global else None)
 
     items_out = []
     for promo_item, info, detail in zip(all_results, enriched, promo_details):
@@ -2937,16 +2987,6 @@ async def api_promociones_items(
         min_discount_pct = _extract_min_discount_pct(merged, original_price)
         if min_discount_pct is None and default_min_pct is not None:
             min_discount_pct = default_min_pct
-        # Sugerencia de ML (lo que recomienda el panel)
-        suggested_pct = _extract_suggested_discount_pct(merged, original_price)
-        if suggested_pct is None and default_suggested_pct is not None:
-            suggested_pct = default_suggested_pct
-        # Último fallback: si la promo expone un mínimo y no hay
-        # sugerencia explícita, usamos el mínimo como sugerencia. Es lo
-        # que ML te pide para participar y por lo tanto sirve como
-        # referencia para el vendedor (especialmente en SMART/DEAL).
-        if suggested_pct is None and min_discount_pct is not None:
-            suggested_pct = min_discount_pct
         title = ""
         sku_from_ml = _extract_sku(info)
         if info:
@@ -2956,9 +2996,8 @@ async def api_promociones_items(
         loaded_pct = match["pct"] if match else None
         sku_base = match["sku"] if match else ""
         sku = sku_base or sku_from_ml
-        # Aporte ML (co-fondeado). Lo necesitamos para descontar de la
-        # sugerencia: si ML sugiere 17.5% total y aporta 2.5%, entonces
-        # le pide al vendedor 15%.
+        # Aporte ML (co-fondeado). Necesario PRIMERO porque la
+        # sugerencia del vendedor depende de él.
         ml_contribution_pct = None
         meli_pct = merged.get("meli_percentage")
         if meli_pct is not None:
@@ -2974,15 +3013,21 @@ async def api_promociones_items(
                 ml_contribution_pct = None
         if ml_contribution_pct is None and default_meli_pct is not None:
             ml_contribution_pct = default_meli_pct
-        # Sugerencia ML PARA EL VENDEDOR. Si la promo es co-fondeada, el
-        # suggested_discounted_price ya incluye el aporte ML — lo
-        # descontamos para mostrar sólo la parte del vendedor.
-        seller_suggested_pct = suggested_pct
-        if (seller_suggested_pct is not None
-                and ml_contribution_pct
-                and ml_contribution_pct > 0):
-            seller_suggested_pct = round(
-                max(0.0, seller_suggested_pct - ml_contribution_pct), 2)
+        # Sugerencia para el VENDEDOR (su parte, sin contar aporte ML).
+        # Para SMART viene como `seller_percentage` directo, para DEAL
+        # se deriva de `suggested_discounted_price` (total) restando
+        # el aporte ML.
+        seller_suggested_pct = _extract_seller_suggested_pct(
+            merged, original_price, ml_contribution_pct)
+        if seller_suggested_pct is None and default_suggested_pct is not None:
+            seller_suggested_pct = default_suggested_pct
+        # Último fallback: si la promo expone un mínimo y no hay
+        # sugerencia explícita, usamos el mínimo como sugerencia. Es lo
+        # que ML te pide para participar y por lo tanto sirve como
+        # referencia para el vendedor.
+        if seller_suggested_pct is None and min_discount_pct is not None:
+            seller_suggested_pct = min_discount_pct
+        suggested_pct = seller_suggested_pct  # compat con el resto del code
         # `seller_pct` = lo que se va a aplicar. Priorizamos lo que
         # cargó el vendedor; si no hay, usamos la sugerencia de ML
         # para que el cálculo del precio final tenga sentido.
