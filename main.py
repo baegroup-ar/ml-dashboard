@@ -3080,6 +3080,9 @@ async def api_promociones_items(
             "ml_contribution": ml_contribution_pct,
             "status": merged.get("status"),
             "promotion_type": merged.get("promotion_type") or merged.get("type"),
+            # Para el apply: ML pide offer_id en SMART y top_deal_price
+            # en DEAL. Lo dejamos disponible para el frontend.
+            "offer_id": merged.get("offer_id") or merged.get("ref_id"),
         })
     # Para diagnóstico: devolvemos las keys del primer item que devolvió
     # ML tanto en la lista como en el endpoint per-item. Así detectamos
@@ -3135,20 +3138,61 @@ async def api_promociones_apply(
         sem = asyncio.Semaphore(8)
         async def apply_one(it):
             iid = it.get("item_id")
-            pct = float(it.get("discount_pct") or 0)
-            ptype = it.get("promotion_type") or "DEAL"
-            async with sem:
+            ptype = (it.get("promotion_type") or "DEAL").upper()
+            offer_id = it.get("offer_id")
+            original_price = it.get("original_price")
+            # `discount_pct` desde el frontend = parte del VENDEDOR
+            # (loaded_pct), no el total. Para DEAL/PRICE_DISCOUNT
+            # se convierte a precio final (top_deal_price /
+            # deal_price). Para SMART no se manda — se acepta el
+            # candidate offer_id.
+            try:
+                pct = float(it.get("discount_pct") or 0)
+            except (TypeError, ValueError):
+                pct = 0
+            deal_price = None
+            if original_price and pct > 0:
+                try:
+                    deal_price = round(float(original_price) * (1 - pct / 100.0), 2)
+                except (TypeError, ValueError):
+                    deal_price = None
+            # Cada tipo de promo tiene su shape de payload distinta
+            # (ML rechaza con 400 si mandás campos de más o de menos).
+            if ptype == "DEAL":
+                payload = {
+                    "deal_id": promotion_id,
+                    "promotion_type": "DEAL",
+                    "top_deal_price": deal_price,
+                }
+            elif ptype in ("SMART", "MARKETPLACE_CAMPAIGN"):
                 payload = {
                     "promotion_id": promotion_id,
                     "promotion_type": ptype,
-                    "deal_id": promotion_id,
-                    "offer_type": "PERCENTAGE",
-                    "top_deal_price": None,
-                    "deal_price": None,
-                    "discount_percentage": pct,
+                    "offer_id": offer_id,
                 }
-                # Limpiamos campos None
-                payload = {k: v for k, v in payload.items() if v is not None}
+            elif ptype == "SELLER_CAMPAIGN":
+                payload = {
+                    "promotion_id": promotion_id,
+                    "promotion_type": "SELLER_CAMPAIGN",
+                    "deal_price": deal_price,
+                }
+            elif ptype == "PRICE_DISCOUNT":
+                payload = {
+                    "promotion_id": promotion_id,
+                    "promotion_type": "PRICE_DISCOUNT",
+                    "deal_price": deal_price,
+                }
+            else:
+                # Fallback (LIGHTNING, VOLUME, DOD, etc.) — mandamos
+                # precio final si lo tenemos.
+                payload = {
+                    "promotion_id": promotion_id,
+                    "promotion_type": ptype,
+                    "deal_price": deal_price,
+                }
+            # Limpiamos campos None
+            payload = {k: v for k, v in payload.items() if v is not None}
+            async with sem:
                 try:
                     r = await client.post(
                         f"{ML_API_URL}/seller-promotions/items/{iid}",
@@ -3160,10 +3204,17 @@ async def api_promociones_apply(
                         "item_id": iid,
                         "ok": r.status_code in (200, 201, 204),
                         "status": r.status_code,
-                        "error": (r.text[:300] if r.status_code not in (200, 201, 204) else None),
+                        "error": (r.text[:500] if r.status_code not in (200, 201, 204) else None),
+                        "payload": payload,
                     }
                 except Exception as e:
-                    return {"item_id": iid, "ok": False, "status": 0, "error": str(e)[:200]}
+                    return {
+                        "item_id": iid,
+                        "ok": False,
+                        "status": 0,
+                        "error": str(e)[:300],
+                        "payload": payload,
+                    }
         results = await asyncio.gather(*[apply_one(it) for it in items])
     return {"results": results, "ok": True}
 

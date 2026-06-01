@@ -597,10 +597,18 @@
     document.querySelectorAll('.row-check').forEach((c, idx) => {
       if(c.checked) {
         const it = currentItems[idx];
+        // Mandamos la parte del VENDEDOR (loaded), no el total con
+        // aporte ML — ML aplica el aporte por su cuenta. Para DEAL
+        // se convierte a top_deal_price en el backend.
+        const sellerPct = it.loaded_discount_pct != null
+          ? it.loaded_discount_pct
+          : (it.seller_suggested_pct != null ? it.seller_suggested_pct : 0);
         out.push({
           item_id: it.item_id,
-          discount_pct: it.final_discount_pct,
+          discount_pct: sellerPct,
           promotion_type: it.promotion_type || currentPromo.type,
+          offer_id: it.offer_id || null,
+          original_price: it.original_price || null,
         });
       }
     });
@@ -635,8 +643,13 @@
       const fails = (data.results || []).filter(x => !x.ok);
       let msg = `${oks} aplicados correctamente.`;
       if(fails.length) {
-        msg += ` ${fails.length} fallaron.`;
-        console.warn('Fallos:', fails);
+        msg += `\n${fails.length} fallaron:\n\n`;
+        // Mostrar el error real de ML por cada item, así se ve qué pasó
+        msg += fails.slice(0, 5).map(f =>
+          `• ${f.item_id} [HTTP ${f.status}]: ${(f.error || 'sin detalle').slice(0, 200)}`
+        ).join('\n');
+        if(fails.length > 5) msg += `\n...y ${fails.length - 5} más (ver consola).`;
+        console.warn('Fallos completos:', fails);
       }
       alert(msg);
       await loadPromoItems(currentStatus);
