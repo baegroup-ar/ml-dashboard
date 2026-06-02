@@ -162,18 +162,30 @@
 
     <div class="table-card">
       <div class="table-header" style="flex-direction:column;align-items:stretch;gap:10px;">
-        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
           <h3>Ventas del período</h3>
-          <span id="orders-count"></span>
+          <div style="display:flex;align-items:center;gap:10px;">
+            <span id="orders-count"></span>
+            <button onclick="exportOrdersExcel()" id="btn-export-excel" style="padding:6px 12px;border:1px solid #1a8a5a;background:#fff;color:#1a8a5a;border-radius:8px;font-size:12px;cursor:pointer;">⬇ Excel</button>
+          </div>
         </div>
-        {% if user.is_admin %}
-        <div style="display:flex;gap:8px;align-items:center;">
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          {% if user.is_admin %}
           <input id="sku-filter" type="text" placeholder="Buscar por SKU... (sin importar la fecha)"
-                 style="flex:1;padding:7px 10px;border:1px solid #ddd;border-radius:8px;font-size:13px;font-family:inherit;"
+                 style="flex:1;min-width:240px;padding:7px 10px;border:1px solid #ddd;border-radius:8px;font-size:13px;font-family:inherit;"
                  oninput="onSkuFilterChange()" />
           <button onclick="clearSkuFilter()" id="btn-clear-sku" style="display:none;padding:6px 12px;border:1px solid #ddd;border-radius:8px;background:#fff;font-size:12px;cursor:pointer;">Limpiar</button>
+          {% endif %}
+          <label style="font-size:13px;color:#666;">Envío:</label>
+          <select id="envio-filter" onchange="onEnvioFilterChange()" style="padding:6px 10px;border:1px solid #ddd;border-radius:8px;font-size:13px;font-family:inherit;">
+            <option value="">Todos</option>
+            <option value="flex">Flex</option>
+            <option value="colecta">Colecta</option>
+            <option value="fulfillment">Full</option>
+            <option value="pickup">Retiro en persona</option>
+            <option value="otro">Otros</option>
+          </select>
         </div>
-        {% endif %}
       </div>
       <div style="overflow-x:auto;">
         <table>
@@ -230,30 +242,56 @@
   let autoRefresh = null;
   let ordersCache = [];
   let skuFilter = '';
+  let envioFilter = '';
   let currentPage = 1;
   const PAGE_SIZE = 50;
   let loadSeq = 0;
   // Períodos que ya se refrescaron contra ML en esta sesión.
   const refreshedRanges = new Set();
 
-  function applySkuFilter(orders) {
-    if(!skuFilter) return orders;
-    const f = skuFilter.toUpperCase();
-    return orders.filter(o => {
-      const items = o.items || [];
-      return items.some(i => (i.sku || '').toUpperCase().includes(f));
-    });
+  // Mapeo de logistic_type ML → grupo visible en el dropdown
+  function envioGroup(t) {
+    if(!t) return 'otro';
+    if(t === 'home_delivery' || t === 'self_service') return 'flex';
+    if(t === 'xd_drop_off' || t === 'drop_off' || t === 'cross_docking') return 'colecta';
+    if(t === 'fulfillment') return 'fulfillment';
+    if(t === 'pickup') return 'pickup';
+    return 'otro';
   }
 
+  function applyFilters(orders) {
+    let out = orders;
+    if(skuFilter) {
+      const f = skuFilter.toUpperCase();
+      out = out.filter(o => {
+        const items = o.items || [];
+        return items.some(i => (i.sku || '').toUpperCase().includes(f));
+      });
+    }
+    if(envioFilter) {
+      out = out.filter(o => envioGroup(o.logistic_type) === envioFilter);
+    }
+    return out;
+  }
+  // alias legacy, mantenido por compatibilidad
+  function applySkuFilter(orders) { return applyFilters(orders); }
+
   function onSkuFilterChange() {
-    skuFilter = (document.getElementById('sku-filter').value || '').trim();
-    document.getElementById('btn-clear-sku').style.display = skuFilter ? 'inline-block' : 'none';
+    skuFilter = (document.getElementById('sku-filter')?.value || '').trim();
+    const clr = document.getElementById('btn-clear-sku');
+    if(clr) clr.style.display = skuFilter ? 'inline-block' : 'none';
     currentPage = 1;
-    renderOrders(applySkuFilter(ordersCache));
+    renderOrders(applyFilters(ordersCache));
   }
   function clearSkuFilter() {
-    document.getElementById('sku-filter').value = '';
+    const el = document.getElementById('sku-filter');
+    if(el) el.value = '';
     onSkuFilterChange();
+  }
+  function onEnvioFilterChange() {
+    envioFilter = document.getElementById('envio-filter').value;
+    currentPage = 1;
+    renderOrders(applyFilters(ordersCache));
   }
 
   // Fecha en timezone Argentina (UTC-3)
@@ -390,7 +428,7 @@
 
     currentPage = 1;
     ordersCache = data.orders;
-    renderOrders(applySkuFilter(data.orders));
+    renderOrders(applyFilters(data.orders));
     const total = data.orders.length;
     const canceladas = total - paidOrders.length;
     document.getElementById('orders-count').textContent = canceladas > 0
@@ -410,7 +448,10 @@
     const tbody = document.getElementById('orders-tbody');
     const totalCols = IS_ADMIN ? 14 : 13;
     if(!orders.length){
-      const msg = skuFilter ? `Sin ventas que coincidan con "${skuFilter}".` : 'Sin ventas en este período.';
+      let msg = 'Sin ventas en este período.';
+      if(skuFilter && envioFilter) msg = `Sin ventas que coincidan con "${skuFilter}" y envío "${envioFilter}".`;
+      else if(skuFilter) msg = `Sin ventas que coincidan con "${skuFilter}".`;
+      else if(envioFilter) msg = `Sin ventas con envío "${envioFilter}".`;
       tbody.innerHTML=`<tr><td colspan="${totalCols}" style="text-align:center;color:#aaa;padding:2rem;">${msg}</td></tr>`;
       document.getElementById('pagination').innerHTML='';
       return;
@@ -510,8 +551,22 @@
 
   function goPage(p) {
     currentPage = p;
-    renderOrders(applySkuFilter(ordersCache));
+    renderOrders(applyFilters(ordersCache));
     document.getElementById('orders-tbody').closest('.table-card').scrollIntoView({behavior:'smooth', block:'start'});
+  }
+
+  function exportOrdersExcel() {
+    if(!currentAccountId) return;
+    const df = document.getElementById('date-from')?.value || '';
+    const dt = document.getElementById('date-to')?.value || '';
+    const params = new URLSearchParams();
+    if(df) params.set('date_from', df);
+    if(dt) params.set('date_to', dt);
+    if(skuFilter) params.set('sku', skuFilter);
+    if(envioFilter) params.set('envio', envioFilter);
+    // Descarga directa: el endpoint devuelve el .xlsx con
+    // Content-Disposition attachment.
+    window.location.href = `/api/orders/${currentAccountId}/export?${params}`;
   }
 
   // Init

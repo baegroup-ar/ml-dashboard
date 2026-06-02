@@ -2723,14 +2723,26 @@ async def api_promociones_items(
         except Exception:
             promo_global = {}
 
+        # Paginación robusta: no confiamos en `paging.total` (ML lo
+        # omite o devuelve mal en algunas promos) — paramos sólo
+        # cuando un batch viene con menos items que el limit o
+        # cuando todos los items del batch ya los teníamos (duplicados
+        # = ML está paginando en círculos).
         all_results = []
+        seen_ids: set = set()
         offset = 0
-        while True:
-            r = await client.get(
-                f"{ML_API_URL}/seller-promotions/promotions/{promotion_id}/items",
-                headers=headers,
-                params={**params, "offset": offset},
-            )
+        MAX_ITERATIONS = 200  # safety cap: 200 * 50 = 10k items
+        for _ in range(MAX_ITERATIONS):
+            try:
+                r = await client.get(
+                    f"{ML_API_URL}/seller-promotions/promotions/{promotion_id}/items",
+                    headers=headers,
+                    params={**params, "offset": offset},
+                )
+            except Exception as e:
+                if not all_results:
+                    return {"items": [], "error": f"ML error: {str(e)[:200]}"}
+                break
             if r.status_code != 200:
                 if not all_results:
                     return {"items": [], "error": f"ML {r.status_code}: {r.text[:200]}"}
@@ -2739,11 +2751,20 @@ async def api_promociones_items(
             results = data.get("results", []) if isinstance(data, dict) else []
             if not results:
                 break
-            all_results.extend(results)
-            paging = data.get("paging") or {}
-            total = paging.get("total", len(all_results))
+            new_in_batch = 0
+            for it in results:
+                iid = it.get("id") if isinstance(it, dict) else None
+                if iid and iid not in seen_ids:
+                    seen_ids.add(iid)
+                    all_results.append(it)
+                    new_in_batch += 1
             offset += len(results)
-            if offset >= total or len(results) < 50:
+            # Si el batch vino con menos que el limit, es la última página.
+            if len(results) < 50:
+                break
+            # Si todo el batch eran duplicados, ML está re-emitiendo lo
+            # mismo (offset roto o cap) — cortamos.
+            if new_in_batch == 0:
                 break
 
         # Enriquecer con SKU y nombre desde /items/{id}. Sin filtrar
@@ -3611,6 +3632,134 @@ async def api_orders(request: Request, account_id: int,
             asyncio.to_thread(db_save_order_snapshots, account_id, orders, True)
         )
     return build_dashboard_payload(orders, details_complete=not fast)
+
+
+# Mapeo logistic_type → grupo visible (debe matchear con el del front)
+_ENVIO_GROUPS = {
+    "home_delivery": "flex", "self_service": "flex",
+    "xd_drop_off": "colecta", "drop_off": "colecta",
+    "cross_docking": "colecta",
+    "fulfillment": "fulfillment",
+    "pickup": "pickup",
+}
+_ENVIO_LABELS = {
+    "home_delivery": "Flex", "self_service": "Flex",
+    "xd_drop_off": "Colecta", "drop_off": "Colecta",
+    "cross_docking": "Colecta",
+    "fulfillment": "Full",
+    "pickup": "Retiro en persona",
+    "mercadoenvios": "Mercado Envíos",
+    "mercado_envios_lite": "ME Lite",
+}
+
+
+@app.get("/api/orders/{account_id}/export")
+async def api_orders_export(
+    request: Request, account_id: int,
+    date_from: Optional[str] = None, date_to: Optional[str] = None,
+    sku: Optional[str] = None, envio: Optional[str] = None,
+):
+    """Descarga las ventas del período como .xlsx. Respeta los mismos
+    filtros del Dashboard (SKU y tipo de envío). Lee del caché — el
+    Dashboard ya se encarga de refrescar contra ML."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    today = datetime.utcnow().date()
+    df = date_from or str(today - timedelta(days=30))
+    dt = date_to or str(today)
+    cached_orders = db_fetch_order_snapshots(account_id, df, dt) or []
+
+    # Filtros
+    sku_q = (sku or "").strip().upper()
+    envio_q = (envio or "").strip().lower()
+    def _matches(o):
+        if sku_q:
+            items = o.get("items") or []
+            if not any(sku_q in (i.get("sku") or "").upper() for i in items):
+                return False
+        if envio_q:
+            grp = _ENVIO_GROUPS.get(o.get("logistic_type") or "", "otro")
+            if grp != envio_q:
+                return False
+        return True
+    orders = [o for o in cached_orders if _matches(o)]
+    orders = sorted(orders, key=lambda x: (x.get("fecha") or "", x.get("hora") or ""), reverse=True)
+
+    import io
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from fastapi.responses import StreamingResponse
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Ventas"
+    headers = [
+        "Fecha", "Hora", "N° Venta", "Estado", "Producto", "SKU", "Envío",
+        "Unidades", "Monto", "Comisión", "Ingreso Envío", "Bonificación",
+        "Costo Envío", "CMV", "Ganancia neta", "Margen %",
+    ]
+    ws.append(headers)
+    header_fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
+    header_font = Font(bold=True, color="000000")
+    for col_idx in range(1, len(headers) + 1):
+        c = ws.cell(row=1, column=col_idx)
+        c.fill = header_fill
+        c.font = header_font
+        c.alignment = Alignment(horizontal="center")
+
+    for o in orders:
+        items = o.get("items") or []
+        sku_list = ", ".join(sorted({(i.get("sku") or "") for i in items if i.get("sku")}))
+        producto = o.get("producto") or (items[0].get("titulo") if items else "")
+        units = sum(int(i.get("cantidad") or 1) for i in items) if items else 0
+        envio_label = _ENVIO_LABELS.get(o.get("logistic_type") or "", o.get("logistic_type") or "—")
+        monto = float(o.get("monto") or 0)
+        ganancia = float(o.get("ganancia") or 0)
+        margen = (ganancia / monto * 100) if monto > 0 else 0
+        ws.append([
+            o.get("fecha") or "",
+            o.get("hora") or "",
+            str(o.get("venta_id") or o.get("id") or ""),
+            o.get("estado") or "",
+            producto,
+            sku_list,
+            envio_label,
+            units,
+            monto,
+            float(o.get("comision") or 0),
+            float(o.get("ingreso_envio") or 0),
+            float(o.get("bonificacion") or 0),
+            float(o.get("envio") or 0),
+            float(o.get("cmv") or 0),
+            ganancia,
+            round(margen, 2),
+        ])
+
+    # Ancho de columnas + formato moneda básico
+    widths = [12, 8, 16, 10, 40, 22, 12, 8, 14, 14, 14, 14, 14, 14, 14, 10]
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = w
+    for row in ws.iter_rows(min_row=2, min_col=9, max_col=15):
+        for cell in row:
+            cell.number_format = '"$"#,##0.00'
+    for row in ws.iter_rows(min_row=2, min_col=16, max_col=16):
+        for cell in row:
+            cell.number_format = '0.00"%"'
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    nick = (acc.get("nickname") or acc.get("ml_user_id") or "cuenta").replace(" ", "_")
+    fname = f"ventas_{nick}_{df}_{dt}.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
 
 
     # ── Paso 3: agregados diarios y top productos ─────────────────
