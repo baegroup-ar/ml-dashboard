@@ -2251,6 +2251,75 @@ async def api_descuentos_template(request: Request):
     )
 
 
+@app.get("/api/descuentos/{account_id}/export")
+async def api_descuentos_export(request: Request, account_id: int):
+    """Descarga la base de descuentos ACTUAL como .xlsx. Mismo formato
+    que la plantilla, así podés modificar el archivo y volver a
+    subirlo — el upload hace UPSERT por MLA, así que los % cambiados
+    se actualizan y los MLAs nuevos se agregan."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    rows = db_fetchall(
+        "SELECT mla, sku, discount_pct FROM product_discounts"
+        " WHERE account_id=:aid ORDER BY mla",
+        {"aid": account_id},
+    )
+    import io
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from fastapi.responses import StreamingResponse
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Descuentos"
+    ws.append(["MLA", "SKU", "Descuento %"])
+    fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
+    font = Font(bold=True)
+    for col in range(1, 4):
+        c = ws.cell(row=1, column=col)
+        c.fill = fill
+        c.font = font
+        c.alignment = Alignment(horizontal="center")
+    for r in rows:
+        ws.append([
+            r.get("mla") or "",
+            r.get("sku") or "",
+            float(r.get("discount_pct") or 0),
+        ])
+    ws.column_dimensions["A"].width = 18
+    ws.column_dimensions["B"].width = 22
+    ws.column_dimensions["C"].width = 14
+    # Hoja de instrucciones — recuerda al usuario cómo funciona el
+    # re-upload y deja un aviso de que el formato debe mantenerse.
+    ws2 = wb.create_sheet("Instrucciones")
+    info = [
+        ["Cómo modificar tu base desde Excel"],
+        [""],
+        ["1.", "Editá esta planilla: cambiá %s, agregá MLAs nuevos o sacá filas."],
+        ["2.", "Mantené las columnas MLA / SKU / Descuento % (en ese orden)."],
+        ["3.", "Subila desde la sección 'Base de descuentos' con 'Subir archivo'."],
+        ["4.", "Las filas con MLA existente actualizan su %. Los MLAs nuevos se agregan."],
+        ["5.", "Para eliminar un MLA, usá 'Eliminar' en la web o 'Eliminar TODO' + subir."],
+    ]
+    for r in info:
+        ws2.append(r)
+    ws2.column_dimensions["A"].width = 6
+    ws2.column_dimensions["B"].width = 90
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    nick = (acc.get("nickname") or acc.get("ml_user_id") or "cuenta").replace(" ", "_")
+    fname = f"descuentos_{nick}.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
 @app.get("/api/descuentos/{account_id}")
 async def api_descuentos_list(request: Request, account_id: int):
     user_id = get_session_user_id(request)

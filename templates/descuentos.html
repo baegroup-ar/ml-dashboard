@@ -101,9 +101,13 @@
   <!-- ─── BASE DE DESCUENTOS ─── -->
   <div class="card">
     <h3>1. Base de descuentos por MLA</h3>
-    <div class="row" style="margin-bottom:10px;">
+    <div class="row" style="margin-bottom:10px;flex-wrap:wrap;">
       <input type="file" id="file-input" accept=".xlsx,.xlsm,.csv" />
       <button onclick="uploadFile()" id="btn-upload" class="green">Subir archivo</button>
+      <a href="#" onclick="downloadBase(event)"
+         style="padding:8px 14px;border:1px solid #1a8a5a;border-radius:8px;background:#fff;color:#1a8a5a;font-size:13px;text-decoration:none;">
+        ⬇ Descargar mi base
+      </a>
       <a href="/api/descuentos/template" download="plantilla_descuentos.xlsx"
          style="padding:8px 14px;border:1px solid #3483FA;border-radius:8px;background:#fff;color:#3483FA;font-size:13px;text-decoration:none;">
         Descargar plantilla
@@ -111,7 +115,8 @@
     </div>
     <div class="help-box">
       Columnas esperadas: <code>MLA</code>, <code>SKU</code> (referencial) y <code>Descuento %</code> (0 a 100).
-      El cruce con las promociones se hace por MLA exacto — cada publicación es una entrada separada.
+      El cruce con las promociones se hace por MLA exacto — cada publicación es una entrada separada.<br>
+      <b>Para modificar masivamente:</b> descargá tu base, editá los % en Excel, y volvé a subirla. Los MLA existentes se actualizan y los nuevos se agregan.
     </div>
     <div id="upload-msg"></div>
 
@@ -537,6 +542,18 @@
       alert(`${data.updated} actualizados a ${pct}%.`);
       await loadBase();
     } catch(e) { alert(e.message); }
+  }
+
+  function downloadBase(ev) {
+    if(ev) ev.preventDefault();
+    if(!currentAccountId) {
+      alert('Seleccioná una cuenta primero.');
+      return;
+    }
+    if(!baseItems.length) {
+      if(!confirm('Tu base está vacía. ¿Descargar igual (solo encabezados)?')) return;
+    }
+    window.location.href = `/api/descuentos/${currentAccountId}/export`;
   }
 
   async function uploadFile() {
