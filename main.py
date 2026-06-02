@@ -2335,6 +2335,83 @@ async def api_descuentos_delete(request: Request, account_id: int, mla: str):
     return {"ok": True}
 
 
+@app.post("/api/descuentos/{account_id}/bulk-delete")
+async def api_descuentos_bulk_delete(request: Request, account_id: int):
+    """Borra descuentos en masa. Body JSON:
+      { "all": true }                 → borra TODOS los descuentos de la cuenta
+      { "mlas": ["MLA1", "MLA2", ...] } → borra solo los MLAs indicados
+    """
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    body = await request.json()
+    if body.get("all"):
+        before = db_fetchone(
+            "SELECT COUNT(*) AS c FROM product_discounts WHERE account_id=:aid",
+            {"aid": account_id},
+        )
+        db_execute(
+            "DELETE FROM product_discounts WHERE account_id=:aid",
+            {"aid": account_id},
+        )
+        return {"ok": True, "deleted": int(before["c"]) if before else 0}
+    mlas = body.get("mlas") or []
+    if not isinstance(mlas, list) or not mlas:
+        raise HTTPException(400, "Faltan MLAs para borrar")
+    normalized = [_normalize_mla(m) for m in mlas if m]
+    if not normalized:
+        return {"ok": True, "deleted": 0}
+    # SQLAlchemy/pg8000 manejan IN con expansión de tupla — armamos el placeholder
+    placeholders = ", ".join([f":m{i}" for i in range(len(normalized))])
+    params = {"aid": account_id}
+    for i, m in enumerate(normalized):
+        params[f"m{i}"] = m
+    db_execute(
+        f"DELETE FROM product_discounts WHERE account_id=:aid AND mla IN ({placeholders})",
+        params,
+    )
+    return {"ok": True, "deleted": len(normalized)}
+
+
+@app.post("/api/descuentos/{account_id}/bulk-edit")
+async def api_descuentos_bulk_edit(request: Request, account_id: int):
+    """Actualiza el % de descuento en masa. Body JSON:
+      { "mlas": ["MLA1", "MLA2", ...], "discount_pct": <0-100> }
+    """
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    body = await request.json()
+    mlas = body.get("mlas") or []
+    try:
+        pct = float(body.get("discount_pct"))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "discount_pct inválido")
+    if pct < 0 or pct > 100:
+        raise HTTPException(400, "discount_pct fuera de rango (0-100)")
+    if not isinstance(mlas, list) or not mlas:
+        raise HTTPException(400, "Faltan MLAs para actualizar")
+    normalized = [_normalize_mla(m) for m in mlas if m]
+    if not normalized:
+        return {"ok": True, "updated": 0}
+    placeholders = ", ".join([f":m{i}" for i in range(len(normalized))])
+    params = {"aid": account_id, "pct": pct}
+    for i, m in enumerate(normalized):
+        params[f"m{i}"] = m
+    db_execute(
+        f"UPDATE product_discounts SET discount_pct=:pct, updated_at=NOW()"
+        f" WHERE account_id=:aid AND mla IN ({placeholders})",
+        params,
+    )
+    return {"ok": True, "updated": len(normalized)}
+
+
 @app.post("/api/descuentos/{account_id}/upload")
 async def api_descuentos_upload(request: Request, account_id: int):
     user_id = get_session_user_id(request)
