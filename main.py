@@ -2792,16 +2792,19 @@ async def api_promociones_items(
         except Exception:
             promo_global = {}
 
-        # Paginación robusta: no confiamos en `paging.total` (ML lo
-        # omite o devuelve mal en algunas promos) — paramos sólo
-        # cuando un batch viene con menos items que el limit o
-        # cuando todos los items del batch ya los teníamos (duplicados
-        # = ML está paginando en círculos).
+        # Paginación: ML a veces no respeta el offset y devuelve
+        # batches duplicados. Dedupeamos por item_id y damos varios
+        # intentos antes de rendirnos. También leemos `paging.total`
+        # de la respuesta — si ML lo expone, usamos ese número como
+        # objetivo para saber cuándo terminar.
         all_results = []
         seen_ids: set = set()
         offset = 0
-        MAX_ITERATIONS = 200  # safety cap: 200 * 50 = 10k items
-        for _ in range(MAX_ITERATIONS):
+        expected_total = 0
+        total_raw = 0  # items totales devueltos por ML (con dupes)
+        duplicate_streak = 0
+        MAX_ITERATIONS = 200  # safety: 200 * 50 = 10k items
+        for iteration in range(MAX_ITERATIONS):
             try:
                 r = await client.get(
                     f"{ML_API_URL}/seller-promotions/promotions/{promotion_id}/items",
@@ -2818,8 +2821,15 @@ async def api_promociones_items(
                 break
             data = r.json()
             results = data.get("results", []) if isinstance(data, dict) else []
+            paging = data.get("paging") or {}
+            if paging.get("total"):
+                try:
+                    expected_total = int(paging["total"])
+                except (TypeError, ValueError):
+                    pass
             if not results:
                 break
+            total_raw += len(results)
             new_in_batch = 0
             for it in results:
                 iid = it.get("id") if isinstance(it, dict) else None
@@ -2828,12 +2838,17 @@ async def api_promociones_items(
                     all_results.append(it)
                     new_in_batch += 1
             offset += len(results)
-            # Si el batch vino con menos que el limit, es la última página.
+            # Stop conditions:
+            # 1. Batch vino con menos que el limit → última página real.
             if len(results) < 50:
                 break
-            # Si todo el batch eran duplicados, ML está re-emitiendo lo
-            # mismo (offset roto o cap) — cortamos.
-            if new_in_batch == 0:
+            # 2. ML reportó un total y ya lo alcanzamos.
+            if expected_total > 0 and len(seen_ids) >= expected_total:
+                break
+            # 3. Streak de duplicados largo (ML reciclando). Damos hasta
+            #    5 intentos seguidos sin nuevos antes de cortar.
+            duplicate_streak = (duplicate_streak + 1) if new_in_batch == 0 else 0
+            if duplicate_streak >= 5:
                 break
 
         # Enriquecer con SKU y nombre desde /items/{id}. Sin filtrar
@@ -3260,6 +3275,10 @@ async def api_promociones_items(
                                 if isinstance(promo_global, dict) and promo_global else None),
         "default_min_pct": default_min_pct,
         "default_meli_pct": default_meli_pct,
+        # Diagnóstico de paginación
+        "paging_expected_total": expected_total,  # lo que dice ML que hay
+        "paging_returned_raw": total_raw,         # items totales con dupes
+        "paging_unique": len(seen_ids),           # items únicos
     }
     if all_results:
         first_list = all_results[0]
