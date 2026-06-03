@@ -3483,18 +3483,44 @@ async def api_orders(request: Request, account_id: int,
 
     user = get_user(user_id)
 
-    # Siempre servimos el caché de Postgres si existe Y el caché cubre el rango
-    # completo pedido. Si el usuario navega de 90d → 1año, el caché tiene órdenes
-    # de 90d que caen dentro del rango de 1 año, pero NO cubren los 9 meses previos.
-    # cache_fetched_from registra hasta dónde hemos bajado de ML; si df es anterior
-    # a ese valor, hay un hueco y tenemos que ir a ML.
+    # ── Cache lookup ──────────────────────────────────────────────
+    # cache_fetched_from registra hasta dónde hemos bajado de ML para esta
+    # cuenta. Si df >= cache_fetched_from, el rango pedido está completamente
+    # cacheado. Si no, hay un hueco más viejo que tenemos que bajar de ML.
     cached_orders = db_fetch_order_snapshots(account_id, df, dt)
     cache_fetched_from = acc.get("cache_fetched_from")
-    cache_covers_range = (
-        cache_fetched_from is not None and
-        df >= str(cache_fetched_from)[:10]
-    )
-    if cached_orders and not refresh and cache_covers_range:
+    cff_iso = str(cache_fetched_from)[:10] if cache_fetched_from else None
+    cache_covers_older = cff_iso is not None and df >= cff_iso
+
+    # Pure cache hit: rango cubierto + no se pidió refresh → devolver inmediato.
+    if cached_orders and not refresh and cache_covers_older:
+        return build_dashboard_payload(cached_orders, details_complete=True)
+
+    # ── Determinar qué rangos hay que bajar de ML ─────────────────
+    # Idea: NO re-bajar lo que ya tenemos en caché. Solo:
+    #  (a) El hueco más viejo [df, cff_iso - 1d] si df < cff_iso.
+    #  (b) Los últimos RECENT_REFRESH_DAYS días si refresh=True (datos recientes
+    #      pueden cambiar de estado: pending→paid, paid→refund, etc).
+    RECENT_REFRESH_DAYS = 7
+    recent_cutoff_iso = (today - timedelta(days=RECENT_REFRESH_DAYS)).isoformat()
+
+    fetch_ranges: list = []  # list of (df_iso, dt_iso)
+    if cff_iso is None:
+        # No hay caché todavía: bajar el rango completo
+        fetch_ranges.append((df, dt))
+    else:
+        if df < cff_iso:
+            # Hueco viejo a llenar
+            gap_end = (datetime.strptime(cff_iso, "%Y-%m-%d").date() - timedelta(days=1)).isoformat()
+            fetch_ranges.append((df, gap_end))
+        if refresh:
+            recent_start = max(recent_cutoff_iso, df)
+            if recent_start <= dt:
+                fetch_ranges.append((recent_start, dt))
+
+    if not fetch_ranges:
+        # Defensa: no debería pasar dado el early-return, pero si llegamos
+        # acá con caché y sin nada que bajar, devolver el caché tal cual.
         return build_dashboard_payload(cached_orders, details_complete=True)
 
     token = await refresh_ml_token(account_id)
@@ -3505,35 +3531,21 @@ async def api_orders(request: Request, account_id: int,
         raise HTTPException(502)
     headers = {"Authorization": f"Bearer {token}"}
 
-    from_utc = datetime.strptime(df, "%Y-%m-%d") + timedelta(hours=3) - timedelta(hours=24)
-    to_utc   = datetime.strptime(dt, "%Y-%m-%d") + timedelta(hours=27)  # 23:59:59 AR = ~03:00 UTC día siguiente
-    search_params: dict = {
-        "seller": acc["ml_user_id"],
-        "sort": "date_desc",
-        "limit": 50,
-        "order.date_created.from": from_utc.strftime("%Y-%m-%dT%H:%M:%S.000-00:00"),
-        "order.date_created.to":   to_utc.strftime("%Y-%m-%dT%H:%M:%S.000-00:00"),
-    }
-
-    # Particionar el rango en chunks de 30 días para esquivar el tope de
-    # 1000 órdenes por búsqueda paginada que tiene /orders/search.
-    df_d = datetime.strptime(df, "%Y-%m-%d").date()
-    dt_d = datetime.strptime(dt, "%Y-%m-%d").date()
-    date_chunks: list = []
-    cur = df_d
-    while cur <= dt_d:
-        chunk_end = min(cur + timedelta(days=29), dt_d)
-        date_chunks.append((cur, chunk_end))
-        cur = chunk_end + timedelta(days=1)
-
     base_search = {
         "seller": acc["ml_user_id"],
         "sort": "date_desc",
         "limit": 50,
     }
 
-    async with httpx.AsyncClient(timeout=120) as client:
-        async def fetch_chunk(start_d, end_d):
+    # Lista compartida para errores que vuelven a ML (429, 500, etc.). Si algo
+    # falla, lo loggeamos y lo devolvemos en el payload para que se vea en el UI.
+    fetch_errors: list = []
+
+    async with httpx.AsyncClient(timeout=180) as client:
+        async def fetch_chunk_recursive(start_d, end_d, depth=0):
+            """Trae todas las órdenes en [start_d, end_d]. Si el chunk pega el
+            tope de 1000 órdenes que /orders/search expone, parte el rango por
+            la mitad y recursa. Sin eso, perderíamos ventas silenciosamente."""
             from_utc = datetime.combine(start_d, datetime.min.time()) + timedelta(hours=3) - timedelta(hours=24)
             to_utc = datetime.combine(end_d, datetime.min.time()) + timedelta(hours=27)
             chunk_params = {
@@ -3541,31 +3553,74 @@ async def api_orders(request: Request, account_id: int,
                 "order.date_created.from": from_utc.strftime("%Y-%m-%dT%H:%M:%S.000-00:00"),
                 "order.date_created.to":   to_utc.strftime("%Y-%m-%dT%H:%M:%S.000-00:00"),
             }
-            r = await client.get(f"{ML_API_URL}/orders/search", headers=headers, params={**chunk_params, "offset": 0})
+            try:
+                r = await client.get(f"{ML_API_URL}/orders/search", headers=headers, params={**chunk_params, "offset": 0})
+            except Exception as e:
+                fetch_errors.append(f"[{start_d}..{end_d}] fetch error: {str(e)[:200]}")
+                return []
             if r.status_code != 200:
+                fetch_errors.append(f"[{start_d}..{end_d}] HTTP {r.status_code}: {r.text[:200]}")
                 return []
             data = r.json()
             results = list(data.get("results", []))
-            total = min(data.get("paging", {}).get("total", 0), 1000)  # cap duro de ML
-            offsets = list(range(50, total, 50))
+            total = data.get("paging", {}).get("total", 0)
+
+            # Si pegamos el tope y todavía hay días para partir, recursamos.
+            # max_depth=8 → hasta partir 1 año en chunks de ~1 día si hiciera falta.
+            if total >= 1000 and (end_d - start_d).days >= 1 and depth < 8:
+                span = (end_d - start_d).days
+                mid = start_d + timedelta(days=span // 2)
+                left, right = await asyncio.gather(
+                    fetch_chunk_recursive(start_d, mid, depth + 1),
+                    fetch_chunk_recursive(mid + timedelta(days=1), end_d, depth + 1),
+                )
+                return left + right
+
+            # Paginación normal hasta total (cap duro de ML en 1000).
+            capped = min(total, 1000)
+            offsets = list(range(50, capped, 50))
             if offsets:
-                sem = asyncio.Semaphore(8)
+                sem = asyncio.Semaphore(10)
                 async def get_page(off):
                     async with sem:
-                        rp = await client.get(f"{ML_API_URL}/orders/search", headers=headers, params={**chunk_params, "offset": off})
-                        return rp.json().get("results", []) if rp.status_code == 200 else []
+                        try:
+                            rp = await client.get(f"{ML_API_URL}/orders/search", headers=headers, params={**chunk_params, "offset": off})
+                        except Exception as e:
+                            fetch_errors.append(f"[{start_d}..{end_d}] offset {off} error: {str(e)[:200]}")
+                            return []
+                        if rp.status_code != 200:
+                            fetch_errors.append(f"[{start_d}..{end_d}] offset {off} HTTP {rp.status_code}")
+                            return []
+                        return rp.json().get("results", [])
                 pages = await asyncio.gather(*[get_page(off) for off in offsets])
                 for page in pages:
                     results.extend(page)
             return results
 
-        # Chunks en paralelo. Para 1 año = 12 chunks corriendo a la vez.
-        chunk_results = await asyncio.gather(*[fetch_chunk(s, e) for s, e in date_chunks])
-        all_results: list = []
-        for results in chunk_results:
-            all_results.extend(results)
+        async def fetch_one_range(range_df_iso, range_dt_iso):
+            """Particiona un rango en chunks iniciales de 30 días y los baja
+            en paralelo. fetch_chunk_recursive maneja el split si alguno pega el tope."""
+            range_df_d = datetime.strptime(range_df_iso, "%Y-%m-%d").date()
+            range_dt_d = datetime.strptime(range_dt_iso, "%Y-%m-%d").date()
+            chunks = []
+            cur = range_df_d
+            while cur <= range_dt_d:
+                chunk_end = min(cur + timedelta(days=29), range_dt_d)
+                chunks.append((cur, chunk_end))
+                cur = chunk_end + timedelta(days=1)
+            chunk_lists = await asyncio.gather(*[fetch_chunk_recursive(s, e) for s, e in chunks])
+            out = []
+            for c in chunk_lists:
+                out.extend(c)
+            return out
 
-        # Deduplicar (por si una orden cae en el solapamiento de 24h entre chunks).
+        # Todos los rangos a bajar, en paralelo.
+        per_range = await asyncio.gather(*[fetch_one_range(rd, rt) for rd, rt in fetch_ranges])
+        all_results: list = []
+        for r in per_range:
+            all_results.extend(r)
+
+        # Deduplicar por id (rangos pueden solaparse 24h por el offset UTC↔AR).
         seen: set = set()
         deduped: list = []
         for o in all_results:
@@ -3591,7 +3646,9 @@ async def api_orders(request: Request, account_id: int,
             uncached = [sid for sid in unique_sids if sid not in cost_cache]
 
             if uncached:
-                ship_sem = asyncio.Semaphore(40)
+                # Subido de 40 a 80 para reducir latencia en fetches grandes.
+                # ML soporta más concurrencia sin pegarse contra rate limit.
+                ship_sem = asyncio.Semaphore(80)
                 async def fetch_ship(sid):
                     async with ship_sem:
                         return sid, await get_shipping_cost(client, sid, headers)
@@ -3771,21 +3828,41 @@ async def api_orders(request: Request, account_id: int,
         orders.append(p)
 
     orders.sort(key=lambda x: (x.get("fecha") or "", x.get("hora") or ""), reverse=True)
+
+    # ── Merge con el caché ──────────────────────────────────────
+    # `orders` contiene solo las órdenes que bajamos de ML en esta llamada
+    # (rangos delta). Las órdenes ya cacheadas que estaban dentro de [df, dt]
+    # se mergean acá, priorizando las recién bajadas si coinciden por id.
+    ml_ids = {o.get("id") for o in orders if o.get("id") is not None}
+    merged = list(orders) + [o for o in cached_orders if o.get("id") not in ml_ids]
+    # Filtro defensivo por rango (debería ser redundante porque ya filtramos)
+    merged = [o for o in merged if not o.get("fecha") or df <= o["fecha"] <= dt]
+    merged.sort(key=lambda x: (x.get("fecha") or "", x.get("hora") or ""), reverse=True)
+
     if not fast:
         # Persistir caches en background para no demorar la respuesta al cliente.
         if new_shipping_costs:
             asyncio.create_task(asyncio.to_thread(db_save_shipping_costs, new_shipping_costs))
-        asyncio.create_task(
-            asyncio.to_thread(db_save_order_snapshots, account_id, orders, True)
-        )
+        if orders:
+            asyncio.create_task(
+                asyncio.to_thread(db_save_order_snapshots, account_id, orders, True)
+            )
         # Registrar hasta qué fecha hemos bajado de ML para este account.
-        # LEAST() solo avanza hacia atrás (fecha más antigua).
+        # Usamos el df más viejo entre los rangos bajados; LEAST() solo avanza
+        # hacia atrás, así que si solo refrescamos lo reciente no movemos cff.
+        min_fetched_df = min(rd for rd, _ in fetch_ranges)
         db_execute(
             "UPDATE ml_accounts SET cache_fetched_from ="
             " LEAST(COALESCE(cache_fetched_from, '9999-12-31'::DATE), :df::DATE) WHERE id=:id",
-            {"df": df, "id": account_id}
+            {"df": min_fetched_df, "id": account_id}
         )
-    return build_dashboard_payload(orders, details_complete=not fast)
+
+    payload = build_dashboard_payload(merged, details_complete=not fast)
+    if fetch_errors:
+        # Devolver los errores en el payload para que el UI los pueda mostrar.
+        # Capeamos a 10 para no inflar la respuesta.
+        payload["fetch_errors"] = fetch_errors[:10]
+    return payload
 
 
 # Mapeo logistic_type → grupo visible (debe matchear con el del front)

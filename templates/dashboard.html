@@ -377,6 +377,16 @@
       document.getElementById('content').style.display='block';
       const ts = new Date(data.ultima_actualizacion+'Z').toLocaleString('es-AR',{dateStyle:'short',timeStyle:'short'});
       document.getElementById('last-update').textContent = `Actualizado: ${ts}`;
+      // Errores parciales del fetch contra ML (429, timeouts en chunks
+      // específicos, etc). El payload se devuelve igual con lo que sí
+      // pudimos bajar, pero mostramos un aviso para que se vea que hay un
+      // problema y no creas que las cifras son la realidad completa.
+      if (data.fetch_errors && data.fetch_errors.length) {
+        const box = document.getElementById('error-box');
+        box.textContent = `Algunos rangos fallaron al bajar de ML (${data.fetch_errors.length}). Probá Actualizar.`;
+        box.title = data.fetch_errors.join('\n');
+        box.style.display = 'block';
+      }
     } catch(e) {
       if(seq !== loadSeq) return;
       document.getElementById('error-box').textContent = e.message;
