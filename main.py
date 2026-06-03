@@ -4090,6 +4090,70 @@ _ENVIO_LABELS = {
 }
 
 
+@app.get("/api/orders-all")
+async def api_orders_all(request: Request,
+                         date_from: Optional[str] = None, date_to: Optional[str] = None,
+                         refresh: bool = False, fast: bool = False,
+                         cache_only: bool = False):
+    """Vista agregada de TODAS las cuentas ML del usuario en un solo payload.
+
+    Reusa `api_orders` por cuenta (mismo cálculo, caché, delta-fetch y
+    refresh), corre las cuentas en paralelo y mergea las órdenes. Cada orden
+    queda etiquetada con el nickname de su cuenta (`cuenta`) para poder
+    distinguirla en la tabla. Si una cuenta falla, no rompe el resto.
+    """
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    accs = db_fetchall(
+        "SELECT id, nickname FROM ml_accounts WHERE user_id=:uid"
+        " AND access_token IS NOT NULL AND access_token <> '' ORDER BY id",
+        {"uid": user_id},
+    )
+    if not accs:
+        payload = build_dashboard_payload([], details_complete=not fast)
+        if cache_only:
+            payload["cache_only"] = True
+            payload["cache_empty"] = True
+        return payload
+
+    async def _safe(aid: int):
+        try:
+            return await api_orders(request, aid, date_from, date_to, refresh, fast, cache_only)
+        except HTTPException:
+            return None
+        except Exception:
+            return None
+
+    results = await asyncio.gather(*[_safe(a["id"]) for a in accs])
+
+    all_orders: list = []
+    fetch_errors: list = []
+    diag_accounts: dict = {}
+    for a, p in zip(accs, results):
+        if not p:
+            fetch_errors.append(f"[{a['nickname']}] no se pudo cargar")
+            continue
+        for o in p.get("orders", []):
+            o = dict(o)
+            o["cuenta"] = a["nickname"]
+            all_orders.append(o)
+        for e in (p.get("fetch_errors") or []):
+            fetch_errors.append(f"[{a['nickname']}] {e}")
+        if p.get("diag"):
+            diag_accounts[a["nickname"]] = p["diag"]
+
+    payload = build_dashboard_payload(all_orders, details_complete=not fast)
+    payload["diag"] = {"accounts": diag_accounts, "n_accounts": len(accs)}
+    if cache_only:
+        payload["cache_only"] = True
+        # Vacío sólo si NINGUNA cuenta tiene órdenes cacheadas.
+        payload["cache_empty"] = not any((p and p.get("orders")) for p in results)
+    if fetch_errors:
+        payload["fetch_errors"] = fetch_errors[:10]
+    return payload
+
+
 @app.get("/api/orders/{account_id}/export")
 async def api_orders_export(
     request: Request, account_id: int,

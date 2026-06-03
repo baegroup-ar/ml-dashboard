@@ -101,12 +101,13 @@
     <label>Cuenta ML:</label>
     <select id="account-select" onchange="onAccountChange()">
       {% for acc in accounts %}
-      <option value="{{ acc.id }}">{{ acc.nickname }}</option>
+      <option value="{{ acc.id }}" {% if loop.first %}selected{% endif %}>{{ acc.nickname }}</option>
       {% endfor %}
+      {% if accounts|length > 1 %}<option value="all">📊 Todas las cuentas (agregado)</option>{% endif %}
     </select>
     <a href="/ml/connect" class="connect-link">+ Conectar otra cuenta</a>
     <form id="disconnect-form" method="post" style="margin:0;">
-      <button type="submit" class="disconnect-btn" onclick="confirmDisconnect(event)">Desconectar</button>
+      <button type="submit" class="disconnect-btn" id="disconnect-btn" onclick="confirmDisconnect(event)">Desconectar</button>
     </form>
   </div>
 
@@ -341,8 +342,19 @@
   function onAccountChange() {
     currentAccountId = document.getElementById('account-select').value;
     refreshedRanges.clear();
+    updateAccountScopedUI();
     resetContent();
     loadRange(true);
+  }
+
+  // En modo "Todas las cuentas" no aplican acciones por cuenta (desconectar
+  // / export individual): las ocultamos para evitar confusión.
+  function updateAccountScopedUI() {
+    const isAll = currentAccountId === 'all';
+    const disc = document.getElementById('disconnect-btn');
+    if(disc) disc.style.display = isAll ? 'none' : '';
+    const exp = document.getElementById('btn-export-excel');
+    if(exp) exp.style.display = isAll ? 'none' : '';
   }
   function confirmDisconnect(e) { if(!confirm('¿Desconectar esta cuenta?')){ e.preventDefault(); return; } document.getElementById('disconnect-form').action=`/ml/disconnect/${currentAccountId}`; }
 
@@ -405,8 +417,11 @@
     const params = getParams();
     if(forceRefresh) params.set('refresh', '1');
     if(cacheOnly) params.set('cache_only', '1');
+    const baseUrl = currentAccountId === 'all'
+      ? '/api/orders-all'
+      : `/api/orders/${currentAccountId}`;
     try {
-      const r = await fetch(`/api/orders/${currentAccountId}?${params}`);
+      const r = await fetch(`${baseUrl}?${params}`);
       if(!r.ok) throw new Error('Error al obtener ventas.');
       const data = await r.json();
       if(seq !== loadSeq) return;
@@ -559,6 +574,10 @@
       const envioCell = IS_ADMIN
         ? `<td style="font-size:11px;font-weight:500;color:${logisticColor(o.logistic_type)};white-space:nowrap;">${logisticLabel(o.logistic_type)}</td>`
         : '';
+      // Etiqueta de cuenta — solo presente en la vista "Todas las cuentas".
+      const acctTag = o.cuenta
+        ? `<span style="display:inline-block;font-size:10px;font-weight:600;background:#eef3ff;color:#3483FA;border-radius:5px;padding:1px 6px;margin-right:6px;vertical-align:middle;">${o.cuenta}</span>`
+        : '';
       const commonCells = `
         <td style="text-align:center;">${units}</td>
         <td>${fmt(o.monto)}</td>
@@ -576,7 +595,7 @@
           <td style="font-size:11px;color:#aaa;white-space:nowrap;">#${o.venta_id||o.id}${cancelPill}</td>
           <td>
             <button id="btn-pack-${o.id}" onclick="togglePack('${o.id}')" style="background:none;border:none;cursor:pointer;font-size:11px;color:#3483FA;padding:0 4px 0 0;line-height:1;">▶</button>
-            <span style="font-weight:500;">Paquete x${units}</span>
+            ${acctTag}<span style="font-weight:500;">Paquete x${units}</span>
           </td>
           ${envioCell}
           ${commonCells}
@@ -603,7 +622,7 @@
           <td>${o.fecha}</td>
           <td style="color:#888;">${o.hora||'—'}</td>
           <td style="font-size:11px;color:#aaa;white-space:nowrap;">#${o.venta_id||o.id}${cancelPill}</td>
-          <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${prod}">${prod}</td>
+          <td style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${prod}">${acctTag}${prod}</td>
           ${envioCell}
           ${commonCells}
         </tr>`);
@@ -643,6 +662,10 @@
 
   function exportOrdersExcel() {
     if(!currentAccountId) return;
+    if(currentAccountId === 'all') {
+      alert('El export a Excel es por cuenta. Elegí una cuenta puntual para descargarlo.');
+      return;
+    }
     const df = document.getElementById('date-from')?.value || '';
     const dt = document.getElementById('date-to')?.value || '';
     const params = new URLSearchParams();
@@ -657,6 +680,7 @@
 
   // Init
   if(currentAccountId) {
+    updateAccountScopedUI();
     setPeriod('today', document.querySelector('[onclick*="today"]'));
   }
 </script>
