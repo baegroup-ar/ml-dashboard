@@ -2925,7 +2925,7 @@ async def api_promociones_items(
         for r in discount_rows
     }
 
-    promo_page_limit = 100
+    promo_page_limit = 49
     params = {"app_version": "v2", "status": status, "limit": promo_page_limit}
     if promotion_type:
         params["promotion_type"] = promotion_type
@@ -2963,7 +2963,7 @@ async def api_promociones_items(
         expected_total = 0
         total_raw = 0  # items totales devueltos por ML (con dupes)
         duplicate_streak = 0
-        MAX_ITERATIONS = 200  # safety: 200 * 100 = 20k items
+        MAX_ITERATIONS = 300  # safety: 300 * 49 = 14.7k items
         for iteration in range(MAX_ITERATIONS):
             try:
                 r = await client.get(
