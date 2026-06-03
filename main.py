@@ -334,6 +334,42 @@ def db_save_order_snapshots(account_id: int, orders: list, details_complete: boo
         conn.commit()
 
 
+def db_replace_order_snapshots_for_range(account_id: int, date_from: str, date_to: str, orders: list, details_complete: bool):
+    """Replace a fully-refreshed range atomically so old partial cache rows cannot survive."""
+    params_list = [
+        {
+            "aid": account_id,
+            "oid": str(order["id"]),
+            "paid_date": order["fecha"],
+            "paid_time": order.get("hora") or "",
+            "payload": json.dumps(order),
+            "complete": details_complete,
+        }
+        for order in orders
+    ]
+    with engine.connect() as conn:
+        conn.execute(
+            text(
+                "DELETE FROM order_snapshot_cache"
+                " WHERE account_id=:aid AND paid_date BETWEEN :df AND :dt"
+            ),
+            {"aid": account_id, "df": date_from, "dt": date_to},
+        )
+        if params_list:
+            conn.execute(text("""
+                INSERT INTO order_snapshot_cache
+                    (account_id, order_id, paid_date, paid_time, payload, details_complete, updated_at)
+                VALUES (:aid, :oid, :paid_date, :paid_time, CAST(:payload AS JSONB), :complete, NOW())
+                ON CONFLICT (account_id, order_id) DO UPDATE SET
+                    paid_date=EXCLUDED.paid_date,
+                    paid_time=EXCLUDED.paid_time,
+                    payload=EXCLUDED.payload,
+                    details_complete=EXCLUDED.details_complete,
+                    updated_at=NOW()
+            """), params_list)
+        conn.commit()
+
+
 def build_dashboard_payload(orders: list, details_complete: bool):
     orders = sorted(orders, key=lambda x: (x.get("fecha") or "", x.get("hora") or ""), reverse=True)
 
@@ -3482,6 +3518,9 @@ async def api_orders(request: Request, account_id: int,
         df = str(datetime.strptime(dt, "%Y-%m-%d").date() - timedelta(days=365))
 
     user = get_user(user_id)
+    admin_orders_mode = bool(user and user.get("is_admin"))
+    admin_full_refresh = bool(admin_orders_mode and refresh)
+    order_search_date_field = "order.date_closed" if admin_orders_mode else "order.date_last_updated"
 
     # ── Cache lookup ──────────────────────────────────────────────
     # cache_fetched_from registra hasta dónde hemos bajado de ML para esta
@@ -3490,6 +3529,16 @@ async def api_orders(request: Request, account_id: int,
     cached_orders = db_fetch_order_snapshots(account_id, df, dt)
     cache_fetched_from = acc.get("cache_fetched_from")
     cff_iso = str(cache_fetched_from)[:10] if cache_fetched_from else None
+    # Si no hay órdenes en caché pero cff_iso está seteado, el caché está roto
+    # (fetch previo falló y quedó marcado como "completo"). Forzar refetch
+    # del rango completo en lugar de confiar en el cff_iso poisoned.
+    if not cached_orders and cff_iso is not None:
+        cff_iso = None
+    # Para el administrador, refresh=1 significa recomponer el rango pedido
+    # completo. No confiamos en cache_fetched_from porque puede haber quedado
+    # adelantado por un fetch parcial anterior y dejar miles de ventas afuera.
+    if admin_full_refresh:
+        cff_iso = None
     cache_covers_older = cff_iso is not None and df >= cff_iso
 
     # Pure cache hit: rango cubierto + no se pidió refresh → devolver inmediato.
@@ -3578,16 +3627,15 @@ async def api_orders(request: Request, account_id: int,
             tope que /orders/search expone (max 1000 paginables, paging.total
             puede reportar más), parte el rango por la mitad y recursa.
 
-            Usamos order.date_last_updated en vez de date_created para
-            capturar todas las órdenes con actividad en el período. Una orden
-            creada antes pero pagada en el rango aparecía como missing con
-            date_created. Esto matchea el counter de "Ventas" del panel de ML."""
+            Para admin usamos order.date_closed como fecha de búsqueda porque
+            ML documenta ese campo como fecha de cierre de la venta. Para no
+            admin mantenemos date_last_updated, que era el comportamiento previo."""
             from_utc = datetime.combine(start_d, datetime.min.time()) + timedelta(hours=3) - timedelta(hours=24)
             to_utc = datetime.combine(end_d, datetime.min.time()) + timedelta(hours=27)
             chunk_params = {
                 **base_search,
-                "order.date_last_updated.from": from_utc.strftime("%Y-%m-%dT%H:%M:%S.000-00:00"),
-                "order.date_last_updated.to":   to_utc.strftime("%Y-%m-%dT%H:%M:%S.000-00:00"),
+                f"{order_search_date_field}.from": from_utc.strftime("%Y-%m-%dT%H:%M:%S.000-00:00"),
+                f"{order_search_date_field}.to":   to_utc.strftime("%Y-%m-%dT%H:%M:%S.000-00:00"),
             }
             r, err = await _get_with_retry({**chunk_params, "offset": 0})
             if r is None or r.status_code != 200:
@@ -3865,7 +3913,8 @@ async def api_orders(request: Request, account_id: int,
     # (rangos delta). Las órdenes ya cacheadas que estaban dentro de [df, dt]
     # se mergean acá, priorizando las recién bajadas si coinciden por id.
     ml_ids = {o.get("id") for o in orders if o.get("id") is not None}
-    merged = list(orders) + [o for o in cached_orders if o.get("id") not in ml_ids]
+    cached_for_merge = [] if admin_full_refresh and not fetch_errors else cached_orders
+    merged = list(orders) + [o for o in cached_for_merge if o.get("id") not in ml_ids]
     # Filtro defensivo por rango (debería ser redundante porque ya filtramos)
     merged = [o for o in merged if not o.get("fecha") or df <= o["fecha"] <= dt]
     merged.sort(key=lambda x: (x.get("fecha") or "", x.get("hora") or ""), reverse=True)
@@ -3874,7 +3923,11 @@ async def api_orders(request: Request, account_id: int,
         # Persistir caches en background para no demorar la respuesta al cliente.
         if new_shipping_costs:
             asyncio.create_task(asyncio.to_thread(db_save_shipping_costs, new_shipping_costs))
-        if orders:
+        if admin_full_refresh and not fetch_errors:
+            asyncio.create_task(
+                asyncio.to_thread(db_replace_order_snapshots_for_range, account_id, df, dt, orders, True)
+            )
+        elif orders:
             asyncio.create_task(
                 asyncio.to_thread(db_save_order_snapshots, account_id, orders, True)
             )
@@ -3898,6 +3951,8 @@ async def api_orders(request: Request, account_id: int,
     diag["after_filter"] = len(orders)
     diag["from_cache"] = len([o for o in merged if o.get("id") not in ml_ids])
     diag["fetch_ranges"] = fetch_ranges
+    diag["admin_full_refresh"] = admin_full_refresh
+    diag["search_date_field"] = order_search_date_field
     payload["diag"] = diag
     if fetch_errors:
         # Devolver los errores en el payload para que el UI los pueda mostrar.
