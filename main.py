@@ -2925,11 +2925,6 @@ async def api_promociones_items(
         for r in discount_rows
     }
 
-    promo_page_limit = 49
-    params = {"app_version": "v2", "status": status, "limit": promo_page_limit}
-    if promotion_type:
-        params["promotion_type"] = promotion_type
-
     async with httpx.AsyncClient(timeout=60) as client:
         # Detalle global de la promo (acá ML expone el default discount
         # para DEAL/SELLER_CAMPAIGN, las fechas, el meli_percentage para
@@ -2952,64 +2947,10 @@ async def api_promociones_items(
         except Exception:
             promo_global = {}
 
-        # Paginación: ML a veces no respeta el offset y devuelve
-        # batches duplicados. Dedupeamos por item_id y damos varios
-        # intentos antes de rendirnos. También leemos `paging.total`
-        # de la respuesta — si ML lo expone, usamos ese número como
-        # objetivo para saber cuándo terminar.
         all_results = []
         seen_ids: set = set()
-        offset = 0
         expected_total = 0
-        total_raw = 0  # items totales devueltos por ML (con dupes)
-        duplicate_streak = 0
-        MAX_ITERATIONS = 300  # safety: 300 * 49 = 14.7k items
-        for iteration in range(MAX_ITERATIONS):
-            try:
-                r = await client.get(
-                    f"{ML_API_URL}/seller-promotions/promotions/{promotion_id}/items",
-                    headers=headers,
-                    params={**params, "offset": offset},
-                )
-            except Exception as e:
-                if not all_results:
-                    return {"items": [], "error": f"ML error: {str(e)[:200]}"}
-                break
-            if r.status_code != 200:
-                if not all_results:
-                    return {"items": [], "error": f"ML {r.status_code}: {r.text[:200]}"}
-                break
-            data = r.json()
-            results = data.get("results", []) if isinstance(data, dict) else []
-            paging = data.get("paging") or {}
-            if paging.get("total"):
-                try:
-                    expected_total = int(paging["total"])
-                except (TypeError, ValueError):
-                    pass
-            if not results:
-                break
-            total_raw += len(results)
-            new_in_batch = 0
-            for it in results:
-                iid = it.get("id") if isinstance(it, dict) else None
-                if iid and iid not in seen_ids:
-                    seen_ids.add(iid)
-                    all_results.append(it)
-                    new_in_batch += 1
-            offset += len(results)
-            # Stop conditions:
-            # 1. Batch vino con menos que el limit → última página real.
-            if len(results) < promo_page_limit:
-                break
-            # 2. ML reportó un total y ya lo alcanzamos.
-            if expected_total > 0 and len(seen_ids) >= expected_total:
-                break
-            # 3. Streak de duplicados largo (ML reciclando). Damos hasta
-            #    5 intentos seguidos sin nuevos antes de cortar.
-            duplicate_streak = (duplicate_streak + 1) if new_in_batch == 0 else 0
-            if duplicate_streak >= 5:
-                break
+        total_raw = 0
 
         # Enriquecer con SKU y nombre desde /items/{id}. Sin filtrar
         # attributes para que vengan también `attributes[]` y `variations[]`,
@@ -3076,11 +3017,11 @@ async def api_promociones_items(
 
         scan_item_count = 0
         scan_matched_count = 0
-        promo_details_override = None
+        promo_details_override = []
         seller_item_ids = await fetch_all_seller_item_ids(client, headers, acc["ml_user_id"])
         if seller_item_ids:
             scan_item_count = len(seller_item_ids)
-            detail_sem = asyncio.Semaphore(15)
+            detail_sem = asyncio.Semaphore(20)
 
             async def fetch_matching_detail(iid):
                 async with detail_sem:
@@ -3096,27 +3037,17 @@ async def api_promociones_items(
 
             pairs = await asyncio.gather(*[fetch_matching_detail(i) for i in seller_item_ids])
             matched = [p for p in pairs if p]
-            if matched:
-                all_results = [base for base, _ in matched]
-                promo_details_override = [detail for _, detail in matched]
-                scan_matched_count = len(matched)
+            all_results = [base for base, _ in matched]
+            promo_details_override = [detail for _, detail in matched]
+            scan_matched_count = len(matched)
 
         ids = [it.get("id") for it in all_results if it.get("id")]
-        sem = asyncio.Semaphore(15)
+        sem = asyncio.Semaphore(20)
         async def fetch(iid):
             async with sem:
                 return await enrich(iid)
-        async def fetch_detail(iid):
-            async with sem:
-                return await fetch_item_promo_detail(iid)
-        if promo_details_override is not None:
-            enriched = await asyncio.gather(*[fetch(i) for i in ids])
-            promo_details = promo_details_override
-        else:
-            enriched, promo_details = await asyncio.gather(
-                asyncio.gather(*[fetch(i) for i in ids]),
-                asyncio.gather(*[fetch_detail(i) for i in ids]),
-            )
+        enriched = await asyncio.gather(*[fetch(i) for i in ids])
+        promo_details = promo_details_override
 
     def _extract_sku(info: Optional[dict]) -> str:
         """Saca el SELLER_SKU del item. ML lo expone en distintos lugares:
@@ -3467,7 +3398,7 @@ async def api_promociones_items(
         "paging_unique": len(seen_ids),           # items únicos
         "scan_item_count": scan_item_count,
         "scan_matched_count": scan_matched_count,
-        "source": "seller_items_scan" if promo_details_override is not None else "promotion_items_endpoint",
+        "source": "seller_items_scan",
     }
     if all_results:
         first_list = all_results[0]
@@ -3510,7 +3441,9 @@ async def api_promociones_apply(
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     results = []
     async with httpx.AsyncClient(timeout=60) as client:
-        sem = asyncio.Semaphore(8)
+        # ML bloquea temporalmente ofertas cuando procesa cambios masivos.
+        # Concurrencia baja + retries reduce HTTP 423 LockedEntityException.
+        sem = asyncio.Semaphore(3)
         async def apply_one(it):
             iid = it.get("item_id")
             ptype = (it.get("promotion_type") or "DEAL").upper()
@@ -3575,28 +3508,46 @@ async def api_promociones_apply(
             # Limpiamos campos None
             payload = {k: v for k, v in payload.items() if v is not None}
             async with sem:
-                try:
-                    r = await client.post(
-                        f"{ML_API_URL}/seller-promotions/items/{iid}",
-                        headers=headers,
-                        params={"app_version": "v2"},
-                        json=payload,
-                    )
-                    return {
-                        "item_id": iid,
-                        "ok": r.status_code in (200, 201, 204),
-                        "status": r.status_code,
-                        "error": (r.text[:500] if r.status_code not in (200, 201, 204) else None),
-                        "payload": payload,
-                    }
-                except Exception as e:
-                    return {
-                        "item_id": iid,
-                        "ok": False,
-                        "status": 0,
-                        "error": str(e)[:300],
-                        "payload": payload,
-                    }
+                last_status = 0
+                last_error = None
+                for attempt in range(5):
+                    try:
+                        r = await client.post(
+                            f"{ML_API_URL}/seller-promotions/items/{iid}",
+                            headers=headers,
+                            params={"app_version": "v2"},
+                            json=payload,
+                        )
+                        if r.status_code in (200, 201, 204):
+                            return {
+                                "item_id": iid,
+                                "ok": True,
+                                "status": r.status_code,
+                                "error": None,
+                                "payload": payload,
+                                "attempts": attempt + 1,
+                            }
+                        last_status = r.status_code
+                        last_error = r.text[:500]
+                        if r.status_code in (423, 429, 500, 502, 503, 504) and attempt < 4:
+                            await asyncio.sleep(1.5 * (attempt + 1))
+                            continue
+                        break
+                    except Exception as e:
+                        last_status = 0
+                        last_error = str(e)[:300]
+                        if attempt < 4:
+                            await asyncio.sleep(1.5 * (attempt + 1))
+                            continue
+                        break
+                return {
+                    "item_id": iid,
+                    "ok": False,
+                    "status": last_status,
+                    "error": last_error,
+                    "payload": payload,
+                    "attempts": 5,
+                }
         results = await asyncio.gather(*[apply_one(it) for it in items])
     return {"results": results, "ok": True}
 

@@ -944,6 +944,10 @@
       let msg = `${oks} aplicados correctamente.`;
       if(fails.length) {
         msg += `\n${fails.length} fallaron:\n\n`;
+        const locked = fails.filter(f => f.status === 423);
+        if(locked.length) {
+          msg += `${locked.length} quedaron bloqueados temporalmente por MercadoLibre (Offer Locked). Reintenta esos items en unos minutos.\n\n`;
+        }
         // Mostrar el error real de ML por cada item, así se ve qué pasó
         msg += fails.slice(0, 5).map(f =>
           `• ${f.item_id} [HTTP ${f.status}]: ${(f.error || 'sin detalle').slice(0, 200)}`
