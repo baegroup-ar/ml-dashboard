@@ -3588,7 +3588,8 @@ async def api_promociones_apply(
 @app.get("/api/orders/{account_id}")
 async def api_orders(request: Request, account_id: int,
                      date_from: Optional[str] = None, date_to: Optional[str] = None,
-                     refresh: bool = False, fast: bool = False):
+                     refresh: bool = False, fast: bool = False,
+                     cache_only: bool = False):
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
@@ -3615,6 +3616,12 @@ async def api_orders(request: Request, account_id: int,
     cached_orders = db_fetch_order_snapshots(account_id, df, dt)
     cache_fetched_from = acc.get("cache_fetched_from")
     cff_iso = str(cache_fetched_from)[:10] if cache_fetched_from else None
+    if cache_only:
+        payload = build_dashboard_payload(cached_orders, details_complete=True)
+        payload["cache_only"] = True
+        payload["cache_empty"] = not bool(cached_orders)
+        payload["cache_covers_older"] = cff_iso is not None and df >= cff_iso
+        return payload
     # Si no hay órdenes en caché pero cff_iso está seteado, el caché está roto
     # (fetch previo falló y quedó marcado como "completo"). Forzar refetch
     # del rango completo en lugar de confiar en el cff_iso poisoned.
@@ -3835,10 +3842,10 @@ async def api_orders(request: Request, account_id: int,
     for o, sid in zip(all_results, all_sids):
         a = float(o.get("total_amount", 0))
         estado = o.get("status", "")
+        payments = o.get("payments", [])
         if admin_orders_mode:
             sale_date_raw = o.get("date_closed") or o.get("date_created", "")
         else:
-            payments = o.get("payments", [])
             sale_date_raw = ""
             if payments:
                 sale_date_raw = payments[0].get("date_approved", "") or payments[0].get("date_created", "")
@@ -3872,6 +3879,10 @@ async def api_orders(request: Request, account_id: int,
                 envio = 0.0
         if billing.get("has_comision"):
             comision = billing.get("comision", comision)
+        refund_amount = round(sum(
+            float(p.get("transaction_amount_refunded") or 0)
+            for p in payments
+        ), 2)
         # Override Flex: si la venta es Flex y tenemos tarifa propia cargada
         # que matchea con la tarifa ML del shipment, usamos la tarifa propia
         # como Costo Envío (lo que el vendedor le paga a su mensajería).
@@ -3914,6 +3925,7 @@ async def api_orders(request: Request, account_id: int,
         raw_list.append({
             "id": o.get("id"),
             "pack_id": o.get("pack_id"),
+            "order_count": 1,
             "fecha": fecha,
             "hora": hora,
             "monto": round(a, 2),
@@ -3922,6 +3934,7 @@ async def api_orders(request: Request, account_id: int,
             "shipping_buyer": round(ingreso_envio, 2),
             "bonificacion": round(bonificacion, 2),
             "coupon_amt": round(float((o.get("coupon") or {}).get("amount", 0)), 2),
+            "refund_amount": refund_amount,
             "cmv": round(order_cmv, 2),
             "logistic_type": ship_info.get("logistic_type", "") if isinstance(ship_info, dict) else "",
             "estado": estado,
@@ -3943,6 +3956,8 @@ async def api_orders(request: Request, account_id: int,
                     "shipping_buyer": raw["shipping_buyer"],
                     "bonificacion": raw["bonificacion"],
                     "coupon_total": 0.0,
+                    "refund_amount": 0.0,
+                    "order_count": 0,
                     "cmv": 0.0,
                     "logistic_type": raw.get("logistic_type", ""),
                     "estado": raw["estado"],
@@ -3952,6 +3967,8 @@ async def api_orders(request: Request, account_id: int,
             p["monto"] = round(p["monto"] + raw["monto"], 2)
             p["comision"] = round(p["comision"] + raw["comision"], 2)
             p["coupon_total"] = round(p["coupon_total"] + raw["coupon_amt"], 2)
+            p["refund_amount"] = round(p["refund_amount"] + raw.get("refund_amount", 0), 2)
+            p["order_count"] += raw.get("order_count", 1)
             p["cmv"] = round(p["cmv"] + raw["cmv"], 2)
             p["items"].extend(raw["items"])
         else:
@@ -3967,12 +3984,14 @@ async def api_orders(request: Request, account_id: int,
             )
             orders.append({
                 "id": raw["id"], "venta_id": raw["id"],
+                "order_count": raw.get("order_count", 1),
                 "fecha": raw["fecha"], "hora": raw["hora"],
                 "producto": sku_col,
                 "monto": raw["monto"], "comision": raw["comision"],
                 "ingreso_envio": ingreso_envio,
                 "bonificacion": raw["bonificacion"],
                 "envio": raw["envio"],
+                "refund_amount": raw.get("refund_amount", 0),
                 "cmv": raw["cmv"],
                 "ganancia": ganancia,
                 "logistic_type": raw.get("logistic_type", ""),
