@@ -2692,6 +2692,114 @@ PROMO_TYPES = [
 ]
 
 
+def promo_offers_from_response(data) -> list:
+    """Normaliza respuestas de /seller-promotions/items/{id} a lista de promos."""
+    if isinstance(data, dict):
+        offers = data.get("results") or data.get("offers") or []
+        if not offers and (data.get("id") or data.get("promotion_id")):
+            offers = [data]
+        return offers if isinstance(offers, list) else []
+    if isinstance(data, list):
+        return data
+    return []
+
+
+def promo_offer_id(offer: dict):
+    return (
+        offer.get("id")
+        or offer.get("promotion_id")
+        or offer.get("offer_id")
+        or offer.get("campaign_id")
+    )
+
+
+def promo_status_matches(offer_status, requested_status: str) -> bool:
+    status_norm = (offer_status or "").lower()
+    requested = (requested_status or "").lower()
+    if requested == "started":
+        return status_norm not in ("", "candidate", "pending")
+    if requested == "candidate":
+        return status_norm in ("", "candidate", "pending")
+    return True
+
+
+async def fetch_all_seller_item_ids(client, headers, seller_id, debug: Optional[list] = None) -> list:
+    """Lista todas las publicaciones activas del seller sin el cap de offset.
+
+    ML documenta que, arriba de 1000 resultados, users/{id}/items/search debe
+    paginarse con search_type=scan + scroll_id. Si scan no entrega scroll_id,
+    caemos al offset tradicional hasta donde responda.
+    """
+    item_ids: list = []
+    seen: set = set()
+    scroll_id = None
+
+    for _ in range(300):
+        params = {"status": "active", "limit": 100, "search_type": "scan"}
+        if scroll_id:
+            params["scroll_id"] = scroll_id
+        try:
+            r = await client.get(
+                f"{ML_API_URL}/users/{seller_id}/items/search",
+                headers=headers,
+                params=params,
+            )
+        except Exception as e:
+            if debug is not None:
+                debug.append(f"items/search scan: {str(e)[:200]}")
+            break
+        if r.status_code != 200:
+            if debug is not None:
+                debug.append(f"items/search scan: HTTP {r.status_code}: {r.text[:200]}")
+            break
+        data = r.json()
+        results = data.get("results") or []
+        if not results:
+            return item_ids
+        for iid in results:
+            if iid not in seen:
+                seen.add(iid)
+                item_ids.append(iid)
+        next_scroll = data.get("scroll_id")
+        if not next_scroll:
+            if debug is not None:
+                debug.append("items/search scan no devolvio scroll_id; fallback offset")
+            break
+        scroll_id = next_scroll
+
+    if item_ids and len(item_ids) >= 1000:
+        return item_ids
+
+    offset = 0
+    for _ in range(300):
+        try:
+            r = await client.get(
+                f"{ML_API_URL}/users/{seller_id}/items/search",
+                headers=headers,
+                params={"status": "active", "limit": 100, "offset": offset},
+            )
+        except Exception as e:
+            if debug is not None:
+                debug.append(f"items/search offset={offset}: {str(e)[:200]}")
+            break
+        if r.status_code != 200:
+            if debug is not None:
+                debug.append(f"items/search offset={offset}: HTTP {r.status_code}: {r.text[:200]}")
+            break
+        data = r.json()
+        results = data.get("results") or []
+        if not results:
+            break
+        for iid in results:
+            if iid not in seen:
+                seen.add(iid)
+                item_ids.append(iid)
+        if len(results) < 100:
+            break
+        offset += 100
+    return item_ids
+
+
 @app.get("/api/promociones/{account_id}")
 async def api_promociones_list(request: Request, account_id: int):
     """Descubre las promociones inspeccionando el atributo 'offers' de
@@ -2712,34 +2820,10 @@ async def api_promociones_list(request: Request, account_id: int):
     seller_id = acc["ml_user_id"]
 
     debug = []
-    all_item_ids: list = []
-
     async with httpx.AsyncClient(timeout=90) as client:
-        # Paso 1: listar todos los items activos (paginando hasta el cap de 1000)
-        offset = 0
-        while True:
-            try:
-                r = await client.get(
-                    f"{ML_API_URL}/users/{seller_id}/items/search",
-                    headers=headers,
-                    params={"status": "active", "limit": 100, "offset": offset},
-                )
-                if r.status_code != 200:
-                    debug.append(f"items/search offset={offset}: HTTP {r.status_code}: {r.text[:200]}")
-                    break
-                data = r.json()
-            except Exception as e:
-                debug.append(f"items/search offset={offset}: {str(e)[:200]}")
-                break
-            results = data.get("results", []) or []
-            if not results:
-                break
-            all_item_ids.extend(results)
-            if len(results) < 100:
-                break
-            offset += 100
-            if offset >= 1000:  # cap duro de ML
-                break
+        # Paso 1: listar todos los items activos. Usamos scan+scroll para no
+        # quedar capados por offset cuando hay más de 1000 publicaciones.
+        all_item_ids = await fetch_all_seller_item_ids(client, headers, seller_id, debug)
 
         if not all_item_ids:
             return {"items": [], "errors": debug or ["No se encontraron publicaciones activas en la cuenta"]}
@@ -2773,22 +2857,12 @@ async def api_promociones_list(request: Request, account_id: int):
                 if len(debug) < 8:
                     debug.append(err)
                 continue
-            # La respuesta puede venir como lista o como dict con results
-            if isinstance(data, dict):
-                offers = data.get("results") or data.get("offers") or []
-                # A veces el dict raíz ES una promo individual
-                if not offers and (data.get("id") or data.get("promotion_id")):
-                    offers = [data]
-            elif isinstance(data, list):
-                offers = data
-            else:
-                continue
+            offers = promo_offers_from_response(data)
 
             for offer in offers:
                 if not isinstance(offer, dict):
                     continue
-                pid = (offer.get("id") or offer.get("promotion_id")
-                       or offer.get("offer_id") or offer.get("campaign_id"))
+                pid = promo_offer_id(offer)
                 if not pid:
                     continue
                 ptype = (offer.get("type") or offer.get("promotion_type")
@@ -2851,7 +2925,8 @@ async def api_promociones_items(
         for r in discount_rows
     }
 
-    params = {"app_version": "v2", "status": status, "limit": 50}
+    promo_page_limit = 100
+    params = {"app_version": "v2", "status": status, "limit": promo_page_limit}
     if promotion_type:
         params["promotion_type"] = promotion_type
 
@@ -2888,7 +2963,7 @@ async def api_promociones_items(
         expected_total = 0
         total_raw = 0  # items totales devueltos por ML (con dupes)
         duplicate_streak = 0
-        MAX_ITERATIONS = 200  # safety: 200 * 50 = 10k items
+        MAX_ITERATIONS = 200  # safety: 200 * 100 = 20k items
         for iteration in range(MAX_ITERATIONS):
             try:
                 r = await client.get(
@@ -2925,7 +3000,7 @@ async def api_promociones_items(
             offset += len(results)
             # Stop conditions:
             # 1. Batch vino con menos que el limit → última página real.
-            if len(results) < 50:
+            if len(results) < promo_page_limit:
                 break
             # 2. ML reportó un total y ya lo alcanzamos.
             if expected_total > 0 and len(seen_ids) >= expected_total:
@@ -2965,6 +3040,8 @@ async def api_promociones_items(
                 # item, que viene minimalista). Para SMART en especial,
                 # esto es lo que destrabaste los campos suggested_*.
                 detail_params = {"app_version": "v2"}
+                if status:
+                    detail_params["status"] = status
                 if promotion_id:
                     detail_params["promotion_id"] = promotion_id
                 if promotion_type:
@@ -2990,19 +3067,39 @@ async def api_promociones_items(
                 for off in offers:
                     if not isinstance(off, dict):
                         continue
-                    pid = (off.get("id") or off.get("promotion_id")
-                           or off.get("offer_id"))
-                    if str(pid) == str(promotion_id):
-                        return off
-                # Si no matchea exact, devolver la primera con shape de promo
-                for off in offers:
-                    if isinstance(off, dict) and (
-                        off.get("status") or off.get("type")
-                        or off.get("promotion_type")):
+                    pid = promo_offer_id(off)
+                    if str(pid) == str(promotion_id) and promo_status_matches(off.get("status"), status):
                         return off
             except Exception:
                 pass
             return None
+
+        scan_item_count = 0
+        scan_matched_count = 0
+        promo_details_override = None
+        seller_item_ids = await fetch_all_seller_item_ids(client, headers, acc["ml_user_id"])
+        if seller_item_ids:
+            scan_item_count = len(seller_item_ids)
+            detail_sem = asyncio.Semaphore(15)
+
+            async def fetch_matching_detail(iid):
+                async with detail_sem:
+                    detail = await fetch_item_promo_detail(iid)
+                if not isinstance(detail, dict):
+                    return None
+                pid = promo_offer_id(detail)
+                if str(pid) != str(promotion_id):
+                    return None
+                if not promo_status_matches(detail.get("status"), status):
+                    return None
+                return {"id": iid}, detail
+
+            pairs = await asyncio.gather(*[fetch_matching_detail(i) for i in seller_item_ids])
+            matched = [p for p in pairs if p]
+            if matched:
+                all_results = [base for base, _ in matched]
+                promo_details_override = [detail for _, detail in matched]
+                scan_matched_count = len(matched)
 
         ids = [it.get("id") for it in all_results if it.get("id")]
         sem = asyncio.Semaphore(15)
@@ -3012,10 +3109,14 @@ async def api_promociones_items(
         async def fetch_detail(iid):
             async with sem:
                 return await fetch_item_promo_detail(iid)
-        enriched, promo_details = await asyncio.gather(
-            asyncio.gather(*[fetch(i) for i in ids]),
-            asyncio.gather(*[fetch_detail(i) for i in ids]),
-        )
+        if promo_details_override is not None:
+            enriched = await asyncio.gather(*[fetch(i) for i in ids])
+            promo_details = promo_details_override
+        else:
+            enriched, promo_details = await asyncio.gather(
+                asyncio.gather(*[fetch(i) for i in ids]),
+                asyncio.gather(*[fetch_detail(i) for i in ids]),
+            )
 
     def _extract_sku(info: Optional[dict]) -> str:
         """Saca el SELLER_SKU del item. ML lo expone en distintos lugares:
@@ -3364,6 +3465,9 @@ async def api_promociones_items(
         "paging_expected_total": expected_total,  # lo que dice ML que hay
         "paging_returned_raw": total_raw,         # items totales con dupes
         "paging_unique": len(seen_ids),           # items únicos
+        "scan_item_count": scan_item_count,
+        "scan_matched_count": scan_matched_count,
+        "source": "seller_items_scan" if promo_details_override is not None else "promotion_items_endpoint",
     }
     if all_results:
         first_list = all_results[0]
