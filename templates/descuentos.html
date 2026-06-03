@@ -203,6 +203,7 @@
       </span>
       <label style="font-size:13px;color:#666;margin-left:10px;">Buscar:</label>
       <input type="search" id="preview-search" placeholder="SKU o MLA" oninput="onPreviewSearchChange()" style="min-width:240px;flex:1;max-width:420px;padding:6px 10px;border:1px solid #ddd;border-radius:8px;font-size:13px;" />
+      <button onclick="exportPreviewFiltered()" style="padding:7px 12px;border:1px solid #1a8a5a;background:#fff;color:#1a8a5a;border-radius:8px;font-size:12px;cursor:pointer;">Excel filtrado</button>
     </div>
     <div class="summary" id="preview-summary"></div>
     <div style="overflow-x:auto;">
@@ -226,6 +227,7 @@
     <div id="preview-pager" style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:10px;flex-wrap:wrap;"></div>
     <div class="row" style="margin-top:12px;justify-content:flex-end;">
       <span id="selected-count" style="font-size:13px;color:#888;"></span>
+      <button onclick="clearPreviewSelection()" style="border:1px solid #ddd;padding:8px 14px;border-radius:8px;background:#fff;color:#555;cursor:pointer;font-size:13px;">Limpiar selección</button>
       <button onclick="openConfirm()" id="btn-apply" class="green" disabled>Aplicar a los seleccionados</button>
     </div>
   </div>
@@ -969,6 +971,46 @@
       btn.textContent = 'Aplicar a los seleccionados';
       updateSelectedCount();
     }
+  }
+
+  function clearPreviewSelection() {
+    previewSelected.clear();
+    document.querySelectorAll('.row-check').forEach(c => { c.checked = false; });
+    updateSelectedCount();
+  }
+
+  function exportPreviewFiltered() {
+    const items = getFilteredItems();
+    if(!items.length) { alert('No hay items para exportar.'); return; }
+    const headers = ['MLA', 'SKU', 'Título', 'Precio original', 'Descuento cargado (%)',
+      'Sugerido vendedor (%)', 'Aporte ML (%)', 'Mínimo requerido (%)', 'Precio final', 'Estado'];
+    const fmt2 = v => v != null ? String(v).replace(/\./g, ',') : '';
+    const rows = items.map(it => {
+      const gap = computeItemGap(it);
+      let estado;
+      if(it.loaded_discount_pct == null) estado = 'Sin descuento cargado';
+      else if(it.below_min) estado = `Debajo del mínimo (falta ${gap}%)`;
+      else estado = 'Listo para aplicar';
+      return [
+        it.mla || it.item_id || '',
+        it.sku || '',
+        (it.title || '').replace(/;/g, ','),
+        fmt2(it.original_price),
+        fmt2(it.loaded_discount_pct),
+        fmt2(it.seller_suggested_pct),
+        fmt2(it.ml_contribution_pct),
+        fmt2(it.min_discount_pct),
+        fmt2(it.final_price),
+        estado,
+      ].join(';');
+    });
+    const csv = '﻿' + [headers.join(';'), ...rows].join('\r\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const promoName = (currentPromo?.name || 'preview').replace(/[^a-zA-Z0-9_\- ]/g, '').trim();
+    a.href = url; a.download = `preview_${promoName}.csv`; a.click();
+    URL.revokeObjectURL(url);
   }
 
   if(currentAccountId) loadBase();

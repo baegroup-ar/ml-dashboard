@@ -247,6 +247,7 @@
   const PAGE_SIZE = 50;
   let loadSeq = 0;
   let hasRenderedData = false;
+  let lastSavedLabel = '';
   // Períodos que ya se refrescaron contra ML en esta sesión.
   const refreshedRanges = new Set();
 
@@ -353,13 +354,25 @@
 
   async function loadRange(firstTime = false) {
     const rendered = await loadData({cacheOnly: true});
-    if(IS_ADMIN || firstTime || !rendered) {
+    if(!rendered) {
       await loadData({refresh: true, background: rendered});
+    } else if(isTodayRange()) {
+      refreshNow(true);
     }
   }
 
   function refreshNow(background = false) {
+    if(background || hasRenderedData) {
+      const base = lastSavedLabel || document.getElementById('last-update').textContent || 'Datos guardados';
+      document.getElementById('last-update').textContent = `${base}. Actualizando contra MercadoLibre...`;
+    }
     return loadData({refresh: true, background: background || hasRenderedData});
+  }
+
+  function isTodayRange() {
+    const today = todayStr();
+    return document.getElementById('date-from')?.value === today
+      && document.getElementById('date-to')?.value === today;
   }
 
   function getParams() {
@@ -410,26 +423,35 @@
       document.getElementById('page-loading').style.display='none';
       document.getElementById('content').style.display='block';
       const ts = new Date(data.ultima_actualizacion+'Z').toLocaleString('es-AR',{dateStyle:'short',timeStyle:'short'});
-      document.getElementById('last-update').textContent = data.cache_only
-        ? `Datos guardados: ${ts}. Actualizando contra MercadoLibre...`
-        : `Actualizado: ${ts}`;
+      if(data.cache_only) {
+        lastSavedLabel = `Datos guardados: ${ts}`;
+        document.getElementById('last-update').textContent = lastSavedLabel;
+      } else {
+        lastSavedLabel = `Actualizado: ${ts}`;
+        document.getElementById('last-update').textContent = lastSavedLabel;
+      }
       // Errores parciales del fetch contra ML (429, timeouts en chunks
       // específicos, etc). El payload se devuelve igual con lo que sí
       // pudimos bajar, pero mostramos un aviso para que se vea que hay un
       // problema y no creas que las cifras son la realidad completa.
       if (data.fetch_errors && data.fetch_errors.length) {
         const box = document.getElementById('error-box');
-        box.textContent = `Algunos rangos fallaron al bajar de ML (${data.fetch_errors.length}). Probá Actualizar.`;
         box.title = data.fetch_errors.join('\n');
-        box.style.display = 'block';
+        box.style.display = 'none';
+        document.getElementById('last-update').textContent =
+          `${lastSavedLabel}. MercadoLibre no completó todos los rangos.`;
       }
       return true;
     } catch(e) {
       if(seq !== loadSeq) return;
-      document.getElementById('error-box').textContent = hasRenderedData
-        ? `${e.message} Se mantiene la última información guardada.`
-        : e.message;
-      document.getElementById('error-box').style.display='block';
+      if(hasRenderedData) {
+        document.getElementById('error-box').style.display='none';
+        document.getElementById('last-update').textContent =
+          `${lastSavedLabel || 'Datos guardados'}. MercadoLibre no completó la actualización.`;
+      } else {
+        document.getElementById('error-box').textContent = e.message;
+        document.getElementById('error-box').style.display='block';
+      }
       document.getElementById('page-loading').style.display='none';
       if(!hasRenderedData) {
         document.getElementById('content').style.display='none';
@@ -451,11 +473,11 @@
     const cmv_total = paidOrders.reduce((s, o) => s + (o.cmv || 0), 0);
     const ingresos_total = ingresos + ingresos_envio + bonificaciones;
     const neta = ingresos_total - comisiones - envios - cmv_total;
-    const unidades = data.orders.reduce((s, o) => s + (o.items||[]).reduce((si, i) => si + (i.cantidad||1), 0), 0);
+    const unidades = paidOrders.reduce((s, o) => s + (o.items||[]).reduce((si, i) => si + (i.cantidad||1), 0), 0);
     const total = data.orders.reduce((s, o) => s + countOrders(o), 0);
 
     const paidCount = paidOrders.reduce((s, o) => s + countOrders(o), 0);
-    document.getElementById('m-ventas').textContent = total;
+    document.getElementById('m-ventas').textContent = paidCount;
     document.getElementById('m-unidades').textContent = unidades;
     document.getElementById('m-bruto').textContent = fmt(ingresos);
     document.getElementById('m-ing-envio').textContent = fmt(ingresos_envio);
