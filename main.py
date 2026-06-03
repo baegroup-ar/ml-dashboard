@@ -3540,34 +3540,67 @@ async def api_orders(request: Request, account_id: int,
     # Lista compartida para errores que vuelven a ML (429, 500, etc.). Si algo
     # falla, lo loggeamos y lo devolvemos en el payload para que se vea en el UI.
     fetch_errors: list = []
+    # Counters de diagnóstico para entender qué pasó del lado de ML.
+    diag = {"chunks_fetched": 0, "raw_ml_orders": 0, "split_events": 0, "retries": 0}
+
+    # Threshold para forzar split del chunk. Bajado a 900 con margen ante
+    # variabilidad de paging.total que devuelve ML (a veces reporta el cap).
+    SPLIT_THRESHOLD = 900
 
     async with httpx.AsyncClient(timeout=180) as client:
+        async def _get_with_retry(params):
+            """GET a /orders/search con reintentos sobre 429/5xx/timeouts.
+            ML rate-limitea bastante agresivo cuando recursamos en paralelo,
+            y silenciar esos errores nos cuesta cientos/miles de ventas."""
+            last_err = None
+            for attempt in range(4):
+                try:
+                    rp = await client.get(f"{ML_API_URL}/orders/search", headers=headers, params=params)
+                except Exception as e:
+                    last_err = f"exc {str(e)[:120]}"
+                    if attempt < 3:
+                        diag["retries"] += 1
+                        await asyncio.sleep(0.5 * (2 ** attempt))
+                        continue
+                    return None, last_err
+                if rp.status_code == 200:
+                    return rp, None
+                if rp.status_code in (429, 500, 502, 503, 504) and attempt < 3:
+                    diag["retries"] += 1
+                    # backoff exponencial: 0.5s, 1s, 2s, 4s. ML respira y volvemos.
+                    await asyncio.sleep(0.5 * (2 ** attempt))
+                    continue
+                return rp, f"HTTP {rp.status_code}: {rp.text[:150]}"
+            return None, last_err or "unknown"
+
         async def fetch_chunk_recursive(start_d, end_d, depth=0):
             """Trae todas las órdenes en [start_d, end_d]. Si el chunk pega el
-            tope de 1000 órdenes que /orders/search expone, parte el rango por
-            la mitad y recursa. Sin eso, perderíamos ventas silenciosamente."""
+            tope que /orders/search expone (max 1000 paginables, paging.total
+            puede reportar más), parte el rango por la mitad y recursa.
+
+            Usamos order.date_last_updated en vez de date_created para
+            capturar todas las órdenes con actividad en el período. Una orden
+            creada antes pero pagada en el rango aparecía como missing con
+            date_created. Esto matchea el counter de "Ventas" del panel de ML."""
             from_utc = datetime.combine(start_d, datetime.min.time()) + timedelta(hours=3) - timedelta(hours=24)
             to_utc = datetime.combine(end_d, datetime.min.time()) + timedelta(hours=27)
             chunk_params = {
                 **base_search,
-                "order.date_created.from": from_utc.strftime("%Y-%m-%dT%H:%M:%S.000-00:00"),
-                "order.date_created.to":   to_utc.strftime("%Y-%m-%dT%H:%M:%S.000-00:00"),
+                "order.date_last_updated.from": from_utc.strftime("%Y-%m-%dT%H:%M:%S.000-00:00"),
+                "order.date_last_updated.to":   to_utc.strftime("%Y-%m-%dT%H:%M:%S.000-00:00"),
             }
-            try:
-                r = await client.get(f"{ML_API_URL}/orders/search", headers=headers, params={**chunk_params, "offset": 0})
-            except Exception as e:
-                fetch_errors.append(f"[{start_d}..{end_d}] fetch error: {str(e)[:200]}")
-                return []
-            if r.status_code != 200:
-                fetch_errors.append(f"[{start_d}..{end_d}] HTTP {r.status_code}: {r.text[:200]}")
+            r, err = await _get_with_retry({**chunk_params, "offset": 0})
+            if r is None or r.status_code != 200:
+                fetch_errors.append(f"[{start_d}..{end_d}] {err}")
                 return []
             data = r.json()
             results = list(data.get("results", []))
             total = data.get("paging", {}).get("total", 0)
 
             # Si pegamos el tope y todavía hay días para partir, recursamos.
-            # max_depth=8 → hasta partir 1 año en chunks de ~1 día si hiciera falta.
-            if total >= 1000 and (end_d - start_d).days >= 1 and depth < 8:
+            # max_depth=10 alcanza para partir 1 año hasta chunks de ~1 día.
+            if total >= SPLIT_THRESHOLD and (end_d - start_d).days >= 1 and depth < 10:
+                diag["split_events"] += 1
                 span = (end_d - start_d).days
                 mid = start_d + timedelta(days=span // 2)
                 left, right = await asyncio.gather(
@@ -3576,25 +3609,23 @@ async def api_orders(request: Request, account_id: int,
                 )
                 return left + right
 
-            # Paginación normal hasta total (cap duro de ML en 1000).
+            # Hoja: paginar hasta total (cap duro de ML en 1000 paginables).
+            diag["chunks_fetched"] += 1
             capped = min(total, 1000)
             offsets = list(range(50, capped, 50))
             if offsets:
-                sem = asyncio.Semaphore(10)
+                sem = asyncio.Semaphore(8)
                 async def get_page(off):
                     async with sem:
-                        try:
-                            rp = await client.get(f"{ML_API_URL}/orders/search", headers=headers, params={**chunk_params, "offset": off})
-                        except Exception as e:
-                            fetch_errors.append(f"[{start_d}..{end_d}] offset {off} error: {str(e)[:200]}")
-                            return []
-                        if rp.status_code != 200:
-                            fetch_errors.append(f"[{start_d}..{end_d}] offset {off} HTTP {rp.status_code}")
+                        rp, perr = await _get_with_retry({**chunk_params, "offset": off})
+                        if rp is None or rp.status_code != 200:
+                            fetch_errors.append(f"[{start_d}..{end_d}] offset {off} {perr}")
                             return []
                         return rp.json().get("results", [])
                 pages = await asyncio.gather(*[get_page(off) for off in offsets])
                 for page in pages:
                     results.extend(page)
+            diag["raw_ml_orders"] += len(results)
             return results
 
         async def fetch_one_range(range_df_iso, range_dt_iso):
@@ -3847,17 +3878,27 @@ async def api_orders(request: Request, account_id: int,
             asyncio.create_task(
                 asyncio.to_thread(db_save_order_snapshots, account_id, orders, True)
             )
-        # Registrar hasta qué fecha hemos bajado de ML para este account.
-        # Usamos el df más viejo entre los rangos bajados; LEAST() solo avanza
-        # hacia atrás, así que si solo refrescamos lo reciente no movemos cff.
-        min_fetched_df = min(rd for rd, _ in fetch_ranges)
-        db_execute(
-            "UPDATE ml_accounts SET cache_fetched_from ="
-            " LEAST(COALESCE(cache_fetched_from, '9999-12-31'::DATE), :df::DATE) WHERE id=:id",
-            {"df": min_fetched_df, "id": account_id}
-        )
+        # Solo avanzar cache_fetched_from si NO hubo errores. Si alguna chunk
+        # falló, queremos volver a intentar la próxima vez en lugar de quedar
+        # con un caché parcial considerado "completo". Esto fixea el caso de
+        # cuentas que terminaban mostrando 0 órdenes para siempre porque la
+        # primera fetch tuvo errores y guardamos cff = df igual.
+        if not fetch_errors and fetch_ranges:
+            min_fetched_df = min(rd for rd, _ in fetch_ranges)
+            db_execute(
+                "UPDATE ml_accounts SET cache_fetched_from ="
+                " LEAST(COALESCE(cache_fetched_from, '9999-12-31'::DATE), :df::DATE) WHERE id=:id",
+                {"df": min_fetched_df, "id": account_id}
+            )
 
     payload = build_dashboard_payload(merged, details_complete=not fast)
+    # Diagnostics: cuántos chunks bajamos, cuántas órdenes vio ML, cuántas
+    # quedaron después de dedup y filtro de fecha. Para debug del usuario.
+    diag["after_dedup"] = len(all_results)
+    diag["after_filter"] = len(orders)
+    diag["from_cache"] = len([o for o in merged if o.get("id") not in ml_ids])
+    diag["fetch_ranges"] = fetch_ranges
+    payload["diag"] = diag
     if fetch_errors:
         # Devolver los errores en el payload para que el UI los pueda mostrar.
         # Capeamos a 10 para no inflar la respuesta.
