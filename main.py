@@ -99,6 +99,14 @@ def init_db():
         conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_expires_at TIMESTAMP"))
         conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_master BOOLEAN DEFAULT FALSE"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_users_reset_token ON users(reset_token)"))
+        conn.execute(text("ALTER TABLE ml_accounts ADD COLUMN IF NOT EXISTS cache_fetched_from DATE DEFAULT NULL"))
+        # Backfill: set cache_fetched_from from existing order_snapshot_cache so existing accounts
+        # don't lose their "already fetched" coverage after this migration.
+        conn.execute(text("""
+            UPDATE ml_accounts ma SET cache_fetched_from = sub.min_date
+            FROM (SELECT account_id, MIN(paid_date) AS min_date FROM order_snapshot_cache GROUP BY account_id) sub
+            WHERE ma.id = sub.account_id AND ma.cache_fetched_from IS NULL
+        """))
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS ml_accounts (
                 id SERIAL PRIMARY KEY,
@@ -884,6 +892,27 @@ def _account_for_user(account_id: int, user_id: int):
     )
 
 
+def _cost_account_id_for(user: dict, account_id: int) -> int:
+    """Admin users share costs/flex across all their accounts; master uses per-account costs."""
+    if is_master_user(user):
+        return account_id
+    row = db_fetchone(
+        "SELECT MIN(id) as min_id FROM ml_accounts WHERE user_id=:uid",
+        {"uid": user["id"]}
+    )
+    return (row["min_id"] if row and row["min_id"] else account_id)
+
+
+def _invalidate_all_user_accounts_cache(user: dict, account_id: int):
+    """For admin users (shared costs), invalidate cache for all their accounts. Master: just the one."""
+    if is_master_user(user):
+        invalidate_orders_cache_for_account(account_id)
+        return
+    accs = db_fetchall("SELECT id FROM ml_accounts WHERE user_id=:uid", {"uid": user["id"]})
+    for a in accs:
+        invalidate_orders_cache_for_account(a["id"])
+
+
 def get_visible_accounts(user_id: int, user: dict) -> list:
     """Cuentas ML propias del usuario. Los permisos solo controlan pestanas."""
     return db_fetchall(
@@ -1412,10 +1441,12 @@ async def api_costos_list(request: Request, account_id: int):
     acc = _account_for_user(account_id, user_id)
     if not acc:
         raise HTTPException(404)
+    user = get_user(user_id)
+    cost_aid = _cost_account_id_for(user, account_id)
     rows = db_fetchall(
         "SELECT sku, cost, iva_rate, valid_from, updated_at FROM product_costs"
         " WHERE account_id=:aid ORDER BY sku, valid_from DESC",
-        {"aid": account_id},
+        {"aid": cost_aid},
     )
     return {
         "items": [
@@ -1445,16 +1476,18 @@ async def api_costos_upsert(
     acc = _account_for_user(account_id, user_id)
     if not acc:
         raise HTTPException(404)
+    user = get_user(user_id)
+    cost_aid = _cost_account_id_for(user, account_id)
     try:
         rate_val = float(iva_rate) if iva_rate is not None and iva_rate != "" else 21.0
     except ValueError:
         rate_val = 21.0
-    saved = db_save_product_costs(account_id, [{
+    saved = db_save_product_costs(cost_aid, [{
         "sku": sku, "cost": cost,
         "valid_from": valid_from or datetime.utcnow().date().isoformat(),
         "iva_rate": rate_val,
     }])
-    invalidate_orders_cache_for_account(account_id)
+    _invalidate_all_user_accounts_cache(user, account_id)
     return {"ok": True, "saved": saved}
 
 
@@ -1477,6 +1510,8 @@ async def api_costos_edit(
     acc = _account_for_user(account_id, user_id)
     if not acc:
         raise HTTPException(404)
+    user = get_user(user_id)
+    cost_aid = _cost_account_id_for(user, account_id)
     try:
         rate_val = float(iva_rate) if iva_rate is not None and iva_rate != "" else 21.0
     except ValueError:
@@ -1484,15 +1519,15 @@ async def api_costos_edit(
     # Borrar entry vieja
     db_execute(
         "DELETE FROM product_costs WHERE account_id=:aid AND sku=:sku AND valid_from=:vf",
-        {"aid": account_id, "sku": old_sku, "vf": old_valid_from},
+        {"aid": cost_aid, "sku": old_sku, "vf": old_valid_from},
     )
     # Insertar entry nueva
-    saved = db_save_product_costs(account_id, [{
+    saved = db_save_product_costs(cost_aid, [{
         "sku": sku, "cost": cost,
         "valid_from": valid_from,
         "iva_rate": rate_val,
     }])
-    invalidate_orders_cache_for_account(account_id)
+    _invalidate_all_user_accounts_cache(user, account_id)
     return {"ok": True, "saved": saved}
 
 
@@ -1504,18 +1539,20 @@ async def api_costos_delete(request: Request, account_id: int, sku: str, valid_f
     acc = _account_for_user(account_id, user_id)
     if not acc:
         raise HTTPException(404)
+    user = get_user(user_id)
+    cost_aid = _cost_account_id_for(user, account_id)
     if valid_from:
         db_execute(
             "DELETE FROM product_costs WHERE account_id=:aid AND sku=:sku AND valid_from=:vf",
-            {"aid": account_id, "sku": sku, "vf": valid_from},
+            {"aid": cost_aid, "sku": sku, "vf": valid_from},
         )
     else:
         # Sin fecha: borra TODAS las versiones de ese SKU
         db_execute(
             "DELETE FROM product_costs WHERE account_id=:aid AND sku=:sku",
-            {"aid": account_id, "sku": sku},
+            {"aid": cost_aid, "sku": sku},
         )
-    invalidate_orders_cache_for_account(account_id)
+    _invalidate_all_user_accounts_cache(user, account_id)
     return {"ok": True}
 
 
@@ -1528,6 +1565,8 @@ async def api_costos_upload(request: Request, account_id: int):
     acc = _account_for_user(account_id, user_id)
     if not acc:
         raise HTTPException(404)
+    user = get_user(user_id)
+    cost_aid = _cost_account_id_for(user, account_id)
     form = await request.form()
     upload = form.get("file")
     if upload is None or not hasattr(upload, "read"):
@@ -1541,8 +1580,8 @@ async def api_costos_upload(request: Request, account_id: int):
             items = parse_csv_costs(content)
     except Exception as e:
         raise HTTPException(400, f"No pude leer el archivo: {e}")
-    saved = db_save_product_costs(account_id, items)
-    invalidate_orders_cache_for_account(account_id)
+    saved = db_save_product_costs(cost_aid, items)
+    _invalidate_all_user_accounts_cache(user, account_id)
     return {"ok": True, "saved": saved, "rows_parsed": len(items)}
 
 
@@ -1649,10 +1688,12 @@ async def api_flex_list(request: Request, account_id: int):
     acc = _account_for_user(account_id, user_id)
     if not acc:
         raise HTTPException(404)
+    user = get_user(user_id)
+    cost_aid = _cost_account_id_for(user, account_id)
     rows = db_fetchall(
         "SELECT zona, tarifa, tarifa_ml, iva_rate, valid_from, updated_at FROM flex_tariffs"
         " WHERE account_id=:aid ORDER BY zona, valid_from DESC",
-        {"aid": account_id},
+        {"aid": cost_aid},
     )
     return {
         "items": [
@@ -1820,6 +1861,8 @@ async def api_flex_upsert(
     acc = _account_for_user(account_id, user_id)
     if not acc:
         raise HTTPException(404)
+    user = get_user(user_id)
+    cost_aid = _cost_account_id_for(user, account_id)
     try:
         rate_val = float(iva_rate) if iva_rate is not None and iva_rate != "" else 21.0
     except ValueError:
@@ -1828,12 +1871,12 @@ async def api_flex_upsert(
         tml_val = float(tarifa_ml) if tarifa_ml not in (None, "") else None
     except ValueError:
         tml_val = None
-    saved = _save_flex_tariffs(account_id, [{
+    saved = _save_flex_tariffs(cost_aid, [{
         "zona": zona, "tarifa": tarifa, "tarifa_ml": tml_val,
         "valid_from": valid_from or datetime.utcnow().date().isoformat(),
         "iva_rate": rate_val,
     }])
-    invalidate_orders_cache_for_account(account_id)
+    _invalidate_all_user_accounts_cache(user, account_id)
     return {"ok": True, "saved": saved}
 
 
@@ -1854,6 +1897,8 @@ async def api_flex_edit(
     acc = _account_for_user(account_id, user_id)
     if not acc:
         raise HTTPException(404)
+    user = get_user(user_id)
+    cost_aid = _cost_account_id_for(user, account_id)
     try:
         rate_val = float(iva_rate) if iva_rate is not None and iva_rate != "" else 21.0
     except ValueError:
@@ -1864,13 +1909,13 @@ async def api_flex_edit(
         tml_val = None
     db_execute(
         "DELETE FROM flex_tariffs WHERE account_id=:aid AND zona=:zona AND valid_from=:vf",
-        {"aid": account_id, "zona": old_zona, "vf": old_valid_from},
+        {"aid": cost_aid, "zona": old_zona, "vf": old_valid_from},
     )
-    saved = _save_flex_tariffs(account_id, [{
+    saved = _save_flex_tariffs(cost_aid, [{
         "zona": zona, "tarifa": tarifa, "tarifa_ml": tml_val,
         "valid_from": valid_from, "iva_rate": rate_val,
     }])
-    invalidate_orders_cache_for_account(account_id)
+    _invalidate_all_user_accounts_cache(user, account_id)
     return {"ok": True, "saved": saved}
 
 
@@ -1882,17 +1927,19 @@ async def api_flex_delete(request: Request, account_id: int, zona: str, valid_fr
     acc = _account_for_user(account_id, user_id)
     if not acc:
         raise HTTPException(404)
+    user = get_user(user_id)
+    cost_aid = _cost_account_id_for(user, account_id)
     if valid_from:
         db_execute(
             "DELETE FROM flex_tariffs WHERE account_id=:aid AND zona=:zona AND valid_from=:vf",
-            {"aid": account_id, "zona": zona, "vf": valid_from},
+            {"aid": cost_aid, "zona": zona, "vf": valid_from},
         )
     else:
         db_execute(
             "DELETE FROM flex_tariffs WHERE account_id=:aid AND zona=:zona",
-            {"aid": account_id, "zona": zona},
+            {"aid": cost_aid, "zona": zona},
         )
-    invalidate_orders_cache_for_account(account_id)
+    _invalidate_all_user_accounts_cache(user, account_id)
     return {"ok": True}
 
 
@@ -1904,6 +1951,8 @@ async def api_flex_upload(request: Request, account_id: int):
     acc = _account_for_user(account_id, user_id)
     if not acc:
         raise HTTPException(404)
+    user = get_user(user_id)
+    cost_aid = _cost_account_id_for(user, account_id)
     form = await request.form()
     upload = form.get("file")
     if upload is None or not hasattr(upload, "read"):
@@ -1917,8 +1966,8 @@ async def api_flex_upload(request: Request, account_id: int):
             items = _parse_csv_flex(content)
     except Exception as e:
         raise HTTPException(400, f"No pude leer el archivo: {e}")
-    saved = _save_flex_tariffs(account_id, items)
-    invalidate_orders_cache_for_account(account_id)
+    saved = _save_flex_tariffs(cost_aid, items)
+    _invalidate_all_user_accounts_cache(user, account_id)
     return {"ok": True, "saved": saved, "rows_parsed": len(items)}
 
 
@@ -3432,12 +3481,20 @@ async def api_orders(request: Request, account_id: int,
     if (datetime.strptime(dt, "%Y-%m-%d") - datetime.strptime(df, "%Y-%m-%d")).days > 365:
         df = str(datetime.strptime(dt, "%Y-%m-%d").date() - timedelta(days=365))
 
-    # Siempre servimos el caché de Postgres si existe (lectura local <100ms).
-    # Sólo vamos contra la API de ML cuando se pide refresh explícito o no
-    # hay caché. El auto-refresh del modo Hoy ya manda refresh=1 cada 2 min,
-    # y el botón Actualizar también lo fuerza.
+    user = get_user(user_id)
+
+    # Siempre servimos el caché de Postgres si existe Y el caché cubre el rango
+    # completo pedido. Si el usuario navega de 90d → 1año, el caché tiene órdenes
+    # de 90d que caen dentro del rango de 1 año, pero NO cubren los 9 meses previos.
+    # cache_fetched_from registra hasta dónde hemos bajado de ML; si df es anterior
+    # a ese valor, hay un hueco y tenemos que ir a ML.
     cached_orders = db_fetch_order_snapshots(account_id, df, dt)
-    if cached_orders and not refresh:
+    cache_fetched_from = acc.get("cache_fetched_from")
+    cache_covers_range = (
+        cache_fetched_from is not None and
+        df >= str(cache_fetched_from)[:10]
+    )
+    if cached_orders and not refresh and cache_covers_range:
         return build_dashboard_payload(cached_orders, details_complete=True)
 
     token = await refresh_ml_token(account_id)
@@ -3544,10 +3601,12 @@ async def api_orders(request: Request, account_id: int,
     empty_ship = {"seller": 0.0, "buyer": 0.0, "bonificacion": 0.0}
 
     # Cargar costos versionados de mercadería (CMV por SKU con fechas).
-    versioned_costs = db_get_product_costs(account_id)
+    # Para admin (no master) los costos son compartidos entre cuentas → _cost_account_id_for.
+    cost_aid = _cost_account_id_for(user, account_id)
+    versioned_costs = db_get_product_costs(cost_aid)
     # Cargar tarifas Flex propias del vendedor (para reemplazar el costo de
     # envío de las ventas flex con lo que el vendedor le paga a su mensajería).
-    flex_tariffs = db_get_flex_tariffs(account_id)
+    flex_tariffs = db_get_flex_tariffs(cost_aid)
 
     # ── Paso 1: construir lista raw por orden individual ──────────
     raw_list = []
@@ -3718,6 +3777,13 @@ async def api_orders(request: Request, account_id: int,
             asyncio.create_task(asyncio.to_thread(db_save_shipping_costs, new_shipping_costs))
         asyncio.create_task(
             asyncio.to_thread(db_save_order_snapshots, account_id, orders, True)
+        )
+        # Registrar hasta qué fecha hemos bajado de ML para este account.
+        # LEAST() solo avanza hacia atrás (fecha más antigua).
+        db_execute(
+            "UPDATE ml_accounts SET cache_fetched_from ="
+            " LEAST(COALESCE(cache_fetched_from, '9999-12-31'::DATE), :df::DATE) WHERE id=:id",
+            {"df": df, "id": account_id}
         )
     return build_dashboard_payload(orders, details_complete=not fast)
 
