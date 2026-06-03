@@ -201,6 +201,8 @@
         <input type="number" id="preview-custom-max" min="0" max="100" step="0.5" value="0" oninput="onPreviewFilterChange()" style="width:80px;padding:6px 10px;border:1px solid #ddd;border-radius:8px;font-size:13px;" />
         <span style="font-size:13px;color:#666;">%</span>
       </span>
+      <label style="font-size:13px;color:#666;margin-left:10px;">Buscar:</label>
+      <input type="search" id="preview-search" placeholder="SKU o MLA" oninput="onPreviewSearchChange()" style="min-width:240px;flex:1;max-width:420px;padding:6px 10px;border:1px solid #ddd;border-radius:8px;font-size:13px;" />
     </div>
     <div class="summary" id="preview-summary"></div>
     <div style="overflow-x:auto;">
@@ -658,6 +660,7 @@
   let previewSelected = new Set();
   let previewFilter = 'all';
   let previewCustomMax = 0;
+  let previewSearch = '';
 
   function computeItemGap(it) {
     const target = it.min_discount_pct != null ? it.min_discount_pct
@@ -669,6 +672,11 @@
 
   function getFilteredItems() {
     return currentItems.filter(it => {
+      if(previewSearch) {
+        const sku = (it.sku || '').toUpperCase();
+        const mla = (it.mla || it.item_id || '').toUpperCase();
+        if(!sku.includes(previewSearch) && !mla.includes(previewSearch)) return false;
+      }
       const gap = computeItemGap(it);
       switch(previewFilter) {
         case 'ok': return gap === 0;
@@ -696,6 +704,12 @@
     renderPreview();
   }
 
+  function onPreviewSearchChange() {
+    previewSearch = (document.getElementById('preview-search')?.value || '').trim().toUpperCase();
+    previewPage = 1;
+    renderPreview();
+  }
+
   function goPreviewPage(n) {
     previewPage = n;
     renderPreview();
@@ -716,6 +730,9 @@
       if(!r.ok) throw new Error('Error');
       const data = await r.json();
       currentItems = data.items || [];
+      previewSearch = '';
+      const searchInput = document.getElementById('preview-search');
+      if(searchInput) searchInput.value = '';
       // Auto-seleccionar los listos para aplicar (con descuento cargado
       // y por encima del mínimo) — mismo criterio que antes.
       previewSelected = new Set();
@@ -752,7 +769,7 @@
     // Aplicar filtro + paginar
     const filtered = getFilteredItems();
     if(!filtered.length) {
-      tbody.innerHTML = `<tr><td colspan="9" class="empty">No hay items que coincidan con el filtro.</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="9" class="empty">No hay items que coincidan con los filtros.</td></tr>`;
       if(pager) pager.innerHTML = '';
     } else {
       const totalPages = Math.max(1, Math.ceil(filtered.length / PREVIEW_PAGE_SIZE));
