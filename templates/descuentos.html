@@ -666,8 +666,9 @@
     const target = it.min_discount_pct != null ? it.min_discount_pct
                   : (it.seller_suggested_pct != null ? it.seller_suggested_pct : null);
     if(target == null) return null;
+    const required = it.min_discount_pct != null ? target + 0.1 : target;
     const loaded = it.loaded_discount_pct != null ? it.loaded_discount_pct : 0;
-    return Math.max(0, Math.round((target - loaded) * 10) / 10);
+    return Math.max(0, Math.round((required - loaded) * 10) / 10);
   }
 
   function getFilteredItems() {
@@ -783,9 +784,11 @@
         const rowCls = sinDescuento ? 'row-gray' : (debajo ? 'row-warn' : '');
         let estado = '';
         if(sinDescuento) estado = '<span class="badge gray">Sin descuento cargado</span>';
-        else if(debajo) estado = `<span class="badge warn">Debajo del mínimo (${it.min_discount_pct}%)</span>`;
+        else if(debajo) estado = `<span class="badge warn">Debe superar ${it.min_discount_pct}%</span>`;
         else estado = '<span class="badge ok">Listo para aplicar</span>';
-        const checked = previewSelected.has(it.item_id) ? 'checked' : '';
+        const cannotApply = sinDescuento || debajo;
+        const checked = previewSelected.has(it.item_id) && !cannotApply ? 'checked' : '';
+        const disabled = cannotApply ? 'disabled' : '';
 
         // Descuento ML: total descompuesto en (vendedor% + aporte%)
         const aporte = it.ml_contribution_pct;
@@ -817,7 +820,7 @@
         }
         return `
           <tr class="${rowCls}" data-item-id="${it.item_id}" title="${(it.title || '').replace(/"/g, '&quot;')}">
-            <td><input type="checkbox" class="row-check" data-item-id="${it.item_id}" ${checked} onchange="onPreviewRowCheck(this)" /></td>
+            <td><input type="checkbox" class="row-check" data-item-id="${it.item_id}" ${checked} ${disabled} onchange="onPreviewRowCheck(this)" /></td>
             <td style="font-family:monospace;font-size:12px;">${it.mla || '—'}</td>
             <td><b>${it.sku || '—'}</b></td>
             <td class="num">${fmt(it.original_price)}</td>
@@ -868,7 +871,9 @@
     // Selecciona/desmarca TODOS los filtrados (no solo la página actual)
     const filtered = getFilteredItems();
     if(cb.checked) {
-      filtered.forEach(it => previewSelected.add(it.item_id));
+      filtered.forEach(it => {
+        if(it.loaded_discount_pct != null && !it.below_min) previewSelected.add(it.item_id);
+      });
     } else {
       filtered.forEach(it => previewSelected.delete(it.item_id));
     }
@@ -896,7 +901,7 @@
   function getSelected() {
     const out = [];
     currentItems.forEach(it => {
-      if(previewSelected.has(it.item_id)) {
+      if(previewSelected.has(it.item_id) && it.loaded_discount_pct != null && !it.below_min) {
         // Mandamos la parte del VENDEDOR (loaded), no el total con
         // aporte ML — ML aplica el aporte por su cuenta. Para DEAL
         // se convierte a deal_price en el backend.
@@ -909,6 +914,7 @@
           promotion_type: it.promotion_type || currentPromo.type,
           offer_id: it.offer_id || null,
           original_price: it.original_price || null,
+          min_discount_pct: it.min_discount_pct ?? null,
         });
       }
     });

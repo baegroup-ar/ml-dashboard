@@ -32,6 +32,8 @@ ML_AUTH_URL = "https://auth.mercadolibre.com.ar/authorization"
 ML_TOKEN_URL = "https://api.mercadolibre.com/oauth/token"
 ML_API_URL = "https://api.mercadolibre.com"
 SHIPPING_LOGIC_VERSION = "v34-logistic-type-in-orders"
+PROMO_ITEM_SCAN_CACHE_TTL_SECONDS = 300
+PROMO_ITEM_SCAN_CACHE: dict[str, dict] = {}
 
 serializer = URLSafeTimedSerializer(SECRET_KEY)
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -2730,6 +2732,19 @@ async def fetch_all_seller_item_ids(client, headers, seller_id, debug: Optional[
     paginarse con search_type=scan + scroll_id. Si scan no entrega scroll_id,
     caemos al offset tradicional hasta donde responda.
     """
+    cache_key = str(seller_id)
+    now = datetime.utcnow()
+    cached = PROMO_ITEM_SCAN_CACHE.get(cache_key)
+    if cached and (now - cached["at"]).total_seconds() < PROMO_ITEM_SCAN_CACHE_TTL_SECONDS:
+        if debug is not None:
+            debug.append(f"items/search cache hit: {len(cached['ids'])} items")
+        return list(cached["ids"])
+
+    def remember(ids: list) -> list:
+        if ids:
+            PROMO_ITEM_SCAN_CACHE[cache_key] = {"at": datetime.utcnow(), "ids": list(ids)}
+        return list(ids)
+
     item_ids: list = []
     seen: set = set()
     scroll_id = None
@@ -2755,7 +2770,7 @@ async def fetch_all_seller_item_ids(client, headers, seller_id, debug: Optional[
         data = r.json()
         results = data.get("results") or []
         if not results:
-            return item_ids
+            return remember(item_ids)
         for iid in results:
             if iid not in seen:
                 seen.add(iid)
@@ -2768,7 +2783,7 @@ async def fetch_all_seller_item_ids(client, headers, seller_id, debug: Optional[
         scroll_id = next_scroll
 
     if item_ids and len(item_ids) >= 1000:
-        return item_ids
+        return remember(item_ids)
 
     offset = 0
     for _ in range(300):
@@ -2797,7 +2812,7 @@ async def fetch_all_seller_item_ids(client, headers, seller_id, debug: Optional[
         if len(results) < 100:
             break
         offset += 100
-    return item_ids
+    return remember(item_ids)
 
 
 @app.get("/api/promociones/{account_id}")
@@ -3329,7 +3344,9 @@ async def api_promociones_items(
         # que ML te pide para participar y por lo tanto sirve como
         # referencia para el vendedor.
         if seller_suggested_pct is None and min_discount_pct is not None:
-            seller_suggested_pct = min_discount_pct
+            # ML valida "more than X%", no "X% or more". Usamos una decima
+            # arriba para que la sugerencia no sea rechazada por igualdad.
+            seller_suggested_pct = round(min_discount_pct + 0.1, 2)
         suggested_pct = seller_suggested_pct  # compat con el resto del code
         # `seller_pct` = lo que se va a aplicar. Priorizamos lo que
         # cargó el vendedor; si no hay, usamos la sugerencia de ML
@@ -3351,8 +3368,9 @@ async def api_promociones_items(
         # no la sugerencia. Si no cargaste nada, te falta TODO.
         check_pct = loaded_pct if loaded_pct is not None else 0.0
         if min_discount_pct is not None:
-            gap_pct = round(max(0.0, min_discount_pct - check_pct), 2)
-            if check_pct < min_discount_pct:
+            required_pct = round(min_discount_pct + 0.1, 2)
+            gap_pct = round(max(0.0, required_pct - check_pct), 2)
+            if check_pct <= min_discount_pct:
                 below_min = True
         final_price = None
         if original_price:
@@ -3458,6 +3476,19 @@ async def api_promociones_apply(
                 pct = float(it.get("discount_pct") or 0)
             except (TypeError, ValueError):
                 pct = 0
+            try:
+                min_pct = float(it.get("min_discount_pct")) if it.get("min_discount_pct") is not None else None
+            except (TypeError, ValueError):
+                min_pct = None
+            if min_pct is not None and pct <= min_pct:
+                return {
+                    "item_id": iid,
+                    "ok": False,
+                    "status": 0,
+                    "error": f"Descuento insuficiente: MercadoLibre exige mas de {min_pct:g}%. Cargá un porcentaje mayor antes de aplicar.",
+                    "payload": None,
+                    "attempts": 0,
+                }
             deal_price = None
             if original_price and pct > 0:
                 try:
@@ -3804,11 +3835,16 @@ async def api_orders(request: Request, account_id: int,
     for o, sid in zip(all_results, all_sids):
         a = float(o.get("total_amount", 0))
         estado = o.get("status", "")
-        payments = o.get("payments", [])
-        pay_str = ""
-        if payments:
-            pay_str = payments[0].get("date_approved", "") or payments[0].get("date_created", "")
-        fecha, hora = to_ar(pay_str if pay_str else o.get("date_created", ""))
+        if admin_orders_mode:
+            sale_date_raw = o.get("date_closed") or o.get("date_created", "")
+        else:
+            payments = o.get("payments", [])
+            sale_date_raw = ""
+            if payments:
+                sale_date_raw = payments[0].get("date_approved", "") or payments[0].get("date_created", "")
+            if not sale_date_raw:
+                sale_date_raw = o.get("date_created", "")
+        fecha, hora = to_ar(sale_date_raw)
         if fecha and not (df <= fecha <= dt):
             continue
         order_id = str(o.get("id"))
