@@ -736,14 +736,9 @@
       previewSearch = '';
       const searchInput = document.getElementById('preview-search');
       if(searchInput) searchInput.value = '';
-      // Auto-seleccionar los listos para aplicar (con descuento cargado
-      // y por encima del mínimo) — mismo criterio que antes.
+      // Arranca sin selección: el usuario decide si aplica todos los filtrados
+      // o sólo algunas filas.
       previewSelected = new Set();
-      currentItems.forEach(it => {
-        if(it.loaded_discount_pct != null && !it.below_min) {
-          previewSelected.add(it.item_id);
-        }
-      });
       previewPage = 1;
       if(data.error) statusEl.textContent = `(${data.error})`;
       renderPreview();
@@ -871,13 +866,12 @@
 
   function toggleAll(cb) {
     // Selecciona/desmarca TODOS los filtrados (no solo la página actual)
-    const filtered = getFilteredItems();
-    if(cb.checked) {
-      filtered.forEach(it => {
-        if(it.loaded_discount_pct != null && !it.below_min) previewSelected.add(it.item_id);
-      });
-    } else {
+    const filtered = getFilteredItems().filter(it => it.loaded_discount_pct != null && !it.below_min);
+    const selectedInFiltered = filtered.filter(it => previewSelected.has(it.item_id)).length;
+    if(selectedInFiltered > 0) {
       filtered.forEach(it => previewSelected.delete(it.item_id));
+    } else {
+      filtered.forEach(it => previewSelected.add(it.item_id));
     }
     // Reflejar en los visibles
     document.querySelectorAll('.row-check').forEach(c => {
@@ -886,12 +880,65 @@
     updateSelectedCount();
   }
 
+  function clearPreviewSelection() {
+    previewSelected = new Set();
+    renderPreview();
+  }
+
+  function exportPreviewFilteredCsvLegacy() {
+    const rows = getFilteredItems();
+    if(!rows.length) {
+      alert('No hay items para exportar con el filtro actual.');
+      return;
+    }
+    const esc = v => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const pct = v => v == null ? '' : `${v}%`;
+    const money = v => v == null ? '' : Number(v).toFixed(2);
+    const body = rows.map(it => {
+      const gap = computeItemGap(it);
+      const estado = it.loaded_discount_pct == null
+        ? 'Sin descuento cargado'
+        : (it.below_min ? `Debe superar ${it.min_discount_pct}%` : 'Listo para aplicar');
+      return `<tr>
+        <td>${esc(it.mla || it.item_id || '')}</td>
+        <td>${esc(it.sku || '')}</td>
+        <td>${esc(it.title || '')}</td>
+        <td>${money(it.original_price)}</td>
+        <td>${pct(it.loaded_discount_pct)}</td>
+        <td>${pct(it.seller_suggested_pct)}</td>
+        <td>${pct(it.ml_contribution_pct)}</td>
+        <td>${gap == null ? '' : pct(gap)}</td>
+        <td>${money(it.final_price)}</td>
+        <td>${esc(estado)}</td>
+      </tr>`;
+    }).join('');
+    const html = `<!doctype html><html><head><meta charset="utf-8"></head><body>
+      <table border="1">
+        <thead><tr>
+          <th>MLA</th><th>SKU</th><th>Titulo</th><th>Precio actual</th>
+          <th>Tu desc.</th><th>Descuento ML vendedor</th><th>Aporte ML</th>
+          <th>Diferencia</th><th>Precio final</th><th>Estado</th>
+        </tr></thead>
+        <tbody>${body}</tbody>
+      </table>
+    </body></html>`;
+    const blob = new Blob([html], {type: 'application/vnd.ms-excel;charset=utf-8'});
+    const a = document.createElement('a');
+    const promo = (currentPromo?.name || 'promo').replace(/[^a-z0-9_-]+/gi, '_').slice(0, 40);
+    a.href = URL.createObjectURL(blob);
+    a.download = `promo_${promo}_${currentStatus || 'items'}_filtrado.xls`;
+    document.body.appendChild(a);
+    a.click();
+    URL.revokeObjectURL(a.href);
+    a.remove();
+  }
+
   function updateSelectedCount() {
     const n = previewSelected.size;
     document.getElementById('selected-count').textContent = `${n} seleccionados`;
     document.getElementById('btn-apply').disabled = n === 0;
     // Header checkbox refleja el estado del filtrado actual
-    const filtered = getFilteredItems();
+    const filtered = getFilteredItems().filter(it => it.loaded_discount_pct != null && !it.below_min);
     const selectedInFiltered = filtered.filter(it => previewSelected.has(it.item_id)).length;
     const headerCb = document.getElementById('select-all');
     if(headerCb) {
@@ -971,12 +1018,6 @@
       btn.textContent = 'Aplicar a los seleccionados';
       updateSelectedCount();
     }
-  }
-
-  function clearPreviewSelection() {
-    previewSelected.clear();
-    document.querySelectorAll('.row-check').forEach(c => { c.checked = false; });
-    updateSelectedCount();
   }
 
   function exportPreviewFiltered() {

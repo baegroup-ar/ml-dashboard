@@ -435,19 +435,22 @@
       // pudimos bajar, pero mostramos un aviso para que se vea que hay un
       // problema y no creas que las cifras son la realidad completa.
       if (data.fetch_errors && data.fetch_errors.length) {
+        // Errores parciales: no alarmamos con cartel rojo. Dejamos la
+        // etiqueta de "Actualizado/Datos guardados" tal cual; el detalle
+        // técnico queda en el title por si hace falta inspeccionarlo.
         const box = document.getElementById('error-box');
         box.title = data.fetch_errors.join('\n');
         box.style.display = 'none';
-        document.getElementById('last-update').textContent =
-          `${lastSavedLabel}. MercadoLibre no completó todos los rangos.`;
       }
       return true;
     } catch(e) {
       if(seq !== loadSeq) return;
       if(hasRenderedData) {
+        // Falla en segundo plano con datos ya en pantalla: no mostramos
+        // error. Volvemos silenciosamente a la última etiqueta guardada.
         document.getElementById('error-box').style.display='none';
         document.getElementById('last-update').textContent =
-          `${lastSavedLabel || 'Datos guardados'}. MercadoLibre no completó la actualización.`;
+          lastSavedLabel || 'Datos guardados';
       } else {
         document.getElementById('error-box').textContent = e.message;
         document.getElementById('error-box').style.display='block';
