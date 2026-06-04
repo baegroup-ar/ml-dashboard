@@ -3717,7 +3717,15 @@ async def api_orders(request: Request, account_id: int,
     # variabilidad de paging.total que devuelve ML (a veces reporta el cap).
     SPLIT_THRESHOLD = 900
 
-    async with httpx.AsyncClient(timeout=180) as client:
+    # Pool de conexiones amplio: con cientos de envíos + búsqueda de órdenes en
+    # paralelo, el default de httpx (max_connections=100) se satura y genera
+    # timeouts en cascada en rangos grandes (7/30 días). Lo subimos.
+    http_limits = httpx.Limits(max_connections=200, max_keepalive_connections=50)
+    # Cap global de concurrencia para /orders/search. La recursión binaria de
+    # chunks puede disparar 100+ requests simultáneas y ML responde 429; al
+    # agotar reintentos perdíamos chunks enteros (miles de ventas) → totales mal.
+    order_search_sem = asyncio.Semaphore(20)
+    async with httpx.AsyncClient(timeout=180, limits=http_limits) as client:
         async def _get_with_retry(params):
             """GET a /orders/search con reintentos sobre 429/5xx/timeouts.
             ML rate-limitea bastante agresivo cuando recursamos en paralelo,
@@ -3725,7 +3733,8 @@ async def api_orders(request: Request, account_id: int,
             last_err = None
             for attempt in range(4):
                 try:
-                    rp = await client.get(f"{ML_API_URL}/orders/search", headers=headers, params=params)
+                    async with order_search_sem:
+                        rp = await client.get(f"{ML_API_URL}/orders/search", headers=headers, params=params)
                 except Exception as e:
                     last_err = f"exc {str(e)[:120]}"
                     if attempt < 3:
