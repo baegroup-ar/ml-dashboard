@@ -744,26 +744,44 @@ async def get_shipping_cost(client, shipping_id, headers) -> dict:
         Ing. = 0, Costo = senders[0].cost (descuento ya aplicado) o,
         si /costs no responde, 50% del list_cost.
     """
-    # Resiliencia: si ML tira timeout / corta la conexión en un shipment,
-    # NO queremos que explote toda la request /api/orders con un 500. Con
-    # Semaphore(80) pegándole fuerte a ML, los timeouts esporádicos son
-    # esperables. Devolvemos el default vacío para ese envío y seguimos.
+    # Resiliencia: si ML tira timeout / corta la conexión en un shipment, NO
+    # queremos (a) que explote toda la request con un 500, ni (b) que el envío
+    # quede en 0 (costo/ingreso de envío mal → totales mal en rangos grandes).
+    # Con Semaphore(80) pegándole fuerte a ML, los timeouts esporádicos son
+    # esperables, así que reintentamos con backoff (igual que el order search)
+    # antes de rendirnos. Si tras los reintentos sigue fallando, devolvemos
+    # None para NO cachear un 0 erróneo y reintentar en el próximo refresh.
     EMPTY = {"seller": 0.0, "buyer": 0.0, "bonificacion": 0.0}
     costs_headers = {**headers, "X-Costs-New": "true", "x-format-new": "true"}
-    try:
-        r_ship_task = asyncio.create_task(
-            client.get(f"{ML_API_URL}/shipments/{shipping_id}", headers=headers)
-        )
-        r_costs_task = asyncio.create_task(
-            client.get(f"{ML_API_URL}/shipments/{shipping_id}/costs", headers=costs_headers)
-        )
-        r_ship = await r_ship_task
-        r_costs = await r_costs_task
-    except Exception:
-        # Falla transitoria (timeout/conexión): devolvemos None para que NO se
-        # cachee un costo 0 erróneo y se reintente en el próximo refresh.
+
+    async def _ship_get(url, hdrs):
+        """GET con reintentos sobre timeouts/429/5xx. Devuelve la respuesta,
+        o None si tras 4 intentos no hubo un resultado utilizable."""
+        for attempt in range(4):
+            try:
+                rp = await client.get(url, headers=hdrs)
+            except Exception:
+                if attempt < 3:
+                    await asyncio.sleep(0.4 * (2 ** attempt))
+                    continue
+                return None
+            if rp.status_code == 200:
+                return rp
+            # 404/410: el envío no existe / no es recuperable → respuesta válida.
+            if rp.status_code in (429, 500, 502, 503, 504) and attempt < 3:
+                await asyncio.sleep(0.4 * (2 ** attempt))
+                continue
+            return rp
         return None
 
+    r_ship, r_costs = await asyncio.gather(
+        _ship_get(f"{ML_API_URL}/shipments/{shipping_id}", headers),
+        _ship_get(f"{ML_API_URL}/shipments/{shipping_id}/costs", costs_headers),
+    )
+
+    # /shipments falló de forma transitoria tras reintentos: no cachear (None).
+    if r_ship is None:
+        return None
     if r_ship.status_code != 200:
         return dict(EMPTY)
 
@@ -792,7 +810,7 @@ async def get_shipping_cost(client, shipping_id, headers) -> dict:
     sender_discount = 0.0
     sender_save = 0.0
     compensation = 0.0
-    costs_responded = r_costs.status_code == 200
+    costs_responded = r_costs is not None and r_costs.status_code == 200
     if costs_responded:
         cd = r_costs.json()
         costs_gross_amount = amount_value(cd.get("gross_amount"))
@@ -3828,9 +3846,12 @@ async def api_orders(request: Request, account_id: int,
             uncached = [sid for sid in unique_sids if sid not in cost_cache]
 
             if uncached:
-                # Subido de 40 a 80 para reducir latencia en fetches grandes.
-                # ML soporta más concurrencia sin pegarse contra rate limit.
-                ship_sem = asyncio.Semaphore(80)
+                # Cada tarea abre 2 conexiones (/shipments + /costs), así que
+                # 80 → hasta 160 conexiones concurrentes contra ML, que es lo
+                # que disparaba los timeouts masivos en rangos grandes (7/30
+                # días) y dejaba envíos en 0. Bajado a 50 (≈100 conexiones) +
+                # reintentos en get_shipping_cost = mucho más confiable.
+                ship_sem = asyncio.Semaphore(50)
                 async def fetch_ship(sid):
                     async with ship_sem:
                         try:
