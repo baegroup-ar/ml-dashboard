@@ -249,6 +249,7 @@
   let loadSeq = 0;
   let hasRenderedData = false;
   let lastSavedLabel = '';
+  let refreshInFlight = false;
   // Períodos que ya se refrescaron contra ML en esta sesión.
   const refreshedRanges = new Set();
 
@@ -361,24 +362,33 @@
   function resetContent() {
     hasRenderedData = false;
     document.getElementById('content').style.display='none';
+    document.getElementById('page-loading').innerHTML = '<span class="spinner"></span> Conectando con MercadoLibre...';
     document.getElementById('page-loading').style.display='block';
   }
 
   async function loadRange(firstTime = false) {
     const rendered = await loadData({cacheOnly: true});
     if(!rendered) {
-      await loadData({refresh: true, background: rendered});
-    } else if(isTodayRange()) {
+      // Sin caché: refresco en primer plano (spinner) contra ML.
+      await refreshNow(false);
+    } else if(firstTime || isTodayRange()) {
+      // Mostramos el caché al instante y reconciliamos contra ML en segundo
+      // plano. Antes esto solo pasaba para "Hoy"; por eso "Ayer", "7 días",
+      // "30 días", etc. quedaban pegados al caché y "no actualizaban". Ahora
+      // cualquier rango se concilia contra ML la primera vez en la sesión.
       refreshNow(true);
     }
   }
 
   function refreshNow(background = false) {
+    if(refreshInFlight) return Promise.resolve(false);
     if(background || hasRenderedData) {
       const base = lastSavedLabel || document.getElementById('last-update').textContent || 'Datos guardados';
       document.getElementById('last-update').textContent = `${base}. Actualizando contra MercadoLibre...`;
     }
-    return loadData({refresh: true, background: background || hasRenderedData});
+    refreshInFlight = true;
+    return loadData({refresh: true, background: background || hasRenderedData})
+      .finally(() => { refreshInFlight = false; });
   }
 
   function isTodayRange() {
@@ -427,6 +437,7 @@
       if(seq !== loadSeq) return;
       if(cacheOnly && data.cache_empty) {
         if(!hasRenderedData) {
+          document.getElementById('page-loading').innerHTML = '<span class="spinner"></span> Conectando con MercadoLibre...';
           document.getElementById('page-loading').style.display='block';
           document.getElementById('content').style.display='none';
           document.getElementById('last-update').textContent = 'Cargando...';
@@ -467,12 +478,16 @@
         document.getElementById('last-update').textContent =
           lastSavedLabel || 'Datos guardados';
       } else {
-        document.getElementById('error-box').textContent = e.message;
-        document.getElementById('error-box').style.display='block';
+        document.getElementById('error-box').style.display='none';
+        document.getElementById('last-update').textContent = 'MercadoLibre no completó la actualización.';
       }
-      document.getElementById('page-loading').style.display='none';
       if(!hasRenderedData) {
+        const loader = document.getElementById('page-loading');
+        loader.innerHTML = 'MercadoLibre no completó la actualización.';
+        loader.style.display='block';
         document.getElementById('content').style.display='none';
+      } else {
+        document.getElementById('page-loading').style.display='none';
       }
       return false;
     } finally {
