@@ -461,10 +461,44 @@
     };
   }
 
-  function showDebugJson(ev) {
+  async function showDebugJson(ev) {
     if(ev) ev.preventDefault();
-    document.getElementById('debug-json').textContent = JSON.stringify(buildDebugSummary(), null, 2);
+    const pre = document.getElementById('debug-json');
     document.getElementById('debug-modal').style.display = 'block';
+    pre.textContent = 'Resumen del caché en pantalla:\n\n' +
+      JSON.stringify(buildDebugSummary(), null, 2) +
+      '\n\n──────────\nLlamando a ML en vivo (refresh=1)… esperá…';
+    // Llamada en vivo DIRECTA a ML para ver el diag real y/o el error exacto.
+    const params = getParams();
+    params.set('refresh', '1');
+    const baseUrl = currentAccountId === 'all'
+      ? '/api/orders-all'
+      : `/api/orders/${currentAccountId}`;
+    const t0 = Date.now();
+    let liveBlock;
+    try {
+      const r = await fetch(`${baseUrl}?${params}`);
+      const secs = ((Date.now()-t0)/1000).toFixed(1);
+      const bodyText = await r.text();
+      let parsed = null;
+      try { parsed = JSON.parse(bodyText); } catch(_) {}
+      if(!r.ok) {
+        liveBlock = { ok:false, http_status: r.status, segundos: secs, body: bodyText.slice(0, 2000) };
+      } else {
+        const diag = parsed && parsed.diag ? parsed.diag : null;
+        liveBlock = {
+          ok: true, http_status: r.status, segundos: secs,
+          total_ordenes_payload: parsed && parsed.orders ? parsed.orders.length : null,
+          diag: diag,
+        };
+      }
+    } catch(e) {
+      liveBlock = { ok:false, error_fetch: String(e), segundos: ((Date.now()-t0)/1000).toFixed(1) };
+    }
+    pre.textContent = 'Resumen del caché en pantalla:\n\n' +
+      JSON.stringify(buildDebugSummary(), null, 2) +
+      '\n\n────── LLAMADA EN VIVO A ML (refresh=1) ──────\n' +
+      JSON.stringify(liveBlock, null, 2);
   }
 
   function copyDebugJson() {
