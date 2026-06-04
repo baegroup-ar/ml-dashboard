@@ -250,6 +250,9 @@
   let hasRenderedData = false;
   let lastSavedLabel = '';
   let refreshInFlight = false;
+  // Reintentos automáticos cuando el fetch vuelve incompleto (chunks perdidos
+  // por 429/timeout). Se resetea al cambiar de período/cuenta.
+  let incompleteRetries = 0;
   // Períodos que ya se refrescaron contra ML en esta sesión.
   const refreshedRanges = new Set();
 
@@ -322,6 +325,7 @@
     const key = `${df.value}|${dt.value}`;
     const firstTime = !refreshedRanges.has(key);
     refreshedRanges.add(key);
+    incompleteRetries = 0;
     loadRange(firstTime);
   }
 
@@ -335,6 +339,7 @@
     const key = `${df}|${dt}`;
     const firstTime = !refreshedRanges.has(key);
     refreshedRanges.add(key);
+    incompleteRetries = 0;
     loadRange(firstTime);
   }
 
@@ -343,6 +348,7 @@
   function onAccountChange() {
     currentAccountId = document.getElementById('account-select').value;
     refreshedRanges.clear();
+    incompleteRetries = 0;
     updateAccountScopedUI();
     resetContent();
     loadRange(true);
@@ -467,6 +473,22 @@
         const box = document.getElementById('error-box');
         box.title = data.fetch_errors.join('\n');
         box.style.display = 'none';
+      }
+      // Completitud: si fue una actualización en vivo (no caché) y ML quedó
+      // parcial (chunks perdidos), avisamos suave y reintentamos solo una vez
+      // más en segundo plano (la 2da pasada recupera los chunks fallidos y los
+      // costos de envío ya quedaron cacheados, así que es más rápida y completa).
+      if (!cacheOnly && data.diag && data.diag.complete === false) {
+        document.getElementById('last-update').textContent =
+          `${lastSavedLabel} · completando datos…`;
+        if (incompleteRetries < 2) {
+          incompleteRetries++;
+          // refreshNow tiene su propio guard de refreshInFlight; el delay deja
+          // que termine la pasada actual antes de disparar la siguiente.
+          setTimeout(() => refreshNow(true), 1500);
+        }
+      } else if (!cacheOnly && data.diag && data.diag.complete === true) {
+        incompleteRetries = 0;
       }
       return true;
     } catch(e) {

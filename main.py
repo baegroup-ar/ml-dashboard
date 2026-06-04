@@ -3711,7 +3711,8 @@ async def api_orders(request: Request, account_id: int,
     # falla, lo loggeamos y lo devolvemos en el payload para que se vea en el UI.
     fetch_errors: list = []
     # Counters de diagnóstico para entender qué pasó del lado de ML.
-    diag = {"chunks_fetched": 0, "raw_ml_orders": 0, "split_events": 0, "retries": 0}
+    diag = {"chunks_fetched": 0, "raw_ml_orders": 0, "split_events": 0, "retries": 0,
+            "ml_reported_total": 0, "days_over_cap": 0}
 
     # Threshold para forzar split del chunk. Bajado a 900 con margen ante
     # variabilidad de paging.total que devuelve ML (a veces reporta el cap).
@@ -3789,6 +3790,13 @@ async def api_orders(request: Request, account_id: int,
 
             # Hoja: paginar hasta total (cap duro de ML en 1000 paginables).
             diag["chunks_fetched"] += 1
+            # Ground-truth: lo que ML dice que existe en esta hoja. Sumado sobre
+            # todas las hojas = total que ML reporta para la ventana buscada.
+            # Si raw_ml_orders < ml_reported_total, perdimos órdenes (chunk con
+            # error o un día con >1000 que no se pudo partir).
+            diag["ml_reported_total"] = diag.get("ml_reported_total", 0) + total
+            if total > 1000 and (end_d - start_d).days < 1:
+                diag["days_over_cap"] = diag.get("days_over_cap", 0) + 1
             capped = min(total, 1000)
             offsets = list(range(50, capped, 50))
             if offsets:
@@ -4110,6 +4118,12 @@ async def api_orders(request: Request, account_id: int,
     diag["fetch_ranges"] = fetch_ranges
     diag["admin_full_refresh"] = admin_full_refresh
     diag["search_date_field"] = order_search_date_field
+    # Completitud: ¿bajamos todo lo que ML dice que hay en la ventana buscada?
+    # raw_ml_orders = lo que efectivamente trajimos; ml_reported_total = lo que
+    # ML reporta (suma de paging.total por hoja). Si difieren o hubo errores,
+    # el fetch quedó parcial y NO hay que confiar en los totales.
+    diag["lost_orders"] = max(0, diag.get("ml_reported_total", 0) - diag["raw_ml_orders"])
+    diag["complete"] = (not fetch_errors) and diag["lost_orders"] == 0
 
     # ── Breakdown para conciliar contra ML ────────────────────────
     # Permite ver EXACTAMENTE por qué difiere el conteo/monto del panel vs ML:
