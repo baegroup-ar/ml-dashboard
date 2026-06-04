@@ -3635,7 +3635,13 @@ async def api_orders(request: Request, account_id: int,
     user = get_user(user_id)
     admin_orders_mode = bool(user and user.get("is_admin"))
     admin_full_refresh = bool(admin_orders_mode and refresh)
-    order_search_date_field = "order.date_closed" if admin_orders_mode else "order.date_last_updated"
+    # IMPORTANTE: buscamos por order.date_created (fecha real de la venta).
+    # NO usar order.date_closed: ese campo solo se completa cuando ML "cierra"
+    # la orden (finalizada/entregada), así que las ventas pagadas que todavía
+    # están en proceso NO tienen date_closed y quedaban EXCLUIDAS del search →
+    # faltaba ~9-17% de las ventas (peor en rangos recientes). date_created es
+    # inmutable, siempre está, y es la fecha que usa ML en "Ventas del período".
+    order_search_date_field = "order.date_created"
 
     # ── Cache lookup ──────────────────────────────────────────────
     # cache_fetched_from registra hasta dónde hemos bajado de ML para esta
@@ -3758,9 +3764,8 @@ async def api_orders(request: Request, account_id: int,
             tope que /orders/search expone (max 1000 paginables, paging.total
             puede reportar más), parte el rango por la mitad y recursa.
 
-            Para admin usamos order.date_closed como fecha de búsqueda porque
-            ML documenta ese campo como fecha de cierre de la venta. Para no
-            admin mantenemos date_last_updated, que era el comportamiento previo."""
+            Buscamos por order.date_created (fecha real de la venta, siempre
+            presente). Para no admin se mantiene date_last_updated."""
             from_utc = datetime.combine(start_d, datetime.min.time()) + timedelta(hours=3) - timedelta(hours=24)
             to_utc = datetime.combine(end_d, datetime.min.time()) + timedelta(hours=27)
             chunk_params = {
@@ -3899,7 +3904,10 @@ async def api_orders(request: Request, account_id: int,
         estado = o.get("status", "")
         payments = o.get("payments", [])
         if admin_orders_mode:
-            sale_date_raw = o.get("date_closed") or o.get("date_created", "")
+            # Bucket por date_created (misma fecha por la que buscamos): la
+            # fecha de la venta, presente siempre. Antes usábamos date_closed,
+            # que faltaba en órdenes abiertas y las dejaba afuera del rango.
+            sale_date_raw = o.get("date_created") or o.get("date_closed", "")
         else:
             sale_date_raw = ""
             if payments:
