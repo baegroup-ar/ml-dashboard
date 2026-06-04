@@ -127,7 +127,22 @@
 
   <div style="margin-bottom:1.25rem;">
     <h1 style="font-size:20px;font-weight:600;margin-bottom:4px;" id="period-title">Últimos 30 días</h1>
-    <p id="last-update" style="font-size:13px;color:#888;">Cargando...</p>
+    <p id="last-update" style="font-size:13px;color:#888;">Cargando...
+      <a href="#" id="debug-link" onclick="showDebugJson(event)" style="margin-left:8px;font-size:12px;color:#3483fa;text-decoration:underline;">Ver JSON crudo (debug)</a>
+    </p>
+  </div>
+
+  <div id="debug-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9999;padding:40px;" onclick="if(event.target===this)this.style.display='none'">
+    <div style="background:#fff;max-width:900px;margin:0 auto;border-radius:8px;max-height:85vh;display:flex;flex-direction:column;">
+      <div style="padding:12px 16px;border-bottom:1px solid #eee;display:flex;justify-content:space-between;align-items:center;">
+        <strong>Diagnóstico — período actual</strong>
+        <span>
+          <button onclick="copyDebugJson()" style="margin-right:8px;padding:4px 10px;cursor:pointer;">Copiar</button>
+          <button onclick="document.getElementById('debug-modal').style.display='none'" style="padding:4px 10px;cursor:pointer;">Cerrar</button>
+        </span>
+      </div>
+      <pre id="debug-json" style="margin:0;padding:16px;overflow:auto;font-size:12px;line-height:1.4;white-space:pre-wrap;word-break:break-word;"></pre>
+    </div>
   </div>
 
   <div id="error-box" class="error-box" style="display:none;"></div>
@@ -412,6 +427,53 @@
     return p;
   }
 
+  // ── Debug: arma un resumen del período actual para conciliar contra ML ──
+  function buildDebugSummary() {
+    const data = window.__lastData;
+    if(!data) return { error: 'todavia no hay datos cargados' };
+    const orders = data.orders || [];
+    const cnt = o => Number(o.order_count || 1);
+    const paid = orders.filter(o => o.estado === 'paid');
+    // conteo por dia (solo pagadas) para detectar diferencias en el borde
+    const porDia = {};
+    let unidades = 0, brutos = 0;
+    paid.forEach(o => {
+      const d = o.fecha || '?';
+      porDia[d] = (porDia[d] || 0) + cnt(o);
+      unidades += (o.items || []).reduce((s,i)=> s + Number(i.cantidad||1), 0);
+      brutos += Number(o.monto || 0);
+    });
+    const estados = {};
+    orders.forEach(o => { estados[o.estado||'?'] = (estados[o.estado||'?']||0) + cnt(o); });
+    const dias = Object.keys(porDia).sort();
+    return {
+      periodo: { desde: document.getElementById('date-from')?.value, hasta: document.getElementById('date-to')?.value, cuenta: currentAccountId },
+      panel: {
+        cantidad_ventas_pagadas: paid.reduce((s,o)=>s+cnt(o),0),
+        unidades_vendidas: unidades,
+        ingresos_brutos: Math.round(brutos*100)/100,
+        ventas_por_estado: estados,
+        ventas_pagadas_por_dia: dias.map(d => `${d}: ${porDia[d]}`),
+      },
+      diag_backend: data.diag || null,
+      fetch_errors: data.fetch_errors || null,
+    };
+  }
+
+  function showDebugJson(ev) {
+    if(ev) ev.preventDefault();
+    document.getElementById('debug-json').textContent = JSON.stringify(buildDebugSummary(), null, 2);
+    document.getElementById('debug-modal').style.display = 'block';
+  }
+
+  function copyDebugJson() {
+    const t = document.getElementById('debug-json').textContent;
+    navigator.clipboard.writeText(t).then(()=>{
+      const b = event.target; const old = b.textContent; b.textContent = 'Copiado ✓';
+      setTimeout(()=>b.textContent=old, 1500);
+    });
+  }
+
   async function loadData(options = false) {
     if(!currentAccountId) return;
     const opts = typeof options === 'boolean' ? {refresh: options} : (options || {});
@@ -440,6 +502,7 @@
       const r = await fetch(`${baseUrl}?${params}`);
       if(!r.ok) throw new Error('Error al obtener ventas.');
       const data = await r.json();
+      window.__lastData = data;
       if(seq !== loadSeq) return;
       if(cacheOnly && data.cache_empty) {
         if(!hasRenderedData) {
