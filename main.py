@@ -4063,6 +4063,35 @@ async def api_orders(request: Request, account_id: int,
     diag["fetch_ranges"] = fetch_ranges
     diag["admin_full_refresh"] = admin_full_refresh
     diag["search_date_field"] = order_search_date_field
+
+    # ── Breakdown para conciliar contra ML ────────────────────────
+    # Permite ver EXACTAMENTE por qué difiere el conteo/monto del panel vs ML:
+    #  - status_counts: cuántas órdenes (ya mergeadas, dentro del rango) hay en
+    #    cada estado. ML "Ventas" normalmente cuenta solo 'paid'.
+    #  - paid_orders / paid_units: conteo de ventas pagadas y unidades.
+    #  - paid_amount: facturación bruta (suma de total_amount de las pagadas).
+    #  - refund_total: reembolsos detectados (ML resta esto de su facturación).
+    #  - paid_amount_net: paid_amount - refund_total (lo que debería matchear ML).
+    status_counts: dict = {}
+    paid_orders_n = 0
+    paid_units = 0
+    paid_amount = 0.0
+    refund_total = 0.0
+    for o in merged:
+        st = o.get("estado") or "?"
+        n = int(o.get("order_count", 1) or 1)
+        status_counts[st] = status_counts.get(st, 0) + n
+        refund_total += float(o.get("refund_amount", 0) or 0)
+        if st == "paid":
+            paid_orders_n += n
+            paid_amount += float(o.get("monto", 0) or 0)
+            paid_units += sum(int(i.get("cantidad", 1) or 1) for i in (o.get("items") or []))
+    diag["status_counts"] = status_counts
+    diag["paid_orders"] = paid_orders_n
+    diag["paid_units"] = paid_units
+    diag["paid_amount"] = round(paid_amount, 2)
+    diag["refund_total"] = round(refund_total, 2)
+    diag["paid_amount_net"] = round(paid_amount - refund_total, 2)
     payload["diag"] = diag
     if fetch_errors:
         # Devolver los errores en el payload para que el UI los pueda mostrar.
