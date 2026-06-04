@@ -3634,7 +3634,13 @@ async def api_orders(request: Request, account_id: int,
 
     user = get_user(user_id)
     admin_orders_mode = bool(user and user.get("is_admin"))
-    admin_full_refresh = bool(admin_orders_mode and refresh)
+    # Refrescar SIEMPRE recompone el rango completo contra ML (no solo admin).
+    # Antes esto estaba gateado por is_admin: si la cuenta NO era admin, al
+    # tocar "Actualizar" en 30 días solo se re-bajaban los últimos 7 días y el
+    # resto salía del caché viejo (armado con date_closed) → el número no se
+    # movía. Ahora cualquier refresh fuerza cff=None (rango completo) y reemplaza
+    # el caché. Por eso "no cambiaba nada".
+    admin_full_refresh = bool(refresh)
     # IMPORTANTE: buscamos por order.date_created (fecha real de la venta).
     # NO usar order.date_closed: ese campo solo se completa cuando ML "cierra"
     # la orden (finalizada/entregada), así que las ventas pagadas que todavía
@@ -3903,17 +3909,13 @@ async def api_orders(request: Request, account_id: int,
         a = float(o.get("total_amount", 0))
         estado = o.get("status", "")
         payments = o.get("payments", [])
-        if admin_orders_mode:
-            # Bucket por date_created (misma fecha por la que buscamos): la
-            # fecha de la venta, presente siempre. Antes usábamos date_closed,
-            # que faltaba en órdenes abiertas y las dejaba afuera del rango.
-            sale_date_raw = o.get("date_created") or o.get("date_closed", "")
-        else:
-            sale_date_raw = ""
-            if payments:
-                sale_date_raw = payments[0].get("date_approved", "") or payments[0].get("date_created", "")
-            if not sale_date_raw:
-                sale_date_raw = o.get("date_created", "")
+        # Bucket por date_created (la MISMA fecha por la que buscamos en ML).
+        # Antes el path no-admin bucketeaba por fecha de pago (date_approved),
+        # distinta del campo de búsqueda → una orden creada en el rango pero
+        # aprobada otro día quedaba fuera del bucket y se descartaba (línea de
+        # filtro `df <= fecha <= dt`). Unificar search+bucket evita ese descarte
+        # y hace que el período coincida con "Ventas" de ML (que usa date_created).
+        sale_date_raw = o.get("date_created") or o.get("date_closed", "")
         fecha, hora = to_ar(sale_date_raw)
         if fecha and not (df <= fecha <= dt):
             continue
