@@ -4138,9 +4138,14 @@ async def _api_orders_impl(request: Request, account_id: int,
         # primera fetch tuvo errores y guardamos cff = df igual.
         if not fetch_errors and fetch_ranges:
             min_fetched_df = min(rd for rd, _ in fetch_ranges)
+            # IMPORTANTE: usar CAST(:df AS DATE), NO ':df::DATE'. El '::' de
+            # Postgres rompe el parser de parámetros nombrados de SQLAlchemy y
+            # tiraba 500 ("syntax error at or near :") en CADA refresh → el
+            # frontend lo tragaba y volvía al caché ("nunca actualiza").
             db_execute(
                 "UPDATE ml_accounts SET cache_fetched_from ="
-                " LEAST(COALESCE(cache_fetched_from, '9999-12-31'::DATE), :df::DATE) WHERE id=:id",
+                " LEAST(COALESCE(cache_fetched_from, CAST('9999-12-31' AS DATE)),"
+                " CAST(:df AS DATE)) WHERE id=:id",
                 {"df": min_fetched_df, "id": account_id}
             )
 
