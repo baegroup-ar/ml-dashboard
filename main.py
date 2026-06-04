@@ -3618,6 +3618,31 @@ async def api_orders(request: Request, account_id: int,
                      date_from: Optional[str] = None, date_to: Optional[str] = None,
                      refresh: bool = False, fast: bool = False,
                      cache_only: bool = False):
+    """Wrapper: captura excepciones y devuelve el traceback en el body (DEBUG).
+    Antes un error tiraba 500 genérico ('Internal Server Error') sin detalle,
+    y el front lo tragaba en silencio dejando el caché → 'no cambia nada'."""
+    try:
+        return await _api_orders_impl(request, account_id, date_from, date_to,
+                                      refresh, fast, cache_only)
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        try:
+            print("ERROR api_orders:", tb, flush=True)
+        except Exception:
+            pass
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e), "traceback": tb.splitlines()[-30:]},
+        )
+
+
+async def _api_orders_impl(request: Request, account_id: int,
+                     date_from: Optional[str] = None, date_to: Optional[str] = None,
+                     refresh: bool = False, fast: bool = False,
+                     cache_only: bool = False):
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
@@ -4219,7 +4244,7 @@ async def api_orders_all(request: Request,
 
     async def _safe(aid: int):
         try:
-            return await api_orders(request, aid, date_from, date_to, refresh, fast, cache_only)
+            return await _api_orders_impl(request, aid, date_from, date_to, refresh, fast, cache_only)
         except HTTPException:
             return None
         except Exception:
