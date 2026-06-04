@@ -744,18 +744,28 @@ async def get_shipping_cost(client, shipping_id, headers) -> dict:
         Ing. = 0, Costo = senders[0].cost (descuento ya aplicado) o,
         si /costs no responde, 50% del list_cost.
     """
-    r_ship_task = asyncio.create_task(
-        client.get(f"{ML_API_URL}/shipments/{shipping_id}", headers=headers)
-    )
+    # Resiliencia: si ML tira timeout / corta la conexión en un shipment,
+    # NO queremos que explote toda la request /api/orders con un 500. Con
+    # Semaphore(80) pegándole fuerte a ML, los timeouts esporádicos son
+    # esperables. Devolvemos el default vacío para ese envío y seguimos.
+    EMPTY = {"seller": 0.0, "buyer": 0.0, "bonificacion": 0.0}
     costs_headers = {**headers, "X-Costs-New": "true", "x-format-new": "true"}
-    r_costs_task = asyncio.create_task(
-        client.get(f"{ML_API_URL}/shipments/{shipping_id}/costs", headers=costs_headers)
-    )
-    r_ship = await r_ship_task
-    r_costs = await r_costs_task
+    try:
+        r_ship_task = asyncio.create_task(
+            client.get(f"{ML_API_URL}/shipments/{shipping_id}", headers=headers)
+        )
+        r_costs_task = asyncio.create_task(
+            client.get(f"{ML_API_URL}/shipments/{shipping_id}/costs", headers=costs_headers)
+        )
+        r_ship = await r_ship_task
+        r_costs = await r_costs_task
+    except Exception:
+        # Falla transitoria (timeout/conexión): devolvemos None para que NO se
+        # cachee un costo 0 erróneo y se reintente en el próximo refresh.
+        return None
 
     if r_ship.status_code != 200:
-        return {"seller": 0.0, "buyer": 0.0, "bonificacion": 0.0}
+        return dict(EMPTY)
 
     ship = r_ship.json()
     so = ship.get("shipping_option") or {}
@@ -3823,8 +3833,15 @@ async def api_orders(request: Request, account_id: int,
                 ship_sem = asyncio.Semaphore(80)
                 async def fetch_ship(sid):
                     async with ship_sem:
-                        return sid, await get_shipping_cost(client, sid, headers)
-                new_shipping_costs = dict(await asyncio.gather(*[fetch_ship(sid) for sid in uncached]))
+                        try:
+                            return sid, await get_shipping_cost(client, sid, headers)
+                        except Exception:
+                            # Un envío que falla NO debe tumbar toda la request.
+                            return sid, None
+                fetched = await asyncio.gather(*[fetch_ship(sid) for sid in uncached])
+                # Solo cacheamos/usamos los que devolvieron datos (None = falla
+                # transitoria → se reintenta en el próximo refresh, sin cachear 0).
+                new_shipping_costs = {sid: c for sid, c in fetched if c is not None}
                 cost_cache.update(new_shipping_costs)
 
     empty_ship = {"seller": 0.0, "buyer": 0.0, "bonificacion": 0.0}
