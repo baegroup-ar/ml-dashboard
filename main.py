@@ -3588,7 +3588,21 @@ async def api_promociones_apply(
                             }
                         last_status = r.status_code
                         last_error = r.text[:500]
-                        if r.status_code in (423, 429, 500, 502, 503, 504) and attempt < 4:
+                        # Reintentos por status server-side / lock.
+                        retriable = r.status_code in (423, 429, 500, 502, 503, 504)
+                        # Algunos 400 de ML son TRANSITORIOS (ML está procesando
+                        # internamente la publicación): reintentar también.
+                        #  - OFFER_SIBLING_CREATION_IN_PROCESS: oferta hermana en
+                        #    creación; al rato deja aplicar el precio.
+                        #  - REST_CREDIBILITY_API_ERROR: microservicio de precios
+                        #    de ML caído/ocupado, suele recuperarse.
+                        if r.status_code == 400 and (
+                            "OFFER_SIBLING_CREATION_IN_PROCESS" in last_error
+                            or "REST_CREDIBILITY_API_ERROR" in last_error
+                            or "Credibility Api" in last_error
+                        ):
+                            retriable = True
+                        if retriable and attempt < 4:
                             await asyncio.sleep(1.5 * (attempt + 1))
                             continue
                         break
