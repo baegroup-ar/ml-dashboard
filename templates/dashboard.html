@@ -100,10 +100,12 @@
   <div class="account-bar">
     <label>Cuenta ML:</label>
     <select id="account-select" onchange="onAccountChange()">
+      {% set default_nick = 'TIENDA BAE' %}
+      {% set has_default = accounts | selectattr('nickname', 'equalto', default_nick) | list | length > 0 %}
       {% for acc in accounts %}
-      <option value="{{ acc.id }}" {% if loop.first %}selected{% endif %}>{{ acc.nickname }}</option>
+      <option value="{{ acc.id }}" {% if acc.nickname == default_nick or (not has_default and loop.first) %}selected{% endif %}>{{ acc.nickname }}</option>
       {% endfor %}
-      {% if accounts|length > 1 %}<option value="all">📊 Todas las cuentas (agregado)</option>{% endif %}
+      {% if accounts|length > 1 %}<option value="all">TODAS LAS CUENTAS</option>{% endif %}
     </select>
     <a href="/ml/connect" class="connect-link">+ Conectar otra cuenta</a>
     <form id="disconnect-form" method="post" style="margin:0;">
