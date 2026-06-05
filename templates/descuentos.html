@@ -1039,6 +1039,25 @@
     document.getElementById('confirm-modal').classList.remove('show');
   }
 
+  // Traduce los codigos de error de ML a un mensaje claro en castellano.
+  function humanizeMlError(raw) {
+    const txt = raw || '';
+    if(txt.includes('ERROR_CREDIBILITY_DISCOUNTED_PRICE'))
+      return 'Precio no creible: ML detecta que esa publicacion ya estuvo a ese precio (o mas barata) hace poco, asi que no lo acepta como descuento real. Subi el precio de lista o aplica un descuento menor.';
+    if(txt.includes('CANDIDATE_NOT_FOUND'))
+      return 'ML no encontro la oferta candidata para este item (suele pasar en publicaciones de catalogo, donde la promo la maneja la publicacion padre).';
+    if(txt.includes('OFFER_SIBLING_CREATION_IN_PROCESS'))
+      return 'ML esta procesando una publicacion hermana (catalogo). Reintenta en unos minutos.';
+    if(txt.includes('REST_CREDIBILITY_API_ERROR') || txt.includes('Credibility Api'))
+      return 'Servicio de precios de ML ocupado temporalmente. Reintenta en unos minutos.';
+    if(txt.includes('LOYALTY_PRICE_DIFF_TOO_LOW'))
+      return 'El precio Meli+ (loyalty) quedo muy cerca del precio normal.';
+    // Intento extraer el error_message de ML si vino como JSON
+    const m = txt.match(/"error_message":"([^"]+)"/) || txt.match(/"message":"([^"]+)"/);
+    if(m) return m[1];
+    return txt.slice(0, 200) || 'sin detalle';
+  }
+
   async function doApply() {
     const sel = getSelected();
     closeConfirm();
@@ -1061,11 +1080,11 @@
         if(locked.length) {
           msg += `${locked.length} quedaron bloqueados temporalmente por MercadoLibre (Offer Locked). Reintenta esos items en unos minutos.\n\n`;
         }
-        // Mostrar el error real de ML por cada item, así se ve qué pasó
-        msg += fails.slice(0, 5).map(f =>
-          `• ${f.item_id} [HTTP ${f.status}]: ${(f.error || 'sin detalle').slice(0, 200)}`
+        // Mostrar el error TRADUCIDO de ML por cada item, así se entiende qué pasó
+        msg += fails.slice(0, 8).map(f =>
+          `• ${f.item_id}: ${humanizeMlError(f.error)}`
         ).join('\n');
-        if(fails.length > 5) msg += `\n...y ${fails.length - 5} más (ver consola).`;
+        if(fails.length > 8) msg += `\n...y ${fails.length - 8} más (ver consola).`;
         console.warn('Fallos completos:', fails);
       }
       alert(msg);
