@@ -2932,6 +2932,43 @@ async def api_promociones_list(request: Request, account_id: int):
                 if pstatus == "started" and promos[pid].get("status") != "started":
                     promos[pid]["status"] = "started"
 
+        # Paso 3: enriquecer vigencia. Muchas promos (sobre todo SMART y
+        # algunas SELLER_CAMPAIGN) no traen start_date/finish_date a nivel
+        # item-offer, así que consultamos el detalle global de la promo
+        # /seller-promotions/promotions/{id} para completar las fechas.
+        def _missing_dates(p):
+            return not p.get("start_date") and not p.get("finish_date")
+
+        async def fetch_promo_dates(pid, ptype):
+            async with sem:
+                try:
+                    params = {"app_version": "v2"}
+                    if ptype:
+                        params["promotion_type"] = ptype
+                    r = await client.get(
+                        f"{ML_API_URL}/seller-promotions/promotions/{pid}",
+                        headers=headers,
+                        params=params,
+                    )
+                    if r.status_code != 200:
+                        return pid, None
+                    gdata = r.json()
+                    return pid, (gdata if isinstance(gdata, dict) else None)
+                except Exception:
+                    return pid, None
+
+        to_enrich = [(p["id"], p.get("type")) for p in promos.values() if _missing_dates(p)]
+        if to_enrich:
+            date_outcomes = await asyncio.gather(
+                *[fetch_promo_dates(pid, ptype) for pid, ptype in to_enrich]
+            )
+            for pid, gdata in date_outcomes:
+                if not gdata or pid not in promos:
+                    continue
+                for key in ("start_date", "finish_date", "deadline_date"):
+                    if not promos[pid].get(key) and gdata.get(key):
+                        promos[pid][key] = gdata.get(key)
+
     items = list(promos.values())
     items.sort(key=lambda x: (x.get("status") != "started", -x.get("applicable_items", 0), (x.get("name") or "").lower()))
     return {
