@@ -2743,6 +2743,38 @@ def promo_offer_id(offer: dict):
     )
 
 
+def promo_candidate_offer_id(promo_obj: dict):
+    """Devuelve el offer_id del CANDIDATO para aplicar una promo.
+    En v2, ML identifica la oferta concreta del item con un `offer_id`
+    (distinto del `id` de la promoción). Para promos co-fondeadas con ML
+    (MARKETPLACE_CAMPAIGN / SMART / PRICE_DISCOUNT) hay que mandarlo o ML
+    responde CANDIDATE_NOT_FOUND. Puede venir top-level o anidado en
+    `offers[]`."""
+    if not isinstance(promo_obj, dict):
+        return None
+    oid = promo_obj.get("offer_id") or promo_obj.get("ref_id")
+    if oid:
+        return oid
+    offers = promo_obj.get("offers")
+    if isinstance(offers, list):
+        # Preferimos el candidato (status candidate/pending/vacío); si no,
+        # cualquier oferta con id.
+        for off in offers:
+            if not isinstance(off, dict):
+                continue
+            st = (off.get("status") or "").lower()
+            if st in ("candidate", "pending", ""):
+                cand = off.get("offer_id") or off.get("id")
+                if cand:
+                    return cand
+        for off in offers:
+            if isinstance(off, dict):
+                cand = off.get("offer_id") or off.get("id")
+                if cand:
+                    return cand
+    return None
+
+
 def promo_status_matches(offer_status, requested_status: str) -> bool:
     status_norm = (offer_status or "").lower()
     requested = (requested_status or "").lower()
@@ -3527,6 +3559,30 @@ async def api_promociones_apply(
         # ML bloquea temporalmente ofertas cuando procesa cambios masivos.
         # Concurrencia baja + retries reduce HTTP 423 LockedEntityException.
         sem = asyncio.Semaphore(3)
+
+        async def resolve_offer_id(iid, ptype):
+            """Consulta en vivo el offer_id del candidato para esta promo.
+            Necesario para promos co-fondeadas con ML: si no se manda el
+            offer_id correcto, ML responde CANDIDATE_NOT_FOUND."""
+            try:
+                params = {"app_version": "v2", "promotion_id": promotion_id}
+                if ptype:
+                    params["promotion_type"] = ptype
+                r = await client.get(
+                    f"{ML_API_URL}/seller-promotions/items/{iid}",
+                    headers=headers,
+                    params=params,
+                )
+                if r.status_code != 200:
+                    return None
+                data = r.json()
+                for off in promo_offers_from_response(data):
+                    if isinstance(off, dict) and str(promo_offer_id(off)) == str(promotion_id):
+                        return promo_candidate_offer_id(off)
+            except Exception:
+                pass
+            return None
+
         async def apply_one(it):
             iid = it.get("item_id")
             ptype = (it.get("promotion_type") or "DEAL").upper()
@@ -3569,13 +3625,11 @@ async def api_promociones_apply(
             # precio EXCLUSIVO Meli+ (loyalty). Si lo mandás igual al
             # deal_price, ML rechaza con LOYALTY_PRICE_DIFF_TOO_LOW.
             # Por ahora NO lo enviamos (el descuento loyalty es opcional).
-            if ptype == "DEAL":
-                payload = {
-                    "promotion_id": promotion_id,
-                    "promotion_type": "DEAL",
-                    "deal_price": deal_price,
-                }
-            elif ptype in ("SMART", "MARKETPLACE_CAMPAIGN"):
+            # Promos co-fondeadas con ML (donde ML aporta un %) se aplican
+            # aceptando la oferta candidata: ML exige el offer_id correcto.
+            # SMART/MARKETPLACE no llevan deal_price (el precio lo fija la
+            # oferta de ML); DEAL/SELLER_CAMPAIGN/PRICE_DISCOUNT sí.
+            if ptype in ("SMART", "MARKETPLACE_CAMPAIGN"):
                 payload = {
                     "promotion_id": promotion_id,
                     "promotion_type": ptype,
@@ -3593,6 +3647,12 @@ async def api_promociones_apply(
                     "promotion_type": "PRICE_DISCOUNT",
                     "deal_price": deal_price,
                 }
+            elif ptype == "DEAL":
+                payload = {
+                    "promotion_id": promotion_id,
+                    "promotion_type": "DEAL",
+                    "deal_price": deal_price,
+                }
             else:
                 # Fallback (LIGHTNING, VOLUME, DOD, etc.) — mandamos
                 # precio final si lo tenemos.
@@ -3601,11 +3661,17 @@ async def api_promociones_apply(
                     "promotion_type": ptype,
                     "deal_price": deal_price,
                 }
+            # El offer_id identifica la oferta concreta del item; mandarlo
+            # cuando lo tengamos ayuda a ML a ubicar el candidato y evita
+            # CANDIDATE_NOT_FOUND en cualquier tipo de promo.
+            if offer_id:
+                payload["offer_id"] = offer_id
             # Limpiamos campos None
             payload = {k: v for k, v in payload.items() if v is not None}
             async with sem:
                 last_status = 0
                 last_error = None
+                offer_id_refreshed = False
                 for attempt in range(5):
                     try:
                         r = await client.post(
@@ -3639,6 +3705,18 @@ async def api_promociones_apply(
                             or "Credibility Api" in last_error
                         ):
                             retriable = True
+                        # CANDIDATE_NOT_FOUND: el offer_id que mandamos no
+                        # corresponde (o falta). Lo resolvemos en vivo una vez
+                        # y reintentamos con el candidato correcto.
+                        if (r.status_code == 400 and "CANDIDATE_NOT_FOUND" in last_error
+                                and not offer_id_refreshed):
+                            offer_id_refreshed = True
+                            fresh = await resolve_offer_id(iid, ptype)
+                            if fresh and fresh != offer_id:
+                                offer_id = fresh
+                                payload["offer_id"] = fresh
+                                await asyncio.sleep(0.5)
+                                continue
                         if retriable and attempt < 4:
                             await asyncio.sleep(1.5 * (attempt + 1))
                             continue
