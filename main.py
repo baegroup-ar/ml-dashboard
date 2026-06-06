@@ -3090,10 +3090,62 @@ async def api_promociones_items(
         except Exception:
             promo_global = {}
 
+        promo_page_limit = 49
+        params = {"app_version": "v2", "limit": promo_page_limit}
+        if status:
+            params["status"] = status
+        if promotion_type:
+            params["promotion_type"] = promotion_type
+
         all_results = []
         seen_ids: set = set()
         expected_total = 0
         total_raw = 0
+        source = "promotion_items"
+        direct_error = None
+
+        offset = 0
+        duplicate_streak = 0
+        max_iterations = 300
+        for _ in range(max_iterations):
+            try:
+                r = await client.get(
+                    f"{ML_API_URL}/seller-promotions/promotions/{promotion_id}/items",
+                    headers=headers,
+                    params={**params, "offset": offset},
+                )
+            except Exception as e:
+                direct_error = f"ML error: {str(e)[:200]}"
+                break
+            if r.status_code != 200:
+                direct_error = f"ML {r.status_code}: {r.text[:200]}"
+                break
+            data = r.json()
+            results = data.get("results", []) if isinstance(data, dict) else []
+            paging = data.get("paging") or {}
+            if paging.get("total"):
+                try:
+                    expected_total = int(paging["total"])
+                except (TypeError, ValueError):
+                    pass
+            if not results:
+                break
+            total_raw += len(results)
+            new_in_batch = 0
+            for it in results:
+                iid = it.get("id") if isinstance(it, dict) else None
+                if iid and iid not in seen_ids:
+                    seen_ids.add(iid)
+                    all_results.append(it)
+                    new_in_batch += 1
+            offset += len(results)
+            if len(results) < promo_page_limit:
+                break
+            if expected_total > 0 and len(seen_ids) >= expected_total:
+                break
+            duplicate_streak = duplicate_streak + 1 if new_in_batch == 0 else 0
+            if duplicate_streak >= 5:
+                break
 
         # Enriquecer con SKU y nombre desde /items/{id}. Sin filtrar
         # attributes para que vengan también `attributes[]` y `variations[]`,
@@ -3171,10 +3223,26 @@ async def api_promociones_items(
         scan_item_count = 0
         scan_matched_count = 0
         promo_details_override = []
-        seller_item_ids = await fetch_all_seller_item_ids(client, headers, acc["ml_user_id"])
-        if seller_item_ids:
+        detail_sem = asyncio.Semaphore(40)
+
+        if all_results:
+            async def fetch_existing_detail(iid):
+                async with detail_sem:
+                    return await fetch_item_promo_detail(iid)
+
+            direct_ids = [it.get("id") for it in all_results if isinstance(it, dict) and it.get("id")]
+            promo_details_override = await asyncio.gather(
+                *[fetch_existing_detail(i) for i in direct_ids]
+            )
+            promo_details_override = [
+                detail if isinstance(detail, dict) else {}
+                for detail in promo_details_override
+            ]
+        else:
+            source = "seller_items_scan"
+            seller_item_ids = await fetch_all_seller_item_ids(client, headers, acc["ml_user_id"])
+        if not all_results and seller_item_ids:
             scan_item_count = len(seller_item_ids)
-            detail_sem = asyncio.Semaphore(40)
 
             async def fetch_matching_detail(iid):
                 async with detail_sem:
@@ -3643,7 +3711,8 @@ async def api_promociones_items(
         "paging_unique": len(seen_ids),           # items únicos
         "scan_item_count": scan_item_count,
         "scan_matched_count": scan_matched_count,
-        "source": "seller_items_scan",
+        "source": source,
+        "direct_error": direct_error,
     }
     if all_results:
         first_list = all_results[0]
