@@ -2747,11 +2747,15 @@ def promo_offers_from_response(data) -> list:
 
 def promo_offer_id(offer: dict):
     return (
-        offer.get("id")
-        or offer.get("promotion_id")
-        or offer.get("offer_id")
+        offer.get("promotion_id")
         or offer.get("campaign_id")
+        or offer.get("id")
+        or offer.get("offer_id")
     )
+
+
+def promo_id_matches(a, b) -> bool:
+    return str(a or "").strip().lower() == str(b or "").strip().lower()
 
 
 def promo_candidate_offer_id(promo_obj: dict):
@@ -3148,7 +3152,7 @@ async def api_promociones_items(
                     if not isinstance(off, dict):
                         continue
                     pid = promo_offer_id(off)
-                    if str(pid) == str(promotion_id) and promo_status_matches(off.get("status"), status):
+                    if promo_id_matches(pid, promotion_id) and promo_status_matches(off.get("status"), status):
                         return off
             except Exception:
                 pass
@@ -3168,7 +3172,7 @@ async def api_promociones_items(
                 if not isinstance(detail, dict):
                     return None
                 pid = promo_offer_id(detail)
-                if str(pid) != str(promotion_id):
+                if not promo_id_matches(pid, promotion_id):
                     return None
                 if not promo_status_matches(detail.get("status"), status):
                     return None
@@ -3253,83 +3257,118 @@ async def api_promociones_items(
             return None
         return round((1 - p / o) * 100, 2)
 
+    def _pct_from_amount(amount, original) -> Optional[float]:
+        """Convierte un monto de descuento a porcentaje sobre el precio base."""
+        if amount is None or original is None:
+            return None
+        try:
+            a, o = float(amount), float(original)
+        except (TypeError, ValueError):
+            return None
+        if o <= 0 or a <= 0 or a >= o:
+            return None
+        return round(a / o * 100, 2)
+
     def _extract_min_discount_pct(promo_item: dict, original_price) -> Optional[float]:
         """% minimo de descuento que ML exige para participar.
 
-        Priorizamos porcentajes explicitos porque son los que ML muestra como
-        requisito minimo. Los precios post-descuento quedan solo como fallback.
+        ML puede devolver a la vez el minimo real y una recomendacion/sugerido.
+        Para esta pantalla necesitamos el minimo: juntamos las senales validas
+        del bloque exacto de la promo y usamos el menor porcentaje positivo.
         """
-        # % explícito en distintos nombres (algunos promo types los usan).
-        # Prioridad alta: es el porcentaje que ML muestra como requisito en su
-        # pantalla de publicaciones/promos. No usamos campos "suggested".
-        for k in (
+        if not isinstance(promo_item, dict):
+            return None
+
+        candidates: list[float] = []
+
+        pct_fields = (
             "discount_percentage", "discount_pct",
             "deal_discount_percentage", "deal_discount_pct",
             "min_discount_percentage", "min_discount_pct",
             "minimum_discount_percentage",
+            "minimum_percentage", "min_percentage",
+            "required_discount_percentage", "required_percentage",
             "seller_min_discount_percentage",
             "min_seller_discount_percentage",
             "seller_percentage",
-        ):
-            v = promo_item.get(k)
-            if v is not None:
-                try:
-                    fv = float(v)
-                except (TypeError, ValueError):
-                    continue
-                if fv > 0:
-                    return round(fv, 2)
-        # Campo secundario: max_discounted_price (precio mayor con descuento).
-        # Lo dejamos por compatibilidad, pero debajo de los porcentajes porque
-        # ML a veces expone otros precios de referencia que no son el mínimo.
-        for k in ("max_discounted_price", "top_deal_price"):
-            pct = _pct_from_price(promo_item.get(k), original_price)
+            "seller_discount_percentage",
+            "nudge_seller_percentage",
+            "default_discount_percentage",
+            "expected_discount_percentage",
+            "target_discount_percentage",
+        )
+        price_fields = (
+            "max_discounted_price",
+            "deal_price",
+            "discounted_price",
+            "discount_price",
+            "final_price",
+            "promotion_price",
+            "promo_price",
+            "minimum_price",
+            "min_price",
+            "price",
+            "top_deal_price",
+        )
+        amount_fields = (
+            "discount_amount",
+            "discount_value",
+            "seller_discount_amount",
+            "deal_discount_amount",
+            "rebate_amount",
+        )
+
+        def add_pct(value):
+            if value is None:
+                return
+            try:
+                pct = float(value)
+            except (TypeError, ValueError):
+                return
+            if 0 < pct < 100:
+                candidates.append(round(pct, 2))
+
+        def add_price(value):
+            pct = _pct_from_price(value, original_price)
             if pct is not None and pct > 0:
-                return pct
-        # Campos anidados
+                candidates.append(pct)
+
+        def add_amount(value):
+            pct = _pct_from_amount(value, original_price)
+            if pct is not None and pct > 0:
+                candidates.append(pct)
+
+        for k in pct_fields:
+            add_pct(promo_item.get(k))
+        for k in price_fields:
+            add_price(promo_item.get(k))
+        for k in amount_fields:
+            add_amount(promo_item.get(k))
+
         for nest_key in ("discount_breakdown", "prices", "benefits",
                          "nudge", "rebate"):
             nested = promo_item.get(nest_key)
             if isinstance(nested, dict):
-                for k in ("discount_percentage", "discount_pct",
-                          "min_discount_percentage", "minimum_percentage",
-                          "min_percentage", "min_seller_discount_percentage",
-                          "seller_percentage"):
-                    v = nested.get(k)
-                    if v is not None:
-                        try:
-                            fv = float(v)
-                        except (TypeError, ValueError):
-                            continue
-                        if fv > 0:
-                            return round(fv, 2)
-                for k in ("max_discounted_price", "top_deal_price"):
-                    pct = _pct_from_price(nested.get(k), original_price)
-                    if pct is not None and pct > 0:
-                        return pct
+                for k in pct_fields:
+                    add_pct(nested.get(k))
+                for k in price_fields:
+                    add_price(nested.get(k))
+                for k in amount_fields:
+                    add_amount(nested.get(k))
         for arr_key in ("offers", "discounts", "rebates"):
             arr = promo_item.get(arr_key)
             if isinstance(arr, list):
                 for off in arr:
                     if not isinstance(off, dict):
                         continue
-                    for k in ("discount_percentage", "discount_pct",
-                              "min_discount_percentage",
-                              "minimum_discount_percentage",
-                              "seller_percentage"):
-                        v = off.get(k)
-                        if v is not None:
-                            try:
-                                fv = float(v)
-                            except (TypeError, ValueError):
-                                continue
-                            if fv > 0:
-                                return round(fv, 2)
-                    for k in ("max_discounted_price", "top_deal_price"):
-                        pct = _pct_from_price(off.get(k), original_price)
-                        if pct is not None and pct > 0:
-                            return pct
-        return None
+                    for k in pct_fields:
+                        add_pct(off.get(k))
+                    for k in price_fields:
+                        add_price(off.get(k))
+                    for k in amount_fields:
+                        add_amount(off.get(k))
+
+        return min(candidates) if candidates else None
 
     def _extract_seller_suggested_pct(
         promo_item: dict, original_price, ml_contribution_pct
@@ -3478,8 +3517,9 @@ async def api_promociones_items(
                 if merged.get(k) in (None, "", 0) and v not in (None, ""):
                     merged[k] = v
         original_price = (merged.get("original_price")
-                          or merged.get("price")
-                          or (info.get("price") if info else None))
+                          or (info.get("price") if info else None)
+                          or merged.get("regular_price")
+                          or merged.get("price"))
         # Minimo requerido por ML para participar. El endpoint de detalle por
         # item es mas fiel a lo que muestra la pantalla de ML; si trae el dato,
         # lo priorizamos por sobre el listado de la promo.
@@ -3658,7 +3698,7 @@ async def api_promociones_apply(
                     return None
                 data = r.json()
                 for off in promo_offers_from_response(data):
-                    if isinstance(off, dict) and str(promo_offer_id(off)) == str(promotion_id):
+                    if isinstance(off, dict) and promo_id_matches(promo_offer_id(off), promotion_id):
                         return promo_candidate_offer_id(off)
             except Exception:
                 pass
