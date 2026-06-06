@@ -3035,6 +3035,7 @@ async def api_promociones_list(request: Request, account_id: int):
 async def api_promociones_items(
     request: Request, account_id: int, promotion_id: str,
     status: str = "candidate", promotion_type: Optional[str] = None,
+    debug_item: Optional[str] = None,
 ):
     """Lista los items elegibles (candidate) o participando (started) de una promo,
     cruzados con la base de descuentos del vendedor."""
@@ -3046,7 +3047,8 @@ async def api_promociones_items(
         raise HTTPException(404)
     # Cache de resultados: cambiar de pestaña o recargar es instantaneo
     # mientras no se aplique/quite un descuento (lo cual invalida la cache).
-    cache_key = f"{account_id}:{promotion_id}:{status}"
+    debug_item_norm = (debug_item or "").strip().upper()
+    cache_key = f"{account_id}:{promotion_id}:{status}:{debug_item_norm}"
     _now = datetime.utcnow()
     _cached = PROMO_ITEMS_RESULT_CACHE.get(cache_key)
     if _cached and (_now - _cached["at"]).total_seconds() < PROMO_ITEMS_RESULT_TTL_SECONDS:
@@ -3644,6 +3646,28 @@ async def api_promociones_items(
             "detail_keys": sorted(list(first_detail.keys())) if isinstance(first_detail, dict) else None,
             "detail_sample": ({k: first_detail[k] for k in list(first_detail.keys())[:30]}
                               if isinstance(first_detail, dict) else None),
+        })
+    if debug_item_norm:
+        target_idx = next(
+            (i for i, it in enumerate(all_results)
+             if str((it or {}).get("id") or "").upper() == debug_item_norm),
+            None,
+        )
+        target_processed = next(
+            (it for it in items_out
+             if str(it.get("item_id") or "").upper() == debug_item_norm),
+            None,
+        )
+        target_list = all_results[target_idx] if target_idx is not None else None
+        target_detail = promo_details[target_idx] if target_idx is not None and target_idx < len(promo_details) else None
+        raw_sample.update({
+            "debug_item": debug_item_norm,
+            "debug_item_found": target_idx is not None,
+            "debug_item_processed": target_processed,
+            "debug_item_list_keys": sorted(list(target_list.keys())) if isinstance(target_list, dict) else None,
+            "debug_item_list_raw": target_list if isinstance(target_list, dict) else None,
+            "debug_item_detail_keys": sorted(list(target_detail.keys())) if isinstance(target_detail, dict) else None,
+            "debug_item_detail_raw": target_detail if isinstance(target_detail, dict) else None,
         })
     result = {
         "items": items_out,

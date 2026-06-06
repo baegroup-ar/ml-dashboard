@@ -668,6 +668,7 @@
     }
     const params = new URLSearchParams({ status: currentStatus || 'candidate' });
     if(currentPromo.type) params.set('promotion_type', currentPromo.type);
+    if(previewSearch) params.set('debug_item', previewSearch);
     const url = `/api/promociones/${currentAccountId}/${encodeURIComponent(currentPromo.id)}/items?${params}`;
     window.open(url, '_blank');
   }
