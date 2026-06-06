@@ -34,6 +34,17 @@ ML_API_URL = "https://api.mercadolibre.com"
 SHIPPING_LOGIC_VERSION = "v34-logistic-type-in-orders"
 PROMO_ITEM_SCAN_CACHE_TTL_SECONDS = 300
 PROMO_ITEM_SCAN_CACHE: dict[str, dict] = {}
+# Cache de resultados ya armados de /api/promociones/{acc}/{promo}/items.
+# Permite que cambiar de pestaña o recargar sea instantaneo. Se invalida
+# cuando se aplica o se quita un descuento en esa cuenta.
+PROMO_ITEMS_RESULT_TTL_SECONDS = 120
+PROMO_ITEMS_RESULT_CACHE: dict[str, dict] = {}
+
+
+def _invalidate_promo_items_cache(account_id: int) -> None:
+    prefix = f"{account_id}:"
+    for k in [k for k in PROMO_ITEMS_RESULT_CACHE if k.startswith(prefix)]:
+        PROMO_ITEMS_RESULT_CACHE.pop(k, None)
 
 serializer = URLSafeTimedSerializer(SECRET_KEY)
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -3029,6 +3040,13 @@ async def api_promociones_items(
     acc = _account_for_user(account_id, user_id)
     if not acc:
         raise HTTPException(404)
+    # Cache de resultados: cambiar de pestaña o recargar es instantaneo
+    # mientras no se aplique/quite un descuento (lo cual invalida la cache).
+    cache_key = f"{account_id}:{promotion_id}:{status}"
+    _now = datetime.utcnow()
+    _cached = PROMO_ITEMS_RESULT_CACHE.get(cache_key)
+    if _cached and (_now - _cached["at"]).total_seconds() < PROMO_ITEMS_RESULT_TTL_SECONDS:
+        return _cached["data"]
     token = await refresh_ml_token(account_id)
     if not token:
         raise HTTPException(502)
@@ -3142,7 +3160,7 @@ async def api_promociones_items(
         seller_item_ids = await fetch_all_seller_item_ids(client, headers, acc["ml_user_id"])
         if seller_item_ids:
             scan_item_count = len(seller_item_ids)
-            detail_sem = asyncio.Semaphore(20)
+            detail_sem = asyncio.Semaphore(40)
 
             async def fetch_matching_detail(iid):
                 async with detail_sem:
@@ -3163,11 +3181,34 @@ async def api_promociones_items(
             scan_matched_count = len(matched)
 
         ids = [it.get("id") for it in all_results if it.get("id")]
-        sem = asyncio.Semaphore(20)
-        async def fetch(iid):
-            async with sem:
-                return await enrich(iid)
-        enriched = await asyncio.gather(*[fetch(i) for i in ids])
+        # Multiget en lotes de 20 — MUCHO mas rapido que 1 request por item
+        # (de N requests a N/20). ML devuelve [{code, body}, ...].
+        enriched_map: dict = {}
+        mget_sem = asyncio.Semaphore(12)
+        _attrs = "id,title,seller_sku,price,available_quantity,attributes,variations"
+
+        async def fetch_batch(chunk):
+            async with mget_sem:
+                try:
+                    rb = await client.get(
+                        f"{ML_API_URL}/items",
+                        headers=headers,
+                        params={"ids": ",".join(chunk), "attributes": _attrs},
+                    )
+                    if rb.status_code != 200:
+                        return
+                    for entry in rb.json():
+                        if not isinstance(entry, dict):
+                            continue
+                        body = entry.get("body") if entry.get("code") == 200 else None
+                        if isinstance(body, dict) and body.get("id"):
+                            enriched_map[body["id"]] = body
+                except Exception:
+                    pass
+
+        chunks = [ids[i:i + 20] for i in range(0, len(ids), 20)]
+        await asyncio.gather(*[fetch_batch(c) for c in chunks])
+        enriched = [enriched_map.get(i) for i in ids]
         promo_details = promo_details_override
 
     def _extract_sku(info: Optional[dict]) -> str:
@@ -3535,11 +3576,13 @@ async def api_promociones_items(
             "detail_sample": ({k: first_detail[k] for k in list(first_detail.keys())[:30]}
                               if isinstance(first_detail, dict) else None),
         })
-    return {
+    result = {
         "items": items_out,
         "discount_base_count": len(discount_map),
         "raw_sample": raw_sample,
     }
+    PROMO_ITEMS_RESULT_CACHE[cache_key] = {"at": datetime.utcnow(), "data": result}
+    return result
 
 
 @app.post("/api/promociones/{account_id}/{promotion_id}/apply")
@@ -3746,6 +3789,7 @@ async def api_promociones_apply(
                     "attempts": 5,
                 }
         results = await asyncio.gather(*[apply_one(it) for it in items])
+    _invalidate_promo_items_cache(account_id)
     return {"results": results, "ok": True}
 
 
@@ -3810,6 +3854,7 @@ async def api_promociones_remove(
                         "status": last_status, "error": last_error}
 
         results = await asyncio.gather(*[remove_one(it) for it in items])
+    _invalidate_promo_items_cache(account_id)
     return {"results": results, "ok": True}
 
 

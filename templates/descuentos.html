@@ -287,6 +287,9 @@
   let currentPromo = null;
   let currentItems = [];
   let currentStatus = 'candidate';
+  // Token para evitar que una carga vieja (lenta) pise a una nueva: cada
+  // loadPromoItems incrementa el id y al volver solo aplica si sigue siendo el ultimo.
+  let promoItemsReqId = 0;
 
   function onFilterChange() {
     basePage = 1;
@@ -762,11 +765,23 @@
 
   async function loadPromoItems(status) {
     if(!currentPromo) return;
+    const reqId = ++promoItemsReqId;     // marca esta carga como la más reciente
+    const promoId = currentPromo.id;     // recordamos a qué promo/tab pertenece
     currentStatus = status;
+    currentItems = [];                   // limpiamos para que no quede lo anterior
+    previewSelected = new Set();
     const tbody = document.getElementById('preview-tbody');
     const statusEl = document.getElementById('preview-status');
     tbody.innerHTML = '<tr><td colspan="9" class="empty">Cargando items...</td></tr>';
     statusEl.textContent = '';
+    // Resaltar la pestaña activa
+    ['btn-preview-cand','btn-preview-pending','btn-preview-started'].forEach(id => {
+      const b = document.getElementById(id);
+      if(b) b.style.opacity = '0.55';
+    });
+    const activeBtn = { candidate:'btn-preview-cand', pending:'btn-preview-pending', started:'btn-preview-started' }[status];
+    const ab = document.getElementById(activeBtn);
+    if(ab) ab.style.opacity = '1';
     // Solo en "elegibles" se aplica; en "programados" y "participando" se quita.
     const canApply = status === 'candidate';
     const btnApply = document.getElementById('btn-apply');
@@ -777,8 +792,11 @@
       const params = new URLSearchParams({ status });
       if(currentPromo.type) params.set('promotion_type', currentPromo.type);
       const r = await fetch(`/api/promociones/${currentAccountId}/${encodeURIComponent(currentPromo.id)}/items?${params}`);
+      // Si entre medio se disparó otra carga (otra tab/promo), descartamos esta.
+      if(reqId !== promoItemsReqId || promoId !== currentPromo?.id) return;
       if(!r.ok) throw new Error('Error');
       const data = await r.json();
+      if(reqId !== promoItemsReqId || promoId !== currentPromo?.id) return;
       currentItems = data.items || [];
       previewSearch = '';
       const searchInput = document.getElementById('preview-search');
@@ -790,6 +808,7 @@
       if(data.error) statusEl.textContent = `(${data.error})`;
       renderPreview();
     } catch(e) {
+      if(reqId !== promoItemsReqId) return;
       tbody.innerHTML = `<tr><td colspan="9" class="empty">Error: ${e.message}</td></tr>`;
     }
   }
