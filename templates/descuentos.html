@@ -181,6 +181,7 @@
     <h3>3. Vista previa — <span id="preview-promo-name"></span></h3>
     <div class="row" style="margin-bottom:10px;">
       <button onclick="loadPromoItems('candidate')" id="btn-preview-cand">Items elegibles</button>
+      <button onclick="loadPromoItems('pending')" id="btn-preview-pending">Items programados</button>
       <button onclick="loadPromoItems('started')" id="btn-preview-started">Items participando</button>
       <a href="#" id="btn-debug-json" onclick="openDebugJson(event)" style="margin-left:auto;font-size:11px;color:#888;text-decoration:underline;cursor:pointer;">Ver JSON crudo (debug)</a>
       <span id="preview-status" style="font-size:12px;color:#888;"></span>
@@ -766,12 +767,12 @@
     const statusEl = document.getElementById('preview-status');
     tbody.innerHTML = '<tr><td colspan="9" class="empty">Cargando items...</td></tr>';
     statusEl.textContent = '';
-    // En "participando" mostramos Quitar; en "elegibles" mostramos Aplicar.
-    const isStarted = status === 'started';
+    // Solo en "elegibles" se aplica; en "programados" y "participando" se quita.
+    const canApply = status === 'candidate';
     const btnApply = document.getElementById('btn-apply');
     const btnRemove = document.getElementById('btn-remove');
-    if(btnApply) btnApply.style.display = isStarted ? 'none' : '';
-    if(btnRemove) btnRemove.style.display = isStarted ? '' : 'none';
+    if(btnApply) btnApply.style.display = canApply ? '' : 'none';
+    if(btnRemove) btnRemove.style.display = canApply ? 'none' : '';
     try {
       const params = new URLSearchParams({ status });
       if(currentPromo.type) params.set('promotion_type', currentPromo.type);
@@ -841,9 +842,9 @@
           estado = '<span class="badge ok">Listo para aplicar</span>';
         }
         // Solo se bloquea cuando NO hay NADA para aplicar (ni tu desc ni minimo
-        // de ML). En la pestaña "participando" se puede seleccionar CUALQUIER
-        // item (para poder quitarlo de la promo).
-        const cannotApply = applyPct == null && currentStatus !== 'started';
+        // de ML), y solo en "elegibles". En "programados"/"participando" se
+        // puede seleccionar CUALQUIER item (para poder quitarlo de la promo).
+        const cannotApply = applyPct == null && currentStatus === 'candidate';
         const checked = previewSelected.has(it.item_id) && !cannotApply ? 'checked' : '';
         const disabled = cannotApply ? 'disabled' : '';
         const chkTitle = usaMl ? 'title="Al seleccionar, se aplica el descuento de ML (mayor o porque no tenes descuento cargado)."' : '';
@@ -930,8 +931,9 @@
   // Incluye las amarillas (debajo del minimo / sin descuento) — el usuario
   // decide cuales deselecciona a mano.
   function isSelectable(it) {
-    // En "participando" cualquier item se puede seleccionar (para quitarlo).
-    if(currentStatus === 'started') return true;
+    // En "programados"/"participando" cualquier item se puede seleccionar
+    // (para quitarlo de la promo). En "elegibles", solo los aplicables.
+    if(currentStatus !== 'candidate') return true;
     return applySellerPct(it) != null;
   }
 

@@ -2778,10 +2778,16 @@ def promo_candidate_offer_id(promo_obj: dict):
 def promo_status_matches(offer_status, requested_status: str) -> bool:
     status_norm = (offer_status or "").lower()
     requested = (requested_status or "").lower()
+    # ML usa: candidate = elegible (todavia no se sumo), pending/programmed =
+    # ya se sumo pero la campaña no arranco (PROGRAMADA), started = activa.
+    programmed_states = ("pending", "programmed", "scheduled")
     if requested == "started":
-        return status_norm not in ("", "candidate", "pending")
+        return status_norm not in (("", "candidate") + programmed_states)
+    if requested in programmed_states:
+        return status_norm in programmed_states
     if requested == "candidate":
-        return status_norm in ("", "candidate", "pending")
+        # Elegibles = solo candidatos reales; los programados van a su pestaña.
+        return status_norm in ("", "candidate")
     return True
 
 
@@ -3093,7 +3099,10 @@ async def api_promociones_items(
                 # item, que viene minimalista). Para SMART en especial,
                 # esto es lo que destrabaste los campos suggested_*.
                 detail_params = {"app_version": "v2"}
-                if status:
+                # ML solo acepta status=candidate|started como filtro. Para
+                # "programados" (pending) no lo mandamos y filtramos local;
+                # los pending suelen venir igual en la respuesta sin filtro.
+                if status in ("candidate", "started"):
                     detail_params["status"] = status
                 if promotion_id:
                     detail_params["promotion_id"] = promotion_id
