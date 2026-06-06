@@ -230,6 +230,7 @@
     <div class="row" style="margin-top:12px;justify-content:flex-end;">
       <span id="selected-count" style="font-size:13px;color:#888;"></span>
       <button onclick="clearPreviewSelection()" style="border:1px solid #ddd;padding:8px 14px;border-radius:8px;background:#fff;color:#555;cursor:pointer;font-size:13px;">Limpiar selección</button>
+      <button onclick="doRemove()" id="btn-remove" disabled style="display:none;border:1px solid #c0392b;padding:8px 14px;border-radius:8px;background:#fff;color:#c0392b;cursor:pointer;font-size:13px;">Quitar de la promoción</button>
       <button onclick="openConfirm()" id="btn-apply" class="green" disabled>Aplicar a los seleccionados</button>
     </div>
   </div>
@@ -617,12 +618,21 @@
         const vigencia = (p.start_date && p.finish_date)
           ? `${p.start_date.slice(0,10)} → ${p.finish_date.slice(0,10)}`
           : (p.deadline_date ? `Hasta ${p.deadline_date.slice(0,10)}` : '—');
+        const st = (p.status || '').toLowerCase();
+        const STATUS_ES = {
+          started: 'Activa', active: 'Activa',
+          pending: 'Programada', programmed: 'Programada', scheduled: 'Programada',
+          candidate: 'Elegible',
+        };
+        const statusLabel = STATUS_ES[st] || (p.status || '—');
+        const statusCls = (st === 'started' || st === 'active') ? 'ok'
+                          : ((st === 'pending' || st === 'programmed' || st === 'scheduled') ? 'warn' : 'gray');
         return `
           <tr>
             <td><b>${p.name}</b></td>
             <td><span class="badge gray">${p.type || '—'}</span></td>
             <td style="text-align:center;font-weight:500;">${p.applicable_items || 0}</td>
-            <td><span class="badge ${p.status === 'started' ? 'ok' : 'gray'}">${p.status || '—'}</span></td>
+            <td><span class="badge ${statusCls}">${statusLabel}</span></td>
             <td style="font-size:12px;">${vigencia}</td>
             <td style="text-align:right;">
               <button onclick="selectPromo('${p.id}', '${(p.name || '').replace(/'/g, "\\'")}', '${p.type || ''}')">Ver items</button>
@@ -756,6 +766,12 @@
     const statusEl = document.getElementById('preview-status');
     tbody.innerHTML = '<tr><td colspan="9" class="empty">Cargando items...</td></tr>';
     statusEl.textContent = '';
+    // En "participando" mostramos Quitar; en "elegibles" mostramos Aplicar.
+    const isStarted = status === 'started';
+    const btnApply = document.getElementById('btn-apply');
+    const btnRemove = document.getElementById('btn-remove');
+    if(btnApply) btnApply.style.display = isStarted ? 'none' : '';
+    if(btnRemove) btnRemove.style.display = isStarted ? '' : 'none';
     try {
       const params = new URLSearchParams({ status });
       if(currentPromo.type) params.set('promotion_type', currentPromo.type);
@@ -825,8 +841,9 @@
           estado = '<span class="badge ok">Listo para aplicar</span>';
         }
         // Solo se bloquea cuando NO hay NADA para aplicar (ni tu desc ni minimo
-        // de ML). Todo lo demas se puede seleccionar y el usuario elige.
-        const cannotApply = applyPct == null;
+        // de ML). En la pestaña "participando" se puede seleccionar CUALQUIER
+        // item (para poder quitarlo de la promo).
+        const cannotApply = applyPct == null && currentStatus !== 'started';
         const checked = previewSelected.has(it.item_id) && !cannotApply ? 'checked' : '';
         const disabled = cannotApply ? 'disabled' : '';
         const chkTitle = usaMl ? 'title="Al seleccionar, se aplica el descuento de ML (mayor o porque no tenes descuento cargado)."' : '';
@@ -909,9 +926,19 @@
     updateSelectedCount();
   }
 
+  // Una fila es seleccionable si tiene ALGO para aplicar (tu desc. o el de ML).
+  // Incluye las amarillas (debajo del minimo / sin descuento) — el usuario
+  // decide cuales deselecciona a mano.
+  function isSelectable(it) {
+    // En "participando" cualquier item se puede seleccionar (para quitarlo).
+    if(currentStatus === 'started') return true;
+    return applySellerPct(it) != null;
+  }
+
   function toggleAll(cb) {
-    // Selecciona/desmarca TODOS los filtrados (no solo la página actual)
-    const filtered = getFilteredItems().filter(it => it.loaded_discount_pct != null && !it.below_min);
+    // Selecciona/desmarca TODOS los filtrados (no solo la página actual),
+    // incluidas las amarillas. A lo sumo el usuario deselecciona manual.
+    const filtered = getFilteredItems().filter(isSelectable);
     const selectedInFiltered = filtered.filter(it => previewSelected.has(it.item_id)).length;
     if(selectedInFiltered > 0) {
       filtered.forEach(it => previewSelected.delete(it.item_id));
@@ -982,8 +1009,10 @@
     const n = previewSelected.size;
     document.getElementById('selected-count').textContent = `${n} seleccionados`;
     document.getElementById('btn-apply').disabled = n === 0;
-    // Header checkbox refleja el estado del filtrado actual
-    const filtered = getFilteredItems().filter(it => it.loaded_discount_pct != null && !it.below_min);
+    const btnRemove = document.getElementById('btn-remove');
+    if(btnRemove) btnRemove.disabled = n === 0;
+    // Header checkbox refleja el estado del filtrado actual (todas las seleccionables)
+    const filtered = getFilteredItems().filter(isSelectable);
     const selectedInFiltered = filtered.filter(it => previewSelected.has(it.item_id)).length;
     const headerCb = document.getElementById('select-all');
     if(headerCb) {
@@ -1093,6 +1122,44 @@
       alert(e.message);
     } finally {
       btn.textContent = 'Aplicar a los seleccionados';
+      updateSelectedCount();
+    }
+  }
+
+  async function doRemove() {
+    const ids = Array.from(previewSelected);
+    if(!ids.length) return;
+    const sel = currentItems
+      .filter(it => previewSelected.has(it.item_id))
+      .map(it => ({ item_id: it.item_id, promotion_type: it.promotion_type || currentPromo.type }));
+    if(!confirm(`Vas a QUITAR ${sel.length} publicaciones de la promoción "${currentPromo.name}". Dejarán de participar. ¿Confirmás?`)) return;
+    const btn = document.getElementById('btn-remove');
+    btn.disabled = true; btn.textContent = 'Quitando...';
+    try {
+      const r = await fetch(`/api/promociones/${currentAccountId}/${encodeURIComponent(currentPromo.id)}/remove`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ items: sel }),
+      });
+      if(!r.ok) throw new Error('Error al quitar');
+      const data = await r.json();
+      const oks = (data.results || []).filter(x => x.ok).length;
+      const fails = (data.results || []).filter(x => !x.ok);
+      let msg = `${oks} quitadas de la promoción.`;
+      if(fails.length) {
+        msg += `\n${fails.length} fallaron:\n\n`;
+        msg += fails.slice(0, 8).map(f =>
+          `• ${f.item_id}: ${humanizeMlError(f.error)}`
+        ).join('\n');
+        if(fails.length > 8) msg += `\n...y ${fails.length - 8} más (ver consola).`;
+        console.warn('Fallos completos:', fails);
+      }
+      alert(msg);
+      await loadPromoItems(currentStatus);
+    } catch(e) {
+      alert(e.message);
+    } finally {
+      btn.textContent = 'Quitar de la promoción';
       updateSelectedCount();
     }
   }

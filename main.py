@@ -3740,6 +3740,70 @@ async def api_promociones_apply(
     return {"results": results, "ok": True}
 
 
+@app.post("/api/promociones/{account_id}/{promotion_id}/remove")
+async def api_promociones_remove(
+    request: Request, account_id: int, promotion_id: str,
+):
+    """Quita (da de baja) los items seleccionados de una promoción.
+    Body JSON: { items: [{item_id, promotion_type?}, ...] }
+    ML expone esto como DELETE /seller-promotions/items/{id}."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    body = await request.json()
+    items = body.get("items") or []
+    if not items:
+        raise HTTPException(400, "Faltan items para quitar")
+    token = await refresh_ml_token(account_id)
+    if not token:
+        raise HTTPException(502)
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    results = []
+    async with httpx.AsyncClient(timeout=60) as client:
+        sem = asyncio.Semaphore(3)
+
+        async def remove_one(it):
+            iid = it.get("item_id")
+            ptype = (it.get("promotion_type") or "DEAL").upper()
+            params = {"app_version": "v2", "promotion_id": promotion_id,
+                      "promotion_type": ptype}
+            async with sem:
+                last_status = 0
+                last_error = None
+                for attempt in range(5):
+                    try:
+                        r = await client.request(
+                            "DELETE",
+                            f"{ML_API_URL}/seller-promotions/items/{iid}",
+                            headers=headers,
+                            params=params,
+                        )
+                        if r.status_code in (200, 201, 204):
+                            return {"item_id": iid, "ok": True,
+                                    "status": r.status_code, "error": None}
+                        last_status = r.status_code
+                        last_error = r.text[:500]
+                        if r.status_code in (423, 429, 500, 502, 503, 504) and attempt < 4:
+                            await asyncio.sleep(1.5 * (attempt + 1))
+                            continue
+                        break
+                    except Exception as e:
+                        last_status = 0
+                        last_error = str(e)[:300]
+                        if attempt < 4:
+                            await asyncio.sleep(1.5 * (attempt + 1))
+                            continue
+                        break
+                return {"item_id": iid, "ok": False,
+                        "status": last_status, "error": last_error}
+
+        results = await asyncio.gather(*[remove_one(it) for it in items])
+    return {"results": results, "ok": True}
+
+
 # ── API datos ───────────────────────────────────────────────────
 
 @app.get("/api/orders/{account_id}")
