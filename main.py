@@ -3348,34 +3348,35 @@ async def api_promociones_items(
         return round(a / o * 100, 2)
 
     def _extract_min_discount_pct(promo_item: dict, original_price) -> Optional[float]:
-        """% minimo de descuento que ML exige para participar.
+        """% MÍNIMO de descuento que ML exige para participar.
 
-        Priorizamos porcentajes explicitos porque son lo mas parecido a lo
-        que ML muestra en la pantalla de publicaciones/promos. Los precios
-        post-descuento quedan solo como fallback y nunca usamos sugeridos.
+        El mínimo REAL por item lo da `max_discounted_price`: el precio MÁS
+        ALTO que ML permite cobrar con descuento. Convertido a % sobre el
+        precio original = el descuento mínimo que tenés que hacer para entrar.
+        Esto varía item por item, por eso es la fuente principal.
+
+        OJO: NO usamos `discount_percentage`, `default_discount_percentage`,
+        `seller_percentage`, etc. Esos son el descuento NOMINAL de la campaña
+        (un valor fijo a nivel campaña) o el aporte/sugerido — NO el mínimo
+        requerido por item. Usarlos hace que todos los items muestren el mismo
+        número plano (ej: 10%), que fue justamente la regresión a corregir.
         """
         if not isinstance(promo_item, dict):
             return None
 
+        # Precios post-descuento → mínimo requerido (fuente principal, por item)
+        price_fields = (
+            "max_discounted_price",
+            "top_deal_price",
+        )
+        # Solo porcentajes que representan EXPLÍCITAMENTE un mínimo requerido.
         pct_fields = (
-            "discount_percentage", "discount_pct",
-            "deal_discount_percentage", "deal_discount_pct",
             "min_discount_percentage", "min_discount_pct",
             "minimum_discount_percentage",
             "minimum_percentage", "min_percentage",
             "required_discount_percentage", "required_percentage",
             "seller_min_discount_percentage",
             "min_seller_discount_percentage",
-            "seller_percentage",
-            "seller_discount_percentage",
-            "nudge_seller_percentage",
-            "default_discount_percentage",
-            "expected_discount_percentage",
-            "target_discount_percentage",
-        )
-        price_fields = (
-            "max_discounted_price",
-            "top_deal_price",
         )
 
         def pct_value(value) -> Optional[float]:
@@ -3389,6 +3390,14 @@ async def api_promociones_items(
                 return round(pct, 2)
             return None
 
+        def from_price_fields(obj: dict) -> Optional[float]:
+            best = None
+            for k in price_fields:
+                pct = _pct_from_price(obj.get(k), original_price)
+                if pct is not None and pct > 0:
+                    best = pct if best is None else min(best, pct)
+            return best
+
         def from_pct_fields(obj: dict) -> Optional[float]:
             for k in pct_fields:
                 pct = pct_value(obj.get(k))
@@ -3396,52 +3405,30 @@ async def api_promociones_items(
                     return pct
             return None
 
-        direct_pct = from_pct_fields(promo_item)
-        if direct_pct is not None:
-            return direct_pct
-
+        containers = [promo_item]
         for nest_key in ("discount_breakdown", "prices", "benefits",
                          "nudge", "rebate"):
             nested = promo_item.get(nest_key)
             if isinstance(nested, dict):
-                pct = from_pct_fields(nested)
-                if pct is not None:
-                    return pct
+                containers.append(nested)
         for arr_key in ("offers", "discounts", "rebates"):
             arr = promo_item.get(arr_key)
             if isinstance(arr, list):
-                for off in arr:
-                    if not isinstance(off, dict):
-                        continue
-                    pct = from_pct_fields(off)
-                    if pct is not None:
-                        return pct
+                containers.extend(o for o in arr if isinstance(o, dict))
 
-        price_candidates = []
-        for k in price_fields:
-            pct = _pct_from_price(promo_item.get(k), original_price)
-            if pct is not None and pct > 0:
-                price_candidates.append(pct)
-        for nest_key in ("discount_breakdown", "prices", "benefits",
-                         "nudge", "rebate"):
-            nested = promo_item.get(nest_key)
-            if isinstance(nested, dict):
-                for k in price_fields:
-                    pct = _pct_from_price(nested.get(k), original_price)
-                    if pct is not None and pct > 0:
-                        price_candidates.append(pct)
-        for arr_key in ("offers", "discounts", "rebates"):
-            arr = promo_item.get(arr_key)
-            if isinstance(arr, list):
-                for off in arr:
-                    if not isinstance(off, dict):
-                        continue
-                    for k in price_fields:
-                        pct = _pct_from_price(off.get(k), original_price)
-                        if pct is not None and pct > 0:
-                            price_candidates.append(pct)
+        # 1) Mínimo real por precio (max_discounted_price)
+        price_candidates = [p for p in (from_price_fields(c) for c in containers)
+                            if p is not None]
+        if price_candidates:
+            return min(price_candidates)
 
-        return min(price_candidates) if price_candidates else None
+        # 2) Fallback: % explícito de mínimo requerido
+        for c in containers:
+            pct = from_pct_fields(c)
+            if pct is not None:
+                return pct
+
+        return None
 
     def _extract_seller_suggested_pct(
         promo_item: dict, original_price, ml_contribution_pct
