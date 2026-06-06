@@ -217,7 +217,7 @@
           <th>SKU</th>
           <th class="num">Precio actual</th>
           <th class="num" title="Lo que vos ponés (de tu base de descuentos cargada)">Tu desc.</th>
-          <th class="num" title="Descuento total sugerido por ML — se descompone como 'lo que pide ML al vendedor + lo que aporta ML'. Cuando ML no aporta, sólo aparece la sugerencia del vendedor.">Descuento ML</th>
+          <th class="num" title="Mínimo de descuento que exige MercadoLibre para poder participar en la promoción. No usa el sugerido/óptimo de ML.">Descuento ML</th>
           <th class="num" title="Cuánto te falta agregar a tu descuento para llegar al mínimo que pide ML (sin contar el aporte de ML)">Diferencia</th>
           <th class="num">Precio final</th>
           <th>Estado</th>
@@ -681,10 +681,9 @@
   let previewSearch = '';
 
   function computeItemGap(it) {
-    const target = it.min_discount_pct != null ? it.min_discount_pct
-                  : (it.seller_suggested_pct != null ? it.seller_suggested_pct : null);
+    const target = it.min_discount_pct != null ? it.min_discount_pct : null;
     if(target == null) return null;
-    const required = it.min_discount_pct != null ? target + 0.1 : target;
+    const required = target + 0.1;
     const loaded = it.loaded_discount_pct != null ? it.loaded_discount_pct : 0;
     return Math.max(0, Math.round((required - loaded) * 10) / 10);
   }
@@ -701,9 +700,9 @@
       if(loaded != null && loaded > min) return loaded;
       return Math.round((min + 0.1) * 10) / 10;
     }
-    // Sin minimo de ML: aplico lo cargado, o el sugerido si existe.
+    // Sin minimo de ML: aplico solo lo cargado por el usuario. No usamos
+    // sugeridos/óptimos de ML para decidir ni mostrar el mínimo.
     if(loaded != null) return loaded;
-    if(it.seller_suggested_pct != null) return it.seller_suggested_pct;
     return null;                              // nada que aplicar
   }
 
@@ -869,20 +868,12 @@
         const chkTitle = usaMl ? 'title="Al seleccionar, se aplica el descuento de ML (mayor o porque no tenes descuento cargado)."' : '';
         const finalShown = (sinDescuento || debajo) ? applyFinalPrice(it) : it.final_price;
 
-        // Descuento ML: total descompuesto en (vendedor% + aporte%)
-        const aporte = it.ml_contribution_pct;
-        const sellerSugg = it.seller_suggested_pct;
-        const loaded = it.loaded_discount_pct;
-        const sellerPart = sellerSugg != null ? sellerSugg
-                          : (loaded != null ? loaded : null);
+        // Descuento ML: mínimo obligatorio para participar. No mostramos el
+        // descuento sugerido/óptimo de ML porque no es el criterio operativo.
+        const minMl = it.min_discount_pct;
         let descMlCell;
-        if(sellerPart != null && aporte) {
-          const total = Math.round((sellerPart + aporte) * 10) / 10;
-          descMlCell = `<b>${total}%</b> <span style="font-size:11px;color:#6f3499;">(${sellerPart}% + ${aporte}%)</span>`;
-        } else if(sellerSugg != null) {
-          descMlCell = `<b>${sellerSugg}%</b>`;
-        } else if(aporte) {
-          descMlCell = `<span style="color:#6f3499;font-weight:600;">+${aporte}% ML</span>`;
+        if(minMl != null) {
+          descMlCell = `<b>${minMl}%</b>`;
         } else {
           descMlCell = '<span style="color:#bbb;">—</span>';
         }
@@ -998,10 +989,10 @@
         <td>${esc(it.title || '')}</td>
         <td>${money(it.original_price)}</td>
         <td>${pct(it.loaded_discount_pct)}</td>
-        <td>${pct(it.seller_suggested_pct)}</td>
+        <td>${pct(it.min_discount_pct)}</td>
         <td>${pct(it.ml_contribution_pct)}</td>
         <td>${gap == null ? '' : pct(gap)}</td>
-        <td>${money(it.final_price)}</td>
+        <td>${money(applyFinalPrice(it))}</td>
         <td>${esc(estado)}</td>
       </tr>`;
     }).join('');
@@ -1009,7 +1000,7 @@
       <table border="1">
         <thead><tr>
           <th>MLA</th><th>SKU</th><th>Titulo</th><th>Precio actual</th>
-          <th>Tu desc.</th><th>Descuento ML vendedor</th><th>Aporte ML</th>
+          <th>Tu desc.</th><th>Descuento ML mínimo</th><th>Aporte ML</th>
           <th>Diferencia</th><th>Precio final</th><th>Estado</th>
         </tr></thead>
         <tbody>${body}</tbody>
@@ -1194,7 +1185,7 @@
     const items = getFilteredItems();
     if(!items.length) { alert('No hay items para exportar.'); return; }
     const headers = ['MLA', 'SKU', 'Título', 'Precio original', 'Descuento cargado (%)',
-      'Sugerido vendedor (%)', 'Aporte ML (%)', 'Mínimo requerido (%)', 'Precio final', 'Estado'];
+      'Descuento ML mínimo (%)', 'Aporte ML (%)', 'Mínimo requerido (%)', 'Precio final', 'Estado'];
     const fmt2 = v => v != null ? String(v).replace(/\./g, ',') : '';
     const rows = items.map(it => {
       const gap = computeItemGap(it);
@@ -1208,10 +1199,10 @@
         (it.title || '').replace(/;/g, ','),
         fmt2(it.original_price),
         fmt2(it.loaded_discount_pct),
-        fmt2(it.seller_suggested_pct),
+        fmt2(it.min_discount_pct),
         fmt2(it.ml_contribution_pct),
         fmt2(it.min_discount_pct),
-        fmt2(it.final_price),
+        fmt2(applyFinalPrice(it)),
         estado,
       ].join(';');
     });
