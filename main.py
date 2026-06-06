@@ -3048,7 +3048,8 @@ async def api_promociones_items(
     # Cache de resultados: cambiar de pestaña o recargar es instantaneo
     # mientras no se aplique/quite un descuento (lo cual invalida la cache).
     debug_item_norm = (debug_item or "").strip().upper()
-    cache_key = f"{account_id}:{promotion_id}:{status}:{debug_item_norm}"
+    promo_type_key = (promotion_type or "").strip().upper()
+    cache_key = f"{account_id}:{promotion_id}:{status}:{promo_type_key}:{debug_item_norm}"
     _now = datetime.utcnow()
     _cached = PROMO_ITEMS_RESULT_CACHE.get(cache_key)
     if _cached and (_now - _cached["at"]).total_seconds() < PROMO_ITEMS_RESULT_TTL_SECONDS:
@@ -3115,47 +3116,54 @@ async def api_promociones_items(
         # discount_percentage). El endpoint por item devuelve TODAS las
         # promos disponibles para el item, así que filtramos por el
         # promotion_id actual y mergeamos los campos faltantes.
+        def matching_promo_offer(data) -> Optional[dict]:
+            for off in promo_offers_from_response(data):
+                if not isinstance(off, dict):
+                    continue
+                pid = promo_offer_id(off)
+                if promo_id_matches(pid, promotion_id) and promo_status_matches(off.get("status"), status):
+                    return off
+            return None
+
         async def fetch_item_promo_detail(item_id):
             try:
-                # Pasamos promotion_id + promotion_type para forzar a ML a
-                # devolver el detalle COMPLETO de esa promo en particular
-                # (en lugar del listado resumido de todas las promos del
-                # item, que viene minimalista). Para SMART en especial,
-                # esto destraba los campos de minimo/porcentaje reales.
-                detail_params = {"app_version": "v2"}
-                # ML solo acepta status=candidate|started como filtro. Para
-                # "programados" (pending) no lo mandamos y filtramos local;
-                # los pending suelen venir igual en la respuesta sin filtro.
+                # ML devuelve campos distintos segun los filtros. La variante
+                # sin filtros es la mas parecida a la pantalla web; la exacta
+                # sirve como respaldo cuando la primera viene minimalista.
+                query_variants = [{"app_version": "v2"}]
+                exact_params = {"app_version": "v2"}
                 if status in ("candidate", "started"):
-                    detail_params["status"] = status
+                    exact_params["status"] = status
                 if promotion_id:
-                    detail_params["promotion_id"] = promotion_id
+                    exact_params["promotion_id"] = promotion_id
                 if promotion_type:
-                    detail_params["promotion_type"] = promotion_type
-                ri = await client.get(
-                    f"{ML_API_URL}/seller-promotions/items/{item_id}",
-                    headers=headers,
-                    params=detail_params,
-                )
-                if ri.status_code != 200:
-                    return None
-                data = ri.json()
-                # La respuesta puede ser un array de promos o un dict con results
-                if isinstance(data, dict):
-                    offers = data.get("results") or data.get("offers") or []
-                    if not offers and (data.get("id") or data.get("promotion_id")):
-                        offers = [data]
-                elif isinstance(data, list):
-                    offers = data
-                else:
-                    return None
-                # Buscar la promo que coincide con promotion_id
-                for off in offers:
-                    if not isinstance(off, dict):
+                    exact_params["promotion_type"] = promotion_type
+                if exact_params != query_variants[0]:
+                    query_variants.append(exact_params)
+
+                variants: list[dict] = []
+                for params in query_variants:
+                    ri = await client.get(
+                        f"{ML_API_URL}/seller-promotions/items/{item_id}",
+                        headers=headers,
+                        params=params,
+                    )
+                    if ri.status_code != 200:
                         continue
-                    pid = promo_offer_id(off)
-                    if promo_id_matches(pid, promotion_id) and promo_status_matches(off.get("status"), status):
-                        return off
+                    match = matching_promo_offer(ri.json())
+                    if isinstance(match, dict):
+                        variants.append(match)
+
+                if not variants:
+                    return None
+
+                merged = dict(variants[0])
+                for variant in variants[1:]:
+                    for k, v in variant.items():
+                        if merged.get(k) in (None, "", 0) and v not in (None, ""):
+                            merged[k] = v
+                merged["_detail_variants"] = variants
+                return merged
             except Exception:
                 pass
             return None
@@ -3274,14 +3282,12 @@ async def api_promociones_items(
     def _extract_min_discount_pct(promo_item: dict, original_price) -> Optional[float]:
         """% minimo de descuento que ML exige para participar.
 
-        ML puede devolver a la vez el minimo real y una recomendacion/sugerido.
-        Para esta pantalla necesitamos el minimo: juntamos las senales validas
-        del bloque exacto de la promo y usamos el menor porcentaje positivo.
+        Priorizamos porcentajes explicitos porque son lo mas parecido a lo
+        que ML muestra en la pantalla de publicaciones/promos. Los precios
+        post-descuento quedan solo como fallback y nunca usamos sugeridos.
         """
         if not isinstance(promo_item, dict):
             return None
-
-        candidates: list[float] = []
 
         pct_fields = (
             "discount_percentage", "discount_pct",
@@ -3301,76 +3307,73 @@ async def api_promociones_items(
         )
         price_fields = (
             "max_discounted_price",
-            "deal_price",
-            "discounted_price",
-            "discount_price",
-            "final_price",
-            "promotion_price",
-            "promo_price",
-            "minimum_price",
-            "min_price",
-            "price",
             "top_deal_price",
         )
-        amount_fields = (
-            "discount_amount",
-            "discount_value",
-            "seller_discount_amount",
-            "deal_discount_amount",
-            "rebate_amount",
-        )
 
-        def add_pct(value):
+        def pct_value(value) -> Optional[float]:
             if value is None:
-                return
+                return None
             try:
                 pct = float(value)
             except (TypeError, ValueError):
-                return
+                return None
             if 0 < pct < 100:
-                candidates.append(round(pct, 2))
+                return round(pct, 2)
+            return None
 
-        def add_price(value):
-            pct = _pct_from_price(value, original_price)
-            if pct is not None and pct > 0:
-                candidates.append(pct)
+        def from_pct_fields(obj: dict) -> Optional[float]:
+            for k in pct_fields:
+                pct = pct_value(obj.get(k))
+                if pct is not None:
+                    return pct
+            return None
 
-        def add_amount(value):
-            pct = _pct_from_amount(value, original_price)
-            if pct is not None and pct > 0:
-                candidates.append(pct)
-
-        for k in pct_fields:
-            add_pct(promo_item.get(k))
-        for k in price_fields:
-            add_price(promo_item.get(k))
-        for k in amount_fields:
-            add_amount(promo_item.get(k))
+        direct_pct = from_pct_fields(promo_item)
+        if direct_pct is not None:
+            return direct_pct
 
         for nest_key in ("discount_breakdown", "prices", "benefits",
                          "nudge", "rebate"):
             nested = promo_item.get(nest_key)
             if isinstance(nested, dict):
-                for k in pct_fields:
-                    add_pct(nested.get(k))
-                for k in price_fields:
-                    add_price(nested.get(k))
-                for k in amount_fields:
-                    add_amount(nested.get(k))
+                pct = from_pct_fields(nested)
+                if pct is not None:
+                    return pct
         for arr_key in ("offers", "discounts", "rebates"):
             arr = promo_item.get(arr_key)
             if isinstance(arr, list):
                 for off in arr:
                     if not isinstance(off, dict):
                         continue
-                    for k in pct_fields:
-                        add_pct(off.get(k))
-                    for k in price_fields:
-                        add_price(off.get(k))
-                    for k in amount_fields:
-                        add_amount(off.get(k))
+                    pct = from_pct_fields(off)
+                    if pct is not None:
+                        return pct
 
-        return min(candidates) if candidates else None
+        price_candidates = []
+        for k in price_fields:
+            pct = _pct_from_price(promo_item.get(k), original_price)
+            if pct is not None and pct > 0:
+                price_candidates.append(pct)
+        for nest_key in ("discount_breakdown", "prices", "benefits",
+                         "nudge", "rebate"):
+            nested = promo_item.get(nest_key)
+            if isinstance(nested, dict):
+                for k in price_fields:
+                    pct = _pct_from_price(nested.get(k), original_price)
+                    if pct is not None and pct > 0:
+                        price_candidates.append(pct)
+        for arr_key in ("offers", "discounts", "rebates"):
+            arr = promo_item.get(arr_key)
+            if isinstance(arr, list):
+                for off in arr:
+                    if not isinstance(off, dict):
+                        continue
+                    for k in price_fields:
+                        pct = _pct_from_price(off.get(k), original_price)
+                        if pct is not None and pct > 0:
+                            price_candidates.append(pct)
+
+        return min(price_candidates) if price_candidates else None
 
     def _extract_seller_suggested_pct(
         promo_item: dict, original_price, ml_contribution_pct
@@ -3526,10 +3529,16 @@ async def api_promociones_items(
         # item es mas fiel a lo que muestra la pantalla de ML; si trae el dato,
         # lo priorizamos por sobre el listado de la promo.
         detail_for_calc = detail if isinstance(detail, dict) else {}
-        min_discount_pct = (
-            _extract_min_discount_pct(detail_for_calc, original_price)
-            if detail_for_calc else None
-        )
+        min_candidates = []
+        if detail_for_calc:
+            for variant in detail_for_calc.get("_detail_variants", []):
+                pct = _extract_min_discount_pct(variant, original_price)
+                if pct is not None:
+                    min_candidates.append(pct)
+            pct = _extract_min_discount_pct(detail_for_calc, original_price)
+            if pct is not None:
+                min_candidates.append(pct)
+        min_discount_pct = min(min_candidates) if min_candidates else None
         if min_discount_pct is None:
             min_discount_pct = _extract_min_discount_pct(merged, original_price)
         if min_discount_pct is None and default_min_pct is not None:
