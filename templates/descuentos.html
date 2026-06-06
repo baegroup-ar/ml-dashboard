@@ -1074,7 +1074,7 @@
     if(txt.includes('ERROR_CREDIBILITY_DISCOUNTED_PRICE'))
       return 'Precio no creible: ML detecta que esa publicacion ya estuvo a ese precio (o mas barata) hace poco, asi que no lo acepta como descuento real. Subi el precio de lista o aplica un descuento menor.';
     if(txt.includes('CANDIDATE_NOT_FOUND'))
-      return 'ML no encontro la oferta candidata para este item (suele pasar en publicaciones de catalogo, donde la promo la maneja la publicacion padre).';
+      return 'Este item YA esta participando o programado en esta promo (no hace falta re-aplicarlo: fijate en la pestaña "Items participando"). Menos comun: es una publicacion de catalogo donde la promo la maneja la publicacion padre.';
     if(txt.includes('OFFER_SIBLING_CREATION_IN_PROCESS'))
       return 'ML esta procesando una publicacion hermana (catalogo). Reintenta en unos minutos.';
     if(txt.includes('REST_CREDIBILITY_API_ERROR') || txt.includes('Credibility Api'))
@@ -1101,8 +1101,13 @@
       if(!r.ok) throw new Error('Error al aplicar');
       const data = await r.json();
       const oks = (data.results || []).filter(x => x.ok).length;
-      const fails = (data.results || []).filter(x => !x.ok);
+      // CANDIDATE_NOT_FOUND = ya participaba/programada: no es un fallo real.
+      const already = (data.results || []).filter(x => !x.ok && (x.error || '').includes('CANDIDATE_NOT_FOUND'));
+      const fails = (data.results || []).filter(x => !x.ok && !(x.error || '').includes('CANDIDATE_NOT_FOUND'));
       let msg = `${oks} aplicados correctamente.`;
+      if(already.length) {
+        msg += `\n${already.length} ya estaban participando o programadas (no hacía falta re-aplicarlas).`;
+      }
       if(fails.length) {
         msg += `\n${fails.length} fallaron:\n\n`;
         const locked = fails.filter(f => f.status === 423);
