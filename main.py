@@ -3156,6 +3156,65 @@ async def api_promociones_items(
             if duplicate_streak >= 5:
                 break
 
+        # CONVERGENCIA RÁPIDA: el endpoint LISTA es eventualmente consistente —
+        # para un mismo item devuelve a veces el mínimo genérico (10%) y a veces
+        # el real de ESE item (5%). En UNA sola lectura solo "aciertan" algunos
+        # items; el resto queda en 10% hasta que el usuario refresca varias
+        # veces. Para no depender de la suerte, re-consultamos la lista unas
+        # pocas veces dentro del mismo request y vamos fijando el PISO por item
+        # (el descuento más chico = precio permitido más alto). Así, en una sola
+        # carga, casi todos los items convergen a su mínimo real.
+        def _update_floor_from_list_item(it):
+            if not isinstance(it, dict):
+                return
+            iid = it.get("id")
+            if not iid:
+                return
+            try:
+                o = float(it.get("original_price"))
+                p = float(it.get("max_discounted_price"))
+            except (TypeError, ValueError):
+                return
+            if o <= 0 or p <= 0 or p >= o:
+                return
+            pct = round((1 - p / o) * 100, 2)
+            if pct <= 0:
+                return
+            k = f"{promotion_id}:{str(iid).upper()}"
+            prev = PROMO_MIN_PCT_SEEN.get(k)
+            if prev is None or pct < prev:
+                PROMO_MIN_PCT_SEEN[k] = pct
+
+        # Primera pasada (la que ya teníamos) alimenta el piso.
+        for it in all_results:
+            _update_floor_from_list_item(it)
+
+        EXTRA_LIST_PASSES = 4
+        for _pass in range(EXTRA_LIST_PASSES):
+            p_offset = 0
+            for _ in range(max_iterations):
+                try:
+                    rp = await client.get(
+                        f"{ML_API_URL}/seller-promotions/promotions/{promotion_id}/items",
+                        headers=headers,
+                        params={**params, "offset": p_offset},
+                    )
+                except Exception:
+                    break
+                if rp.status_code != 200:
+                    break
+                pdata = rp.json()
+                presults = pdata.get("results", []) if isinstance(pdata, dict) else []
+                if not presults:
+                    break
+                for it in presults:
+                    _update_floor_from_list_item(it)
+                p_offset += len(presults)
+                if len(presults) < promo_page_limit:
+                    break
+                if expected_total > 0 and p_offset >= expected_total:
+                    break
+
         # Enriquecer con SKU y nombre desde /items/{id}. Sin filtrar
         # attributes para que vengan también `attributes[]` y `variations[]`,
         # donde muchas publicaciones tienen el SELLER_SKU.
@@ -3732,7 +3791,7 @@ async def api_promociones_items(
     # ML tanto en la lista como en el endpoint per-item. Así detectamos
     # nombres de campos no contemplados.
     raw_sample = {
-        "code_version": "min-seen-floor-v3",
+        "code_version": "list-multipass-floor-v4",
         "promo_global_keys": sorted(list(promo_global.keys())) if isinstance(promo_global, dict) and promo_global else None,
         "promo_global_sample": ({k: promo_global[k] for k in list(promo_global.keys())[:30]}
                                 if isinstance(promo_global, dict) and promo_global else None),
