@@ -3580,22 +3580,22 @@ async def api_promociones_items(
                           or (info.get("price") if info else None)
                           or merged.get("regular_price")
                           or merged.get("price"))
-        # Minimo requerido por ML para participar. El endpoint de detalle por
-        # item es mas fiel a lo que muestra la pantalla de ML; si trae el dato,
-        # lo priorizamos por sobre el listado de la promo.
-        detail_for_calc = detail if isinstance(detail, dict) else {}
-        min_candidates = []
-        if detail_for_calc:
-            for variant in detail_for_calc.get("_detail_variants", []):
-                pct = _extract_min_discount_pct(variant, original_price)
-                if pct is not None:
-                    min_candidates.append(pct)
-            pct = _extract_min_discount_pct(detail_for_calc, original_price)
-            if pct is not None:
-                min_candidates.append(pct)
-        min_discount_pct = min(min_candidates) if min_candidates else None
-        if min_discount_pct is None:
-            min_discount_pct = _extract_min_discount_pct(merged, original_price)
+        # Minimo requerido por ML para participar EN ESTA PROMO.
+        #
+        # FUENTE UNICA Y DETERMINISTA: el `max_discounted_price` del item tal
+        # como lo devuelve el listado de ESTA promocion
+        # (/seller-promotions/promotions/{id}/items). Es el precio MAS ALTO que
+        # ML permite cobrar con descuento -> convertido a % sobre el original da
+        # el descuento minimo para entrar. `merged` arranca del item del listado
+        # y solo completa huecos con el detalle, asi que el max_discounted_price
+        # del listado (de esta campania) tiene prioridad.
+        #
+        # NO usamos min() sobre `_detail_variants` del endpoint por-item: ese
+        # endpoint devuelve el item en TODAS sus campanias (este item esta en 7),
+        # y tomar el minimo mezclaba el umbral de otra promo (5%) con el de esta
+        # (10%), haciendo que el MISMO item fluctuara entre 5% y 10% segun la
+        # llamada. Esa era la inestabilidad reportada.
+        min_discount_pct = _extract_min_discount_pct(merged, original_price)
         if min_discount_pct is None and default_min_pct is not None:
             min_discount_pct = default_min_pct
         title = ""
