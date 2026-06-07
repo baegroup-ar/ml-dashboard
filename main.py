@@ -3051,7 +3051,8 @@ async def api_promociones_items(
     promo_type_key = (promotion_type or "").strip().upper()
     cache_key = f"{account_id}:{promotion_id}:{status}:{promo_type_key}:{debug_item_norm}"
     _now = datetime.utcnow()
-    _cached = PROMO_ITEMS_RESULT_CACHE.get(cache_key)
+    # En modo debug nunca servimos cache: queremos la respuesta fresca de ML.
+    _cached = PROMO_ITEMS_RESULT_CACHE.get(cache_key) if not debug_item_norm else None
     if _cached and (_now - _cached["at"]).total_seconds() < PROMO_ITEMS_RESULT_TTL_SECONDS:
         return _cached["data"]
     token = await refresh_ml_token(account_id)
@@ -3734,6 +3735,36 @@ async def api_promociones_items(
             "debug_item_detail_keys": sorted(list(target_detail.keys())) if isinstance(target_detail, dict) else None,
             "debug_item_detail_raw": target_detail if isinstance(target_detail, dict) else None,
         })
+        # Dump COMPLETO y SIN TOCAR de lo que ML responde para este item, en
+        # todas las variantes de query. Sin matching, sin merge: la respuesta
+        # cruda tal cual. Asi vemos TODOS los campos/ofertas que ML expone
+        # (incluido el minimo real por item que pueda no estar en max_discounted_price).
+        try:
+            async with httpx.AsyncClient(timeout=30) as dbg_client:
+                dbg_queries = {
+                    "nofilter": {"app_version": "v2"},
+                    "filtered": {"app_version": "v2", "status": status,
+                                 "promotion_id": promotion_id,
+                                 "promotion_type": promotion_type},
+                    "plain": {},
+                }
+                dbg_out = {}
+                for name, qp in dbg_queries.items():
+                    qp_clean = {k: v for k, v in qp.items() if v}
+                    try:
+                        rr = await dbg_client.get(
+                            f"{ML_API_URL}/seller-promotions/items/{debug_item_norm}",
+                            headers=headers, params=qp_clean)
+                        dbg_out[name] = {
+                            "status_code": rr.status_code,
+                            "params": qp_clean,
+                            "body": (rr.json() if rr.status_code == 200 else rr.text[:500]),
+                        }
+                    except Exception as ee:
+                        dbg_out[name] = {"error": str(ee)[:200], "params": qp_clean}
+                raw_sample["debug_item_ml_raw_responses"] = dbg_out
+        except Exception as ee:
+            raw_sample["debug_item_ml_raw_responses_error"] = str(ee)[:200]
     result = {
         "items": items_out,
         "discount_base_count": len(discount_map),
