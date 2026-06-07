@@ -39,6 +39,14 @@ PROMO_ITEM_SCAN_CACHE: dict[str, dict] = {}
 # cuando se aplica o se quita un descuento en esa cuenta.
 PROMO_ITEMS_RESULT_TTL_SECONDS = 120
 PROMO_ITEMS_RESULT_CACHE: dict[str, dict] = {}
+# Mínimo de descuento MÁS BAJO que ML reportó alguna vez por (promo, item).
+# La API de ML para campañas FLEXIBLE_PERCENTAGE es eventualmente consistente:
+# devuelve un `max_discounted_price` distinto entre llamadas (a veces 10%, a
+# veces 5% para el MISMO item, segundos después). El "mínimo requerido para
+# participar" es el descuento MÁS CHICO que ML aceptó en cualquier momento:
+# si alguna vez dijo 5%, entonces 5% alcanza. Guardamos ese piso para que el
+# valor no parpadee 5%↔10% y quede estable. Clave: f"{promotion_id}:{item_id}".
+PROMO_MIN_PCT_SEEN: dict[str, float] = {}
 
 
 def _invalidate_promo_items_cache(account_id: int) -> None:
@@ -3623,6 +3631,18 @@ async def api_promociones_items(
         min_discount_pct = min(min_candidates) if min_candidates else None
         if min_discount_pct is None and default_min_pct is not None:
             min_discount_pct = default_min_pct
+        # PISO HISTÓRICO: la API de ML parpadea (mismo item da 10% en una
+        # llamada y 5% en la siguiente). El mínimo REAL para participar es el
+        # más bajo que ML aceptó alguna vez. Guardamos ese piso por item y lo
+        # usamos siempre, así el valor queda estable y no vuelve a subir.
+        seen_key = f"{promotion_id}:{(item_id or '').upper()}"
+        if min_discount_pct is not None:
+            prev_seen = PROMO_MIN_PCT_SEEN.get(seen_key)
+            if prev_seen is None or min_discount_pct < prev_seen:
+                PROMO_MIN_PCT_SEEN[seen_key] = min_discount_pct
+            min_discount_pct = PROMO_MIN_PCT_SEEN[seen_key]
+        elif PROMO_MIN_PCT_SEEN.get(seen_key) is not None:
+            min_discount_pct = PROMO_MIN_PCT_SEEN[seen_key]
         title = ""
         sku_from_ml = _extract_sku(info)
         if info:
@@ -3712,7 +3732,7 @@ async def api_promociones_items(
     # ML tanto en la lista como en el endpoint per-item. Así detectamos
     # nombres de campos no contemplados.
     raw_sample = {
-        "code_version": "min-across-sources-v2",
+        "code_version": "min-seen-floor-v3",
         "promo_global_keys": sorted(list(promo_global.keys())) if isinstance(promo_global, dict) and promo_global else None,
         "promo_global_sample": ({k: promo_global[k] for k in list(promo_global.keys())[:30]}
                                 if isinstance(promo_global, dict) and promo_global else None),
@@ -3794,6 +3814,7 @@ async def api_promociones_items(
                 "original_price_used": tgt_orig,
                 "computed_min_pct": (min([b["pct"] for b in src_breakdown if b["pct"] is not None])
                                      if any(b["pct"] is not None for b in src_breakdown) else None),
+                "min_seen_floor": PROMO_MIN_PCT_SEEN.get(f"{promotion_id}:{debug_item_norm}"),
                 "sources": src_breakdown,
             }
         except Exception as ee:
