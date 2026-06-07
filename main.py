@@ -3598,11 +3598,29 @@ async def api_promociones_items(
         #
         # Es UNA sola lectura determinista (no min() sobre variantes), asi que
         # el mismo item siempre da el mismo numero.
-        min_discount_pct = None
-        if isinstance(detail, dict) and detail:
-            min_discount_pct = _extract_min_discount_pct(detail, original_price)
-        if min_discount_pct is None:
-            min_discount_pct = _extract_min_discount_pct(merged, original_price)
+        #
+        # ROBUSTEZ: ML puede devolver el offer de la promo en cualquiera de
+        # las variantes de query (filtrada / sin filtros) y, según el orden
+        # del merge, el genérico (18900=10%) podría tapar al real (19950=5%).
+        # Para que NUNCA gane el genérico, juntamos el % de TODAS las fuentes
+        # (cada variante per-item + el merge + el listado) y nos quedamos con
+        # el MÍNIMO: el "mínimo requerido para participar" es justamente el
+        # descuento más chico aceptado (= precio permitido más alto). Así da
+        # 5% aunque alguna query traiga el 10% genérico.
+        min_sources = []
+        if isinstance(detail, dict):
+            for variant in (detail.get("_detail_variants") or []):
+                if isinstance(variant, dict):
+                    min_sources.append(variant)
+            min_sources.append(detail)
+        min_sources.append(merged)
+        min_candidates = []
+        for src in min_sources:
+            if isinstance(src, dict) and src:
+                p = _extract_min_discount_pct(src, original_price)
+                if p is not None:
+                    min_candidates.append(p)
+        min_discount_pct = min(min_candidates) if min_candidates else None
         if min_discount_pct is None and default_min_pct is not None:
             min_discount_pct = default_min_pct
         title = ""
@@ -3694,7 +3712,7 @@ async def api_promociones_items(
     # ML tanto en la lista como en el endpoint per-item. Así detectamos
     # nombres de campos no contemplados.
     raw_sample = {
-        "code_version": "filtered-min-v1",
+        "code_version": "min-across-sources-v2",
         "promo_global_keys": sorted(list(promo_global.keys())) if isinstance(promo_global, dict) and promo_global else None,
         "promo_global_sample": ({k: promo_global[k] for k in list(promo_global.keys())[:30]}
                                 if isinstance(promo_global, dict) and promo_global else None),
@@ -3742,6 +3760,44 @@ async def api_promociones_items(
             "debug_item_detail_keys": sorted(list(target_detail.keys())) if isinstance(target_detail, dict) else None,
             "debug_item_detail_raw": target_detail if isinstance(target_detail, dict) else None,
         })
+        # Desglose EXACTO de qué % calcula cada fuente para este item, con el
+        # precio original usado. Así, con UN solo paste, se ve si el deploy es
+        # min-across-sources-v2 y qué valor da cada origen (filtrada vs genérica).
+        try:
+            tgt_orig = None
+            tgt_info = enriched[target_idx] if (target_idx is not None and target_idx < len(enriched)) else None
+            if isinstance(target_detail, dict):
+                tgt_orig = (target_detail.get("original_price")
+                            or (tgt_info.get("price") if tgt_info else None)
+                            or target_detail.get("regular_price")
+                            or target_detail.get("price"))
+            elif tgt_info:
+                tgt_orig = tgt_info.get("price")
+            src_breakdown = []
+            srcs = []
+            if isinstance(target_detail, dict):
+                for vi, variant in enumerate(target_detail.get("_detail_variants") or []):
+                    if isinstance(variant, dict):
+                        srcs.append((f"detail_variant_{vi}", variant))
+                srcs.append(("detail_merged", target_detail))
+            if isinstance(target_list, dict):
+                srcs.append(("list", target_list))
+            for name, src in srcs:
+                src_breakdown.append({
+                    "source": name,
+                    "max_discounted_price": src.get("max_discounted_price"),
+                    "top_deal_price": src.get("top_deal_price"),
+                    "original_price": src.get("original_price"),
+                    "pct": _extract_min_discount_pct(src, tgt_orig),
+                })
+            raw_sample["debug_item_min_sources"] = {
+                "original_price_used": tgt_orig,
+                "computed_min_pct": (min([b["pct"] for b in src_breakdown if b["pct"] is not None])
+                                     if any(b["pct"] is not None for b in src_breakdown) else None),
+                "sources": src_breakdown,
+            }
+        except Exception as ee:
+            raw_sample["debug_item_min_sources_error"] = str(ee)[:200]
         # Dump COMPLETO y SIN TOCAR de lo que ML responde para este item, en
         # todas las variantes de query. Sin matching, sin merge: la respuesta
         # cruda tal cual. Asi vemos TODOS los campos/ofertas que ML expone
