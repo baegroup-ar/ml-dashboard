@@ -3180,10 +3180,14 @@ async def api_promociones_items(
 
         async def fetch_item_promo_detail(item_id):
             try:
-                # ML devuelve campos distintos segun los filtros. La variante
-                # sin filtros es la mas parecida a la pantalla web; la exacta
-                # sirve como respaldo cuando la primera viene minimalista.
-                query_variants = [{"app_version": "v2"}]
+                # CLAVE: ML devuelve un `max_discounted_price` DISTINTO segun
+                # los filtros. La query FILTRADA (con promotion_id + status +
+                # promotion_type) devuelve el minimo REAL por item de ESA promo
+                # (ej: 19950 = 5%), que es EXACTAMENTE lo que muestra el panel
+                # de ML. La query SIN filtros devuelve un valor generico mas
+                # agresivo (ej: 18900 = 10%) que NO coincide con el panel.
+                # Por eso la filtrada va PRIMERO: en el merge, sus precios
+                # mandan sobre la generica.
                 exact_params = {"app_version": "v2"}
                 if status in ("candidate", "started"):
                     exact_params["status"] = status
@@ -3191,8 +3195,9 @@ async def api_promociones_items(
                     exact_params["promotion_id"] = promotion_id
                 if promotion_type:
                     exact_params["promotion_type"] = promotion_type
-                if exact_params != query_variants[0]:
-                    query_variants.append(exact_params)
+                query_variants = [exact_params]
+                if exact_params != {"app_version": "v2"}:
+                    query_variants.append({"app_version": "v2"})
 
                 variants: list[dict] = []
                 for params in query_variants:
@@ -3581,22 +3586,23 @@ async def api_promociones_items(
                           or (info.get("price") if info else None)
                           or merged.get("regular_price")
                           or merged.get("price"))
-        # Minimo requerido por ML para participar EN ESTA PROMO.
+        # Minimo requerido por ML para participar EN ESTA PROMO, por item.
         #
-        # FUENTE UNICA Y DETERMINISTA: el `max_discounted_price` del item tal
-        # como lo devuelve el listado de ESTA promocion
-        # (/seller-promotions/promotions/{id}/items). Es el precio MAS ALTO que
-        # ML permite cobrar con descuento -> convertido a % sobre el original da
-        # el descuento minimo para entrar. `merged` arranca del item del listado
-        # y solo completa huecos con el detalle, asi que el max_discounted_price
-        # del listado (de esta campania) tiene prioridad.
+        # FUENTE CORRECTA: el detalle per-item consultado con FILTROS de la
+        # promo (fetch_item_promo_detail ya pide promotion_id+status+type). Esa
+        # query devuelve el `max_discounted_price` REAL por item de esta promo
+        # (ej: 19950 = 5%), idéntico al panel de ML. El listado de la promo
+        # (`merged`/`promo_item`) trae un valor generico distinto (ej: 18900 =
+        # 10%) que NO coincide con el panel — por eso el detalle FILTRADO tiene
+        # prioridad y el listado queda solo como respaldo.
         #
-        # NO usamos min() sobre `_detail_variants` del endpoint por-item: ese
-        # endpoint devuelve el item en TODAS sus campanias (este item esta en 7),
-        # y tomar el minimo mezclaba el umbral de otra promo (5%) con el de esta
-        # (10%), haciendo que el MISMO item fluctuara entre 5% y 10% segun la
-        # llamada. Esa era la inestabilidad reportada.
-        min_discount_pct = _extract_min_discount_pct(merged, original_price)
+        # Es UNA sola lectura determinista (no min() sobre variantes), asi que
+        # el mismo item siempre da el mismo numero.
+        min_discount_pct = None
+        if isinstance(detail, dict) and detail:
+            min_discount_pct = _extract_min_discount_pct(detail, original_price)
+        if min_discount_pct is None:
+            min_discount_pct = _extract_min_discount_pct(merged, original_price)
         if min_discount_pct is None and default_min_pct is not None:
             min_discount_pct = default_min_pct
         title = ""
