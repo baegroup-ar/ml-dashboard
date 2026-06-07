@@ -47,6 +47,46 @@ PROMO_ITEMS_RESULT_CACHE: dict[str, dict] = {}
 # si alguna vez dijo 5%, entonces 5% alcanza. Guardamos ese piso para que el
 # valor no parpadee 5%↔10% y quede estable. Clave: f"{promotion_id}:{item_id}".
 PROMO_MIN_PCT_SEEN: dict[str, float] = {}
+_PROMO_FLOOR_LOADED = False
+
+
+def _promo_floor_key(promotion_id, item_id) -> str:
+    return f"{promotion_id}:{str(item_id or '').upper()}"
+
+
+def _load_promo_floor_from_db() -> None:
+    """Carga el piso histórico persistido (sobrevive redeploys)."""
+    global _PROMO_FLOOR_LOADED
+    try:
+        rows = db_fetchall("SELECT promotion_id, item_id, min_pct FROM promo_min_floor")
+        for r in rows:
+            PROMO_MIN_PCT_SEEN[_promo_floor_key(r["promotion_id"], r["item_id"])] = float(r["min_pct"])
+        _PROMO_FLOOR_LOADED = True
+    except Exception:
+        pass
+
+
+def _record_promo_floor(promotion_id, item_id, pct: float) -> bool:
+    """Fija el piso por item si `pct` es menor al guardado. Devuelve True si
+    bajó/creó el piso (es decir, cambió). Persiste en DB (best-effort)."""
+    if pct is None or pct <= 0:
+        return False
+    key = _promo_floor_key(promotion_id, item_id)
+    prev = PROMO_MIN_PCT_SEEN.get(key)
+    if prev is not None and pct >= prev:
+        return False
+    PROMO_MIN_PCT_SEEN[key] = pct
+    try:
+        db_execute(
+            "INSERT INTO promo_min_floor (promotion_id, item_id, min_pct) "
+            "VALUES (:p, :i, :m) ON CONFLICT (promotion_id, item_id) "
+            "DO UPDATE SET min_pct = EXCLUDED.min_pct, updated_at = NOW() "
+            "WHERE promo_min_floor.min_pct > EXCLUDED.min_pct",
+            {"p": promotion_id, "i": str(item_id or "").upper(), "m": pct},
+        )
+    except Exception:
+        pass
+    return True
 
 
 def _invalidate_promo_items_cache(account_id: int) -> None:
@@ -120,10 +160,7 @@ async def _warm_promo_min_floor(account_id, promotion_id, status, promotion_type
                         pct = round((1 - p / o) * 100, 2)
                         if pct <= 0:
                             continue
-                        k = f"{promotion_id}:{str(iid).upper()}"
-                        prev = PROMO_MIN_PCT_SEEN.get(k)
-                        if prev is None or pct < prev:
-                            PROMO_MIN_PCT_SEEN[k] = pct
+                        if _record_promo_floor(promotion_id, iid, pct):
                             changed = True
                     offset += len(results)
                     if len(results) < 49:
@@ -329,6 +366,20 @@ def init_db():
                     PRIMARY KEY (account_id, mla)
                 )
             """))
+        # Piso histórico del mínimo de descuento por (promo, item). La API de
+        # ML para campañas FLEXIBLE_PERCENTAGE es eventualmente consistente y
+        # devuelve a veces el mínimo genérico (10%) y a veces el real (5%);
+        # guardamos el más bajo visto para que el valor quede estable y
+        # sobreviva redeploys.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS promo_min_floor (
+                promotion_id TEXT NOT NULL,
+                item_id TEXT NOT NULL,
+                min_pct NUMERIC(6,2) NOT NULL,
+                updated_at TIMESTAMP DEFAULT NOW(),
+                PRIMARY KEY (promotion_id, item_id)
+            )
+        """))
         # Migrar iva_included → iva_rate UNA VEZ (controlado por app_meta).
         iva_migrated = conn.execute(text(
             "SELECT 1 FROM app_meta WHERE key='iva_rate_migrated'"
@@ -365,6 +416,7 @@ def init_db():
 @asynccontextmanager
 async def lifespan(app):
     init_db()
+    _load_promo_floor_from_db()
     yield
 
 
@@ -3141,8 +3193,12 @@ async def api_promociones_items(
     promo_type_key = (promotion_type or "").strip().upper()
     cache_key = f"{account_id}:{promotion_id}:{status}:{promo_type_key}:{debug_item_norm}"
     _now = datetime.utcnow()
-    # En modo debug nunca servimos cache: queremos la respuesta fresca de ML.
-    _cached = PROMO_ITEMS_RESULT_CACHE.get(cache_key) if not debug_item_norm else None
+    # Mientras un warmer está convergiendo el mínimo de esta promo, NO servimos
+    # cache: el piso por item sigue bajando (10%→5%) y queremos que cada load
+    # muestre lo último, no una foto vieja. En debug tampoco servimos cache.
+    _warmer_active = f"{account_id}:{promotion_id}:{status}:{promo_type_key}" in PROMO_WARMERS_ACTIVE
+    _cached = (PROMO_ITEMS_RESULT_CACHE.get(cache_key)
+               if not debug_item_norm and not _warmer_active else None)
     if _cached and (_now - _cached["at"]).total_seconds() < PROMO_ITEMS_RESULT_TTL_SECONDS:
         return _cached["data"]
     token = await refresh_ml_token(account_id)
@@ -3262,10 +3318,7 @@ async def api_promociones_items(
             pct = round((1 - p / o) * 100, 2)
             if pct <= 0:
                 return
-            k = f"{promotion_id}:{str(iid).upper()}"
-            prev = PROMO_MIN_PCT_SEEN.get(k)
-            if prev is None or pct < prev:
-                PROMO_MIN_PCT_SEEN[k] = pct
+            _record_promo_floor(promotion_id, iid, pct)
 
         # Primera pasada (la que ya teníamos) alimenta el piso.
         for it in all_results:
@@ -3780,12 +3833,10 @@ async def api_promociones_items(
         # llamada y 5% en la siguiente). El mínimo REAL para participar es el
         # más bajo que ML aceptó alguna vez. Guardamos ese piso por item y lo
         # usamos siempre, así el valor queda estable y no vuelve a subir.
-        seen_key = f"{promotion_id}:{(item_id or '').upper()}"
+        seen_key = _promo_floor_key(promotion_id, item_id)
         if min_discount_pct is not None:
-            prev_seen = PROMO_MIN_PCT_SEEN.get(seen_key)
-            if prev_seen is None or min_discount_pct < prev_seen:
-                PROMO_MIN_PCT_SEEN[seen_key] = min_discount_pct
-            min_discount_pct = PROMO_MIN_PCT_SEEN[seen_key]
+            _record_promo_floor(promotion_id, item_id, min_discount_pct)
+            min_discount_pct = PROMO_MIN_PCT_SEEN.get(seen_key, min_discount_pct)
         elif PROMO_MIN_PCT_SEEN.get(seen_key) is not None:
             min_discount_pct = PROMO_MIN_PCT_SEEN[seen_key]
         title = ""
@@ -3877,7 +3928,7 @@ async def api_promociones_items(
     # ML tanto en la lista como en el endpoint per-item. Así detectamos
     # nombres de campos no contemplados.
     raw_sample = {
-        "code_version": "bg-warmer-floor-v5",
+        "code_version": "db-floor-nocache-v6",
         "promo_global_keys": sorted(list(promo_global.keys())) if isinstance(promo_global, dict) and promo_global else None,
         "promo_global_sample": ({k: promo_global[k] for k in list(promo_global.keys())[:30]}
                                 if isinstance(promo_global, dict) and promo_global else None),
