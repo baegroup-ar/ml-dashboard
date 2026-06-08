@@ -140,8 +140,12 @@
     </div>
     <p style="font-size:12px;color:#888;margin-top:6px;">
       Desglose crudo de <code>tipo logístico / status / substatus</code> de ML y conteos por grupo.
-      Copialo y pasámelo si algún envío cae en el grupo equivocado (ej. "Otros").
     </p>
+    <div class="row" style="margin-top:8px;">
+      <label>Ver envío crudo por N° de venta:</label>
+      <input type="text" id="raw-ref" placeholder="Ej: 2000016836936264" style="width:200px;" />
+      <button class="ghost" onclick="verRawShipment()">Ver</button>
+    </div>
     <pre id="debug-pre" style="display:none;white-space:pre-wrap;font-size:11px;background:#f7f7f5;padding:12px;border-radius:8px;margin-top:10px;overflow-x:auto;max-height:420px;"></pre>
   </div>
 
@@ -158,7 +162,7 @@ let DATA = null;             // payload completo del backend (para el debug)
 
 // Orden de los grupos y de los sub-estados, igual que el panel de ML.
 const GROUP_ORDER = ['colecta', 'flex', 'agencia', 'otros'];
-const BUCKET_ORDER = ['canceladas', 'reprogramadas', 'demoradas', 'etiquetas', 'listas'];
+const BUCKET_ORDER = ['canceladas', 'reprogramadas', 'demoradas', 'etiquetas', 'listas', 'en_camino'];
 
 function accId() { return document.getElementById('account-select').value; }
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
@@ -173,6 +177,21 @@ function onAccountChange() {
   document.getElementById('debug-card').style.display = 'none';
   document.getElementById('status-label').textContent = '';
   document.getElementById('load-msg').innerHTML = '';
+}
+
+async function verRawShipment() {
+  const ref = (document.getElementById('raw-ref').value || '').trim();
+  const pre = document.getElementById('debug-pre');
+  if (!ref) return;
+  pre.style.display = 'block';
+  pre.textContent = 'Buscando...';
+  try {
+    const r = await fetch(`/api/etiquetas/${accId()}/raw_shipment?ref=${encodeURIComponent(ref)}`);
+    const data = await r.json();
+    pre.textContent = JSON.stringify(data, null, 2);
+  } catch (e) {
+    pre.textContent = 'Error: ' + e.message;
+  }
 }
 
 function toggleDebug() {

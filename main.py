@@ -2412,6 +2412,8 @@ def _classify_shipment_bucket(status, substatus):
     sub = (substatus or "").lower()
     if st in ("cancelled", "canceled"):
         return ("canceladas", "Canceladas. No despachar")
+    if st in ("shipped", "delivered", "not_delivered"):
+        return ("en_camino", "En camino")
     if sub in ("reprogrammed", "rescheduled", "delayed_reprogrammed",
                "waiting_for_carrier_authorization", "buyer_rescheduled"):
         return ("reprogramadas", "Reprogramadas")
@@ -2478,11 +2480,13 @@ async def _fetch_pending_shipments(account_id, acc, token) -> dict:
     headers = {"Authorization": f"Bearer {token}"}
     seller = acc["ml_user_id"]
     now = datetime.utcnow()
+    today_ar = (now - timedelta(hours=3)).date().isoformat()
     recent_from = (now - timedelta(days=2)).strftime("%Y-%m-%dT00:00:00.000-00:00")
     recent_to = now.strftime("%Y-%m-%dT23:59:59.000-00:00")
+    today_from = f"{today_ar}T00:00:00.000-03:00"   # inicio de hoy en AR
     async with httpx.AsyncClient(timeout=60) as client:
-        # Listos para despachar (demoradas / etiquetas por imprimir / listas /
-        # reprogramadas — se distinguen luego por substatus).
+        # Listos para despachar (etiquetas por imprimir / listas / reprogramadas
+        # — se distinguen luego por substatus).
         ready = await _orders_search_all(client, headers, {
             "seller": seller, "shipping.status": "ready_to_ship", "sort": "date_desc",
         })
@@ -2493,7 +2497,13 @@ async def _fetch_pending_shipments(account_id, acc, token) -> dict:
             "order.date_last_updated.from": recent_from,
             "order.date_last_updated.to": recent_to,
         })
-        orders = ready + cancelled
+        # Despachados HOY ("En camino": la logística escaneó la etiqueta).
+        shipped = await _orders_search_all(client, headers, {
+            "seller": seller, "shipping.status": "shipped", "sort": "date_desc",
+            "order.date_last_updated.from": today_from,
+            "order.date_last_updated.to": recent_to,
+        })
+        orders = ready + cancelled + shipped
 
         # Agrupar ítems por shipment_id (un pack/envío puede tener varias órdenes)
         ship_items: dict = {}
@@ -2540,7 +2550,6 @@ async def _fetch_pending_shipments(account_id, acc, token) -> dict:
 
         details = await asyncio.gather(*[_get_ship(sid) for sid in ship_items])
 
-    today_ar = (now - timedelta(hours=3)).date().isoformat()
     diag = {"today_ar": today_ar, "fetched": len(details), "kept": 0,
             "excluded_future": 0, "excluded_logistic": 0,
             "excluded_logistic_by_type": {}}
@@ -2734,6 +2743,69 @@ def _etq_filter_ids(account_id, ids: str) -> list:
         else:
             id_list = list(rows.keys())
     return id_list
+
+
+@app.get("/api/etiquetas/{account_id}/raw_shipment")
+async def api_etiquetas_raw_shipment(request: Request, account_id: int, ref: str = ""):
+    """Debug: vuelca los campos relevantes (sin datos del comprador) de un envío,
+    buscado por N° de venta (order/pack id) o por shipment_id. Sirve para ubicar
+    el campo de fecha de despacho y separar 'para hoy' de 'para mañana'."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    user = get_user(user_id)
+    require_page(user, "etiquetas")
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    ref = (ref or "").strip()
+    if not ref:
+        raise HTTPException(400, "Falta el N° de venta o shipment_id (ref).")
+    # Buscar el shipment_id en lo cargado (cache) por venta/pack/orden/shipment.
+    rows = (ETIQUETAS_CACHE.get(account_id) or {}).get("rows") or {}
+    sid = None
+    for row in rows.values():
+        if ref in (str(row.get("shipment_id")), str(row.get("venta")), str(row.get("pack_id"))) \
+           or ref in [str(x) for x in (row.get("order_ids") or [])]:
+            sid = row.get("shipment_id")
+            break
+    token = await refresh_ml_token(account_id)
+    if not token:
+        raise HTTPException(502)
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(timeout=30) as client:
+        # Si no estaba en cache, intentamos resolver el shipment desde la orden.
+        if not sid and ref.isdigit():
+            try:
+                ro = await client.get(f"{ML_API_URL}/orders/{ref}", headers=headers)
+                if ro.status_code == 200:
+                    sid = ((ro.json() or {}).get("shipping") or {}).get("id")
+            except Exception:
+                pass
+            if not sid:
+                sid = ref  # último recurso: tratar ref como shipment_id
+        if not sid:
+            raise HTTPException(404, "No encontré ese envío. Cargá la lista primero.")
+        r = await client.get(f"{ML_API_URL}/shipments/{sid}", headers=headers)
+    if r.status_code != 200:
+        return JSONResponse({"shipment_id": sid, "error": r.status_code, "text": r.text[:400]})
+    sh = r.json() if isinstance(r.json(), dict) else {}
+    return JSONResponse({
+        "shipment_id": sid,
+        "logistic_type": sh.get("logistic_type") or (sh.get("logistic") or {}).get("type"),
+        "mode": sh.get("mode"),
+        "status": sh.get("status"),
+        "substatus": sh.get("substatus"),
+        "tags": sh.get("tags"),
+        "shipping_option": sh.get("shipping_option"),
+        "status_history": sh.get("status_history"),
+        "substatus_history": sh.get("substatus_history"),
+        "lead_time": sh.get("lead_time"),
+        "date_created": sh.get("date_created"),
+        "date_first_printed": sh.get("date_first_printed"),
+        "last_updated": sh.get("last_updated"),
+        "all_keys": sorted(sh.keys()),
+    })
 
 
 @app.get("/api/etiquetas/{account_id}/labels.pdf")
