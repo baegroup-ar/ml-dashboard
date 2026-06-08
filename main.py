@@ -2565,6 +2565,20 @@ def _ready_after_cutoff(ready_iso: str, cutoffs: dict, today_ar: str) -> bool:
     return (ar.hour * 60 + ar.minute) > cm
 
 
+def _ready_ar_parts(ready_iso: str):
+    """(fecha DD/MM, hora HH:MM) en hora AR de cuando el envío quedó listo."""
+    if not ready_iso:
+        return ("", "")
+    try:
+        dt = datetime.fromisoformat(ready_iso)
+    except Exception:
+        return ("", "")
+    if dt.tzinfo is None:
+        return ("", "")
+    ar = dt.astimezone(AR_TZ)
+    return (ar.strftime("%d/%m"), ar.strftime("%H:%M"))
+
+
 def _etq_latin(s) -> str:
     """fpdf2 con fuentes core usa latin-1; reemplaza lo que no entre."""
     return str(s or "").encode("latin-1", "replace").decode("latin-1")
@@ -2712,9 +2726,8 @@ async def _fetch_pending_shipments(account_id, acc, token) -> dict:
         # para despachar", no demorado. ML distingue las demoradas con la fecha/
         # hora programada de la colecta, que la API no expone. Por eso no lo
         # inventamos: lo que está listo va todo a "Listas para despachar".
-        ready_date = ""
-        if isinstance(sh, dict):
-            ready_date = str((sh.get("status_history") or {}).get("date_ready_to_ship") or "")[:10]
+        ready_date = ready_iso_full[:10]
+        ready_fecha, ready_hora = _ready_ar_parts(ready_iso_full)
         so = ship_orders.get(sid, {})
         order_ids = [str(x) for x in (so.get("order_ids") or [])]
         pack_id = so.get("pack_id")
@@ -2736,6 +2749,8 @@ async def _fetch_pending_shipments(account_id, acc, token) -> dict:
             "receiver": receiver,
             "dispatch_date": dispatch_date,
             "ready_date": ready_date,
+            "ready_fecha": ready_fecha,
+            "ready_hora": ready_hora,
             "logistic_type": logistic_type,
             "logistic_label": ETIQUETAS_LOGISTIC_LABELS.get(logistic_type, logistic_type or "—"),
             "group_key": group_key,
