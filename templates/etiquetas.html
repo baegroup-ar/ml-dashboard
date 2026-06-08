@@ -181,6 +181,7 @@ function toggleDebug() {
     pre.textContent = JSON.stringify({
       total_shipments: DATA && DATA.total_shipments,
       total_units_a_armar: DATA && DATA.total_units,
+      filtro: DATA && DATA.debug_filter,
       counts: DATA && DATA.counts,
       debug_substatus: DATA && DATA.debug_substatus,
     }, null, 2);

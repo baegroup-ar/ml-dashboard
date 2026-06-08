@@ -2375,6 +2375,32 @@ ETIQUETAS_GROUP_FOR_LOGISTIC = {
 # Buckets que SÍ hay que despachar/armar (los que entran al resumen por SKU y
 # quedan seleccionados por defecto). Canceladas y reprogramadas no se arman.
 ETIQUETAS_PACKABLE_BUCKETS = {"listas", "etiquetas", "demoradas"}
+# Tipos logísticos que SÍ imprimen etiqueta del vendedor. Todo lo demás (Full /
+# fulfillment, "a acordar"/ME1, o sin tipo) se excluye: no necesitamos Full ni
+# basura vieja en esta pantalla.
+ETIQUETAS_ALLOWED_LOGISTICS = {
+    "cross_docking", "self_service", "drop_off", "xd_drop_off",
+}
+
+
+def _dispatch_date_ar(sh) -> str:
+    """Fecha límite de despacho del envío (YYYY-MM-DD, ya en hora AR porque ML
+    la devuelve con offset -03:00). Se usa para separar 'Envíos de hoy' de
+    'Próximos días': hoy o vencido = se despacha hoy; futuro = se excluye."""
+    if not isinstance(sh, dict):
+        return ""
+    lt = sh.get("lead_time") or {}
+    candidates = [
+        lt.get("estimated_handling_limit"),
+        sh.get("estimated_handling_limit"),
+        lt.get("estimated_delivery_limit"),
+    ]
+    for c in candidates:
+        if isinstance(c, dict) and c.get("date"):
+            return str(c["date"])[:10]
+        if isinstance(c, str) and c:
+            return c[:10]
+    return ""
 
 
 def _classify_shipment_bucket(status, substatus):
@@ -2492,23 +2518,54 @@ async def _fetch_pending_shipments(account_id, acc, token) -> dict:
                     "qty": int(it.get("quantity", 1) or 1),
                 })
 
-        # Detalle de cada shipment: zona/CP, tipo logístico, status/substatus
-        sem = asyncio.Semaphore(10)
+        # Detalle de cada shipment: zona/CP, tipo logístico, status/substatus,
+        # fecha de despacho. Con reintentos para no perder envíos por 429/timeout
+        # (si fallaba, quedaban sin tipo logístico y caían en "Otros").
+        sem = asyncio.Semaphore(8)
 
         async def _get_ship(sid):
             async with sem:
-                try:
-                    rs = await client.get(f"{ML_API_URL}/shipments/{sid}", headers=headers)
-                    if rs.status_code == 200:
-                        return sid, rs.json()
-                except Exception:
-                    pass
+                for attempt in range(3):
+                    try:
+                        rs = await client.get(f"{ML_API_URL}/shipments/{sid}", headers=headers)
+                        if rs.status_code == 200:
+                            return sid, rs.json()
+                        if rs.status_code in (429, 500, 502, 503, 504):
+                            await asyncio.sleep(0.5 * (2 ** attempt))
+                            continue
+                        return sid, None
+                    except Exception:
+                        await asyncio.sleep(0.5 * (2 ** attempt))
                 return sid, None
 
         details = await asyncio.gather(*[_get_ship(sid) for sid in ship_items])
 
+    today_ar = (now - timedelta(hours=3)).date().isoformat()
+    diag = {"today_ar": today_ar, "fetched": len(details), "kept": 0,
+            "excluded_future": 0, "excluded_logistic": 0,
+            "excluded_logistic_by_type": {}, "sample_lead_time": None}
     rows: dict = {}
     for sid, sh in details:
+        logistic_type = status = substatus = ""
+        if isinstance(sh, dict):
+            logistic_type = (sh.get("logistic_type")
+                             or (sh.get("logistic") or {}).get("type") or "")
+            status = sh.get("status") or ""
+            substatus = sh.get("substatus") or ""
+            if diag["sample_lead_time"] is None and sh.get("lead_time"):
+                diag["sample_lead_time"] = sh.get("lead_time")
+        # Excluir Full / "a acordar" / sin tipo: no imprimen etiqueta del vendedor.
+        if logistic_type not in ETIQUETAS_ALLOWED_LOGISTICS:
+            diag["excluded_logistic"] += 1
+            k = logistic_type or "(sin tipo)"
+            diag["excluded_logistic_by_type"][k] = diag["excluded_logistic_by_type"].get(k, 0) + 1
+            continue
+        # Excluir lo que se despacha a futuro (Próximos días). Hoy o vencido = hoy.
+        dispatch_date = _dispatch_date_ar(sh)
+        if dispatch_date and dispatch_date > today_ar:
+            diag["excluded_future"] += 1
+            continue
+        diag["kept"] += 1
         items = ship_items.get(sid, [])
         # Consolidar SKUs repetidos dentro del mismo envío
         agg: dict = {}
@@ -2518,17 +2575,11 @@ async def _fetch_pending_shipments(account_id, acc, token) -> dict:
             e["qty"] += it["qty"]
         items_list = sorted(agg.values(), key=lambda x: _etq_sku_sort_key(x["sku"]))
         skus = [e["sku"] for e in items_list if e["sku"]]
-        zip_code = receiver = zona = localidad = logistic_type = status = substatus = ""
-        if isinstance(sh, dict):
-            ra = sh.get("receiver_address") or {}
-            zip_code = str(ra.get("zip_code") or "").strip()
-            receiver = (ra.get("receiver_name") or ra.get("name") or "").strip()
-            zona = _addr_name(ra.get("state"))
-            localidad = _addr_name(ra.get("city")) or _addr_name(ra.get("municipality"))
-            logistic_type = (sh.get("logistic_type")
-                             or (sh.get("logistic") or {}).get("type") or "")
-            status = sh.get("status") or ""
-            substatus = sh.get("substatus") or ""
+        ra = (sh.get("receiver_address") or {}) if isinstance(sh, dict) else {}
+        zip_code = str(ra.get("zip_code") or "").strip()
+        receiver = (ra.get("receiver_name") or ra.get("name") or "").strip()
+        zona = _addr_name(ra.get("state"))
+        localidad = _addr_name(ra.get("city")) or _addr_name(ra.get("municipality"))
         group_key, group_label = ETIQUETAS_GROUP_FOR_LOGISTIC.get(
             logistic_type, ("otros", "Otros"))
         bucket_key, bucket_label = _classify_shipment_bucket(status, substatus)
@@ -2551,6 +2602,7 @@ async def _fetch_pending_shipments(account_id, acc, token) -> dict:
             "zona": zona,
             "localidad": localidad,
             "receiver": receiver,
+            "dispatch_date": dispatch_date,
             "logistic_type": logistic_type,
             "logistic_label": ETIQUETAS_LOGISTIC_LABELS.get(logistic_type, logistic_type or "—"),
             "group_key": group_key,
@@ -2561,7 +2613,7 @@ async def _fetch_pending_shipments(account_id, acc, token) -> dict:
             "raw_status": status,
             "raw_substatus": substatus,
         }
-    return rows
+    return rows, diag
 
 
 def _build_resumen_pdf(items, total_units, account_name="") -> bytes:
@@ -2628,7 +2680,7 @@ async def api_etiquetas(request: Request, account_id: int):
     token = await refresh_ml_token(account_id)
     if not token:
         raise HTTPException(502)
-    rows = await _fetch_pending_shipments(account_id, acc, token)
+    rows, diag = await _fetch_pending_shipments(account_id, acc, token)
     ETIQUETAS_CACHE[account_id] = {"at": datetime.utcnow(), "rows": rows}
     shipments = sorted(rows.values(), key=lambda r: _etq_sku_sort_key(r["sku_principal"]))
     # Resumen por SKU: SOLO los envíos que hay que armar (listas/etiquetas/
@@ -2658,6 +2710,7 @@ async def api_etiquetas(request: Request, account_id: int):
         "total_shipments": len(shipments),
         "counts": counts,
         "debug_substatus": sub_debug,
+        "debug_filter": diag,
     }
 
 
