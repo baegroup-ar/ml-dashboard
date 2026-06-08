@@ -2543,7 +2543,7 @@ async def _fetch_pending_shipments(account_id, acc, token) -> dict:
     today_ar = (now - timedelta(hours=3)).date().isoformat()
     diag = {"today_ar": today_ar, "fetched": len(details), "kept": 0,
             "excluded_future": 0, "excluded_logistic": 0,
-            "excluded_logistic_by_type": {}, "sample_lead_time": None}
+            "excluded_logistic_by_type": {}}
     rows: dict = {}
     for sid, sh in details:
         logistic_type = status = substatus = ""
@@ -2552,27 +2552,6 @@ async def _fetch_pending_shipments(account_id, acc, token) -> dict:
                              or (sh.get("logistic") or {}).get("type") or "")
             status = sh.get("status") or ""
             substatus = sh.get("substatus") or ""
-            if diag["sample_lead_time"] is None and sh.get("lead_time"):
-                diag["sample_lead_time"] = sh.get("lead_time")
-            # Volcado de estructura del primer envío colecta listo: para ubicar
-            # el campo con la fecha/hora de despacho (la colecta), y así poder
-            # separar "Demoradas" de "Listas" (ML usa el mismo substatus para
-            # ambas y las distingue por esa fecha).
-            if (diag.get("sample_shipment") is None
-                    and logistic_type == "cross_docking"
-                    and substatus == "ready_for_pickup"):
-                diag["sample_shipment"] = {
-                    "keys": sorted(sh.keys()),
-                    "shipping_option": sh.get("shipping_option"),
-                    "status_history": sh.get("status_history"),
-                    "lead_time": sh.get("lead_time"),
-                    "date_fields": {
-                        k: v for k, v in sh.items()
-                        if any(w in k.lower() for w in (
-                            "date", "limit", "estimated", "handling",
-                            "pickup", "ship_date", "schedul"))
-                    },
-                }
         # Excluir Full / "a acordar" / sin tipo: no imprimen etiqueta del vendedor.
         if logistic_type not in ETIQUETAS_ALLOWED_LOGISTICS:
             diag["excluded_logistic"] += 1
@@ -2602,6 +2581,16 @@ async def _fetch_pending_shipments(account_id, acc, token) -> dict:
         group_key, group_label = ETIQUETAS_GROUP_FOR_LOGISTIC.get(
             logistic_type, ("otros", "Otros"))
         bucket_key, bucket_label = _classify_shipment_bucket(status, substatus)
+        # Fecha en que el envío quedó listo para despachar (status_history).
+        ready_date = ""
+        if isinstance(sh, dict):
+            ready_date = str((sh.get("status_history") or {}).get("date_ready_to_ship") or "")[:10]
+        # Separar "Demoradas" de "Listas": ML usa el mismo substatus
+        # (ready_for_pickup) para las dos y las distingue por antigüedad — si el
+        # envío está listo desde un día ANTERIOR, ya pasó alguna colecta y está
+        # demorado. Si quedó listo hoy, está a tiempo.
+        if bucket_key == "listas" and ready_date and ready_date < today_ar:
+            bucket_key, bucket_label = "demoradas", "Demoradas. Despachar"
         so = ship_orders.get(sid, {})
         order_ids = [str(x) for x in (so.get("order_ids") or [])]
         pack_id = so.get("pack_id")
@@ -2622,6 +2611,7 @@ async def _fetch_pending_shipments(account_id, acc, token) -> dict:
             "localidad": localidad,
             "receiver": receiver,
             "dispatch_date": dispatch_date,
+            "ready_date": ready_date,
             "logistic_type": logistic_type,
             "logistic_label": ETIQUETAS_LOGISTIC_LABELS.get(logistic_type, logistic_type or "—"),
             "group_key": group_key,
