@@ -2790,22 +2790,12 @@ async def api_etiquetas_raw_shipment(request: Request, account_id: int, ref: str
     if r.status_code != 200:
         return JSONResponse({"shipment_id": sid, "error": r.status_code, "text": r.text[:400]})
     sh = r.json() if isinstance(r.json(), dict) else {}
-    return JSONResponse({
-        "shipment_id": sid,
-        "logistic_type": sh.get("logistic_type") or (sh.get("logistic") or {}).get("type"),
-        "mode": sh.get("mode"),
-        "status": sh.get("status"),
-        "substatus": sh.get("substatus"),
-        "tags": sh.get("tags"),
-        "shipping_option": sh.get("shipping_option"),
-        "status_history": sh.get("status_history"),
-        "substatus_history": sh.get("substatus_history"),
-        "lead_time": sh.get("lead_time"),
-        "date_created": sh.get("date_created"),
-        "date_first_printed": sh.get("date_first_printed"),
-        "last_updated": sh.get("last_updated"),
-        "all_keys": sorted(sh.keys()),
-    })
+    # Devolvemos el envío COMPLETO menos los datos personales del comprador/
+    # vendedor, para poder ubicar cualquier campo de fecha de colecta/despacho.
+    pii = {"receiver_address", "sender_address", "customer_id",
+           "receiver_id", "sender_id", "comments", "shipping_items"}
+    out = {k: v for k, v in sh.items() if k not in pii}
+    return JSONResponse(out)
 
 
 @app.get("/api/etiquetas/{account_id}/labels.pdf")
