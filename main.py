@@ -96,82 +96,10 @@ def _invalidate_promo_items_cache(account_id: int) -> None:
 
 
 # Warmers en curso (1 por promo) para no spawnear duplicados.
-PROMO_WARMERS_ACTIVE: set = set()
-
-
-async def _warm_promo_min_floor(account_id, promotion_id, status, promotion_type, token):
-    """Sondea la lista de la promo en segundo plano durante ~90s y va fijando
-    el piso por item (PROMO_MIN_PCT_SEEN) hasta que converge al mínimo real.
-
-    POR QUÉ EN BACKGROUND: la API de ML es eventualmente consistente Y cachea
-    su respuesta unos segundos. Por eso pedir la lista 5 veces seguidas devuelve
-    el MISMO valor (a veces 10% genérico, a veces 5% real). La variedad solo
-    aparece en el TIEMPO, no en pedidos instantáneos. Este warmer espacia las
-    pasadas (cada 3s) para "atrapar" el 5% de cada item cuando el cache de ML
-    rota, y deja ese mínimo fijado. Cuando baja algún piso, invalida la cache
-    de resultados para que el próximo load ya muestre los valores convergidos.
-    """
-    import asyncio as _asyncio
-    warm_key = f"{account_id}:{promotion_id}:{status}:{(promotion_type or '').upper()}"
-    if warm_key in PROMO_WARMERS_ACTIVE:
-        return
-    PROMO_WARMERS_ACTIVE.add(warm_key)
-    try:
-        headers = {"Authorization": f"Bearer {token}"}
-        params = {"app_version": "v2", "limit": 49}
-        if status:
-            params["status"] = status
-        if promotion_type:
-            params["promotion_type"] = promotion_type
-        rounds = 30          # ~30 pasadas
-        delay_seconds = 3    # cada 3s -> ~90s de calentamiento
-        async with httpx.AsyncClient(timeout=30) as client:
-            for _round in range(rounds):
-                changed = False
-                offset = 0
-                for _ in range(300):
-                    try:
-                        r = await client.get(
-                            f"{ML_API_URL}/seller-promotions/promotions/{promotion_id}/items",
-                            headers=headers,
-                            params={**params, "offset": offset},
-                        )
-                    except Exception:
-                        break
-                    if r.status_code != 200:
-                        break
-                    data = r.json()
-                    results = data.get("results", []) if isinstance(data, dict) else []
-                    if not results:
-                        break
-                    for it in results:
-                        if not isinstance(it, dict):
-                            continue
-                        iid = it.get("id")
-                        if not iid:
-                            continue
-                        try:
-                            o = float(it.get("original_price"))
-                            p = float(it.get("max_discounted_price"))
-                        except (TypeError, ValueError):
-                            continue
-                        if o <= 0 or p <= 0 or p >= o:
-                            continue
-                        pct = round((1 - p / o) * 100, 2)
-                        if pct <= 0:
-                            continue
-                        if _record_promo_floor(promotion_id, iid, pct):
-                            changed = True
-                    offset += len(results)
-                    if len(results) < 49:
-                        break
-                if changed:
-                    _invalidate_promo_items_cache(account_id)
-                await _asyncio.sleep(delay_seconds)
-    except Exception:
-        pass
-    finally:
-        PROMO_WARMERS_ACTIVE.discard(warm_key)
+# Promos cuyo mínimo por item ya convergió en este proceso. Evita repetir la
+# convergencia sincrónica en cada carga: una vez fijado el piso (y persistido
+# en DB), las cargas siguientes salen instantáneas.
+PROMO_CONVERGED: set = set()
 
 serializer = URLSafeTimedSerializer(SECRET_KEY)
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -3193,12 +3121,8 @@ async def api_promociones_items(
     promo_type_key = (promotion_type or "").strip().upper()
     cache_key = f"{account_id}:{promotion_id}:{status}:{promo_type_key}:{debug_item_norm}"
     _now = datetime.utcnow()
-    # Mientras un warmer está convergiendo el mínimo de esta promo, NO servimos
-    # cache: el piso por item sigue bajando (10%→5%) y queremos que cada load
-    # muestre lo último, no una foto vieja. En debug tampoco servimos cache.
-    _warmer_active = f"{account_id}:{promotion_id}:{status}:{promo_type_key}" in PROMO_WARMERS_ACTIVE
     _cached = (PROMO_ITEMS_RESULT_CACHE.get(cache_key)
-               if not debug_item_norm and not _warmer_active else None)
+               if not debug_item_norm else None)
     if _cached and (_now - _cached["at"]).total_seconds() < PROMO_ITEMS_RESULT_TTL_SECONDS:
         return _cached["data"]
     token = await refresh_ml_token(account_id)
@@ -3324,35 +3248,64 @@ async def api_promociones_items(
         for it in all_results:
             _update_floor_from_list_item(it)
 
-        # Sin pasadas instantáneas extra: ML cachea su respuesta unos segundos,
-        # así que repetir YA no trae variedad (devuelve lo mismo) y solo suma
-        # latencia. La convergencia real la hace el warmer en background, que
-        # espacia las pasadas en el tiempo. Dejamos 0 acá.
-        EXTRA_LIST_PASSES = 0
-        for _pass in range(EXTRA_LIST_PASSES):
-            p_offset = 0
-            for _ in range(max_iterations):
-                try:
-                    rp = await client.get(
-                        f"{ML_API_URL}/seller-promotions/promotions/{promotion_id}/items",
-                        headers=headers,
-                        params={**params, "offset": p_offset},
-                    )
-                except Exception:
+        # CONVERGENCIA SINCRÓNICA (primera carga de la promo en este proceso):
+        # la lista de ML es eventualmente consistente — para un mismo item
+        # devuelve a veces el mínimo genérico (10%) y a veces el real (5%), y la
+        # variedad solo aparece en el TIEMPO porque ML cachea su respuesta unos
+        # segundos. Antes esto se "convergía" en background y el usuario tenía
+        # que refrescar varias veces hasta que aparecía el 5% — poco confiable.
+        # Ahora poleamos la lista acá mismo, con pausas (para que el cache de ML
+        # rote), fijando el PISO por item hasta que se estabiliza (sin cambios 2
+        # pasadas seguidas) o se agota el presupuesto. Así la página sale BIEN de
+        # una. Las cargas siguientes ya tienen el piso (en memoria + DB) y se
+        # marcan como convergidas, por lo que salen instantáneas.
+        converge_key = f"{account_id}:{promotion_id}:{status}:{promo_type_key}"
+        if converge_key not in PROMO_CONVERGED and status in ("candidate", "started"):
+            MAX_CONVERGE_PASSES = 8     # techo de pasadas
+            CONVERGE_DELAY = 2.5        # s entre pasadas (> cache de ML)
+            STABLE_NEEDED = 2           # pasadas seguidas sin cambios = convergió
+            stable_passes = 0
+            for _pass in range(MAX_CONVERGE_PASSES):
+                await asyncio.sleep(CONVERGE_DELAY)
+                changed = False
+                p_offset = 0
+                for _ in range(max_iterations):
+                    try:
+                        rp = await client.get(
+                            f"{ML_API_URL}/seller-promotions/promotions/{promotion_id}/items",
+                            headers=headers,
+                            params={**params, "offset": p_offset},
+                        )
+                    except Exception:
+                        break
+                    if rp.status_code != 200:
+                        break
+                    pdata = rp.json()
+                    presults = pdata.get("results", []) if isinstance(pdata, dict) else []
+                    if not presults:
+                        break
+                    for it in presults:
+                        if not isinstance(it, dict) or not it.get("id"):
+                            continue
+                        try:
+                            o = float(it.get("original_price"))
+                            p = float(it.get("max_discounted_price"))
+                        except (TypeError, ValueError):
+                            continue
+                        if o <= 0 or p <= 0 or p >= o:
+                            continue
+                        pct = round((1 - p / o) * 100, 2)
+                        if pct > 0 and _record_promo_floor(promotion_id, it.get("id"), pct):
+                            changed = True
+                    p_offset += len(presults)
+                    if len(presults) < promo_page_limit:
+                        break
+                    if expected_total > 0 and p_offset >= expected_total:
+                        break
+                stable_passes = 0 if changed else stable_passes + 1
+                if stable_passes >= STABLE_NEEDED:
                     break
-                if rp.status_code != 200:
-                    break
-                pdata = rp.json()
-                presults = pdata.get("results", []) if isinstance(pdata, dict) else []
-                if not presults:
-                    break
-                for it in presults:
-                    _update_floor_from_list_item(it)
-                p_offset += len(presults)
-                if len(presults) < promo_page_limit:
-                    break
-                if expected_total > 0 and p_offset >= expected_total:
-                    break
+            PROMO_CONVERGED.add(converge_key)
 
         # Enriquecer con SKU y nombre desde /items/{id}. Sin filtrar
         # attributes para que vengan también `attributes[]` y `variations[]`,
@@ -3928,7 +3881,7 @@ async def api_promociones_items(
     # ML tanto en la lista como en el endpoint per-item. Así detectamos
     # nombres de campos no contemplados.
     raw_sample = {
-        "code_version": "db-floor-nocache-v6",
+        "code_version": "sync-converge-v7",
         "promo_global_keys": sorted(list(promo_global.keys())) if isinstance(promo_global, dict) and promo_global else None,
         "promo_global_sample": ({k: promo_global[k] for k in list(promo_global.keys())[:30]}
                                 if isinstance(promo_global, dict) and promo_global else None),
@@ -4051,17 +4004,6 @@ async def api_promociones_items(
         "raw_sample": raw_sample,
     }
     PROMO_ITEMS_RESULT_CACHE[cache_key] = {"at": datetime.utcnow(), "data": result}
-    # Calentamiento en background: sigue sondeando la lista ~90s para que los
-    # items que todavía vienen con el mínimo genérico (10%) converjan a su
-    # mínimo real (5%) sin que el usuario tenga que refrescar a mano. El guard
-    # interno evita duplicar warmers para la misma promo.
-    if status in ("candidate", "started"):
-        try:
-            asyncio.create_task(
-                _warm_promo_min_floor(account_id, promotion_id, status, promotion_type, token)
-            )
-        except Exception:
-            pass
     return result
 
 
