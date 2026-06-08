@@ -2581,16 +2581,15 @@ async def _fetch_pending_shipments(account_id, acc, token) -> dict:
         group_key, group_label = ETIQUETAS_GROUP_FOR_LOGISTIC.get(
             logistic_type, ("otros", "Otros"))
         bucket_key, bucket_label = _classify_shipment_bucket(status, substatus)
-        # Fecha en que el envío quedó listo para despachar (status_history).
+        # Fecha en que el envío quedó listo (status_history), solo informativa.
+        # NO la usamos para "Demoradas": casi todos los envíos quedan listos uno
+        # o más días antes y siguen esperando la colecta de hoy — eso es "Listas
+        # para despachar", no demorado. ML distingue las demoradas con la fecha/
+        # hora programada de la colecta, que la API no expone. Por eso no lo
+        # inventamos: lo que está listo va todo a "Listas para despachar".
         ready_date = ""
         if isinstance(sh, dict):
             ready_date = str((sh.get("status_history") or {}).get("date_ready_to_ship") or "")[:10]
-        # Separar "Demoradas" de "Listas": ML usa el mismo substatus
-        # (ready_for_pickup) para las dos y las distingue por antigüedad — si el
-        # envío está listo desde un día ANTERIOR, ya pasó alguna colecta y está
-        # demorado. Si quedó listo hoy, está a tiempo.
-        if bucket_key == "listas" and ready_date and ready_date < today_ar:
-            bucket_key, bucket_label = "demoradas", "Demoradas. Despachar"
         so = ship_orders.get(sid, {})
         order_ids = [str(x) for x in (so.get("order_ids") or [])]
         pack_id = so.get("pack_id")
