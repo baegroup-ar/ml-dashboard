@@ -4,7 +4,7 @@ import secrets
 import asyncio
 import json
 from urllib.parse import urlencode
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from contextlib import asynccontextmanager
 
@@ -2460,6 +2460,97 @@ async def _orders_search_all(client, headers, base, max_pages=60):
     return out
 
 
+# ── Horario de corte de colecta (para separar "hoy" de "mañana") ──────────────
+# ML calcula "Envíos de hoy / Próximos días" con el horario de la colecta: lo que
+# queda listo después del corte del día va a la colecta de mañana. Ese horario NO
+# está en la API (se renderiza en el HTML del panel de ML), así que lo guardamos
+# editable por cuenta. Default = lo que mostraba el panel de TIENDA BAE.
+AR_TZ = timezone(timedelta(hours=-3))
+ETQ_WEEKDAY_NAMES = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+ETQ_DEFAULT_CUTOFFS = {
+    0: {"cutoff": "13:30", "ventana": "14:00 a 16:00"},
+    1: {"cutoff": "13:30", "ventana": "14:00 a 16:00"},
+    2: {"cutoff": "13:30", "ventana": "14:00 a 16:00"},
+    3: {"cutoff": "13:30", "ventana": "14:00 a 16:00"},
+    4: {"cutoff": "13:30", "ventana": "14:00 a 16:00"},
+    5: {"cutoff": "07:30", "ventana": "09:30 a 11:30"},
+    6: {"cutoff": "", "ventana": ""},
+}
+
+
+def _ensure_colecta_table():
+    try:
+        db_execute(
+            "CREATE TABLE IF NOT EXISTS etq_colecta_cutoff ("
+            "account_id INTEGER NOT NULL, weekday INTEGER NOT NULL, "
+            "cutoff TEXT, ventana TEXT, PRIMARY KEY (account_id, weekday))",
+            {},
+        )
+    except Exception:
+        pass
+
+
+def _get_colecta_cutoffs(account_id) -> dict:
+    """Devuelve {weekday(0=Lun): {cutoff, ventana}} para la cuenta. Si no hay nada
+    guardado, devuelve los defaults (sin persistir)."""
+    _ensure_colecta_table()
+    result = {k: dict(v) for k, v in ETQ_DEFAULT_CUTOFFS.items()}
+    try:
+        rows = db_fetchall(
+            "SELECT weekday, cutoff, ventana FROM etq_colecta_cutoff WHERE account_id=:a",
+            {"a": account_id},
+        )
+        for r in rows:
+            wd = int(r["weekday"])
+            result[wd] = {"cutoff": (r["cutoff"] or ""), "ventana": (r["ventana"] or "")}
+    except Exception:
+        pass
+    return result
+
+
+def _save_colecta_cutoffs(account_id, schedule: dict):
+    _ensure_colecta_table()
+    for wd in range(7):
+        item = schedule.get(wd) or schedule.get(str(wd)) or {}
+        cutoff = str(item.get("cutoff") or "").strip()
+        ventana = str(item.get("ventana") or "").strip()
+        db_execute(
+            "INSERT INTO etq_colecta_cutoff (account_id, weekday, cutoff, ventana) "
+            "VALUES (:a, :w, :c, :v) ON CONFLICT (account_id, weekday) "
+            "DO UPDATE SET cutoff=EXCLUDED.cutoff, ventana=EXCLUDED.ventana",
+            {"a": account_id, "w": wd, "c": cutoff, "v": ventana},
+        )
+
+
+def _cutoff_minutes(cutoff: str):
+    try:
+        hh, mm = str(cutoff).split(":")
+        return int(hh) * 60 + int(mm)
+    except Exception:
+        return None
+
+
+def _ready_after_cutoff(ready_iso: str, logistic_type: str, cutoffs: dict, today_ar: str) -> bool:
+    """True si el envío de COLECTA quedó listo HOY pero después del corte → va a la
+    colecta de mañana (no es para despachar hoy)."""
+    if logistic_type != "cross_docking" or not ready_iso:
+        return False
+    try:
+        dt = datetime.fromisoformat(ready_iso)
+    except Exception:
+        return False
+    if dt.tzinfo is None:
+        return False
+    ar = dt.astimezone(AR_TZ)
+    if ar.date().isoformat() != today_ar:
+        return False  # listo otro día: ya está esperando, es para despachar
+    co = cutoffs.get(ar.weekday()) or {}
+    cm = _cutoff_minutes(co.get("cutoff") or "")
+    if cm is None:
+        return False
+    return (ar.hour * 60 + ar.minute) > cm
+
+
 def _etq_latin(s) -> str:
     """fpdf2 con fuentes core usa latin-1; reemplaza lo que no entre."""
     return str(s or "").encode("latin-1", "replace").decode("latin-1")
@@ -2550,8 +2641,9 @@ async def _fetch_pending_shipments(account_id, acc, token) -> dict:
 
         details = await asyncio.gather(*[_get_ship(sid) for sid in ship_items])
 
+    cutoffs = _get_colecta_cutoffs(account_id)
     diag = {"today_ar": today_ar, "fetched": len(details), "kept": 0,
-            "excluded_future": 0, "excluded_logistic": 0,
+            "excluded_future": 0, "excluded_after_cutoff": 0, "excluded_logistic": 0,
             "excluded_logistic_by_type": {}}
     rows: dict = {}
     for sid, sh in details:
@@ -2571,6 +2663,14 @@ async def _fetch_pending_shipments(account_id, acc, token) -> dict:
         dispatch_date = _dispatch_date_ar(sh)
         if dispatch_date and dispatch_date > today_ar:
             diag["excluded_future"] += 1
+            continue
+        # Excluir lo que quedó listo HOY después del corte de la colecta: ese va a
+        # la colecta de MAÑANA (mismo criterio que usa ML para "Próximos días").
+        ready_iso_full = ""
+        if isinstance(sh, dict):
+            ready_iso_full = str((sh.get("status_history") or {}).get("date_ready_to_ship") or "")
+        if status == "ready_to_ship" and _ready_after_cutoff(ready_iso_full, logistic_type, cutoffs, today_ar):
+            diag["excluded_after_cutoff"] += 1
             continue
         diag["kept"] += 1
         items = ship_items.get(sid, [])
@@ -2720,15 +2820,65 @@ async def api_etiquetas(request: Request, account_id: int):
         counts[gk][bk] += 1
         key = f"{r.get('logistic_type') or '-'} / {r.get('raw_status') or '-'} / {r.get('raw_substatus') or '-'}"
         sub_debug[key] = sub_debug.get(key, 0) + 1
+    # Horario de la colecta de hoy (para mostrarlo arriba del panel).
+    cutoffs = _get_colecta_cutoffs(account_id)
+    today_wd = (datetime.utcnow() + timedelta(hours=-3)).weekday()
+    colecta_hoy = {
+        "dia": ETQ_WEEKDAY_NAMES[today_wd],
+        "cutoff": (cutoffs.get(today_wd) or {}).get("cutoff") or "",
+        "ventana": (cutoffs.get(today_wd) or {}).get("ventana") or "",
+    }
     return {
         "shipments": shipments,
         "resumen": resumen,
         "total_units": sum(e["units"] for e in resumen),
         "total_shipments": len(shipments),
         "counts": counts,
+        "colecta_hoy": colecta_hoy,
         "debug_substatus": sub_debug,
         "debug_filter": diag,
     }
+
+
+@app.get("/api/etiquetas/{account_id}/colecta_schedule")
+async def api_etiquetas_get_schedule(request: Request, account_id: int):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    user = get_user(user_id)
+    require_page(user, "etiquetas")
+    if not _account_for_user(account_id, user_id):
+        raise HTTPException(404)
+    cutoffs = _get_colecta_cutoffs(account_id)
+    return {"schedule": [
+        {"weekday": wd, "dia": ETQ_WEEKDAY_NAMES[wd],
+         "cutoff": cutoffs.get(wd, {}).get("cutoff", ""),
+         "ventana": cutoffs.get(wd, {}).get("ventana", "")}
+        for wd in range(7)
+    ]}
+
+
+@app.post("/api/etiquetas/{account_id}/colecta_schedule")
+async def api_etiquetas_save_schedule(request: Request, account_id: int):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    user = get_user(user_id)
+    require_page(user, "etiquetas")
+    if not _account_for_user(account_id, user_id):
+        raise HTTPException(404)
+    body = await request.json()
+    schedule = {}
+    for item in (body.get("schedule") or []):
+        try:
+            wd = int(item.get("weekday"))
+        except (TypeError, ValueError):
+            continue
+        if 0 <= wd <= 6:
+            schedule[wd] = {"cutoff": item.get("cutoff") or "", "ventana": item.get("ventana") or ""}
+    _save_colecta_cutoffs(account_id, schedule)
+    ETIQUETAS_CACHE.pop(account_id, None)  # invalida cache: cambió el filtro
+    return {"ok": True}
 
 
 def _etq_filter_ids(account_id, ids: str) -> list:

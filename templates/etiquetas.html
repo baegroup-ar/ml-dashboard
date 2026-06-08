@@ -67,7 +67,7 @@
 </nav>
 
 <main>
-  <h1>Etiquetas de envío <span style="font-size:11px;color:#bbb;font-weight:400;">build etq-12</span></h1>
+  <h1>Etiquetas de envío <span style="font-size:11px;color:#bbb;font-weight:400;">build etq-13</span></h1>
   <p class="lead">
     Envíos de hoy agrupados como en ML (Colecta y Flex, con sus sub-estados). Filtrá por código postal,
     imprimí las etiquetas (PDF de ML) ordenadas por SKU y descargá el resumen de unidades por SKU para armar los paquetes.
@@ -118,6 +118,28 @@
       <span>Envíos seleccionados: <b id="sum-ship">0</b></span>
       <span>Unidades totales: <b id="sum-units">0</b></span>
       <span>SKUs distintos: <b id="sum-skus">0</b></span>
+    </div>
+  </div>
+
+  <div class="card" id="colecta-card" style="display:none;">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+      <div id="colecta-hoy" style="font-size:13px;color:#333;"></div>
+      <button class="ghost" onclick="toggleScheduleEditor()">Editar horarios de colecta</button>
+    </div>
+    <div id="schedule-editor" style="display:none;margin-top:14px;border-top:1px solid #f0f0ee;padding-top:14px;">
+      <p style="font-size:12px;color:#888;margin-bottom:10px;">
+        Corte por día (como figura en ML → Preferencias de venta → Horarios de envío con colecta).
+        Lo que queda listo <b>después</b> del corte va a la colecta de <b>mañana</b> y no se muestra hoy.
+        Formato 24hs <code>HH:MM</code>. Dejá el corte vacío si ese día no hay colecta.
+      </p>
+      <table>
+        <thead><tr><th class="nosort">Día</th><th class="nosort">Corte (hasta)</th><th class="nosort">Ventana colecta</th></tr></thead>
+        <tbody id="schedule-body"></tbody>
+      </table>
+      <div class="row" style="margin-top:12px;">
+        <button class="green" onclick="saveSchedule()">Guardar horarios</button>
+        <span id="schedule-msg" style="font-size:12px;color:#888;"></span>
+      </div>
     </div>
   </div>
 
@@ -181,6 +203,9 @@ function onAccountChange() {
   document.getElementById('table-empty').style.display = 'none';
   document.getElementById('resumen-card').style.display = 'none';
   document.getElementById('debug-card').style.display = 'none';
+  document.getElementById('colecta-card').style.display = 'none';
+  document.getElementById('schedule-editor').style.display = 'none';
+  SCHEDULE = [];
   document.getElementById('status-label').textContent = '';
   document.getElementById('load-msg').innerHTML = '';
 }
@@ -251,12 +276,73 @@ async function loadEnvios() {
     document.getElementById('actions-card').style.display = SHIPMENTS.length ? 'block' : 'none';
     document.getElementById('resumen-card').style.display = SHIPMENTS.length ? 'block' : 'none';
     document.getElementById('debug-card').style.display = 'block';
+    renderColectaHoy(data.colecta_hoy);
     render();
   } catch (e) {
     msg.innerHTML = '<div class="msg err">No se pudieron cargar los envíos: ' + esc(e.message) + '</div>';
   } finally {
     btn.disabled = false;
     btn.textContent = 'Cargar envíos a despachar';
+  }
+}
+
+function renderColectaHoy(c) {
+  const el = document.getElementById('colecta-hoy');
+  const card = document.getElementById('colecta-card');
+  card.style.display = 'block';
+  if (c && c.cutoff) {
+    el.innerHTML = `📦 <b>Colecta de hoy (${esc(c.dia)})</b>: pasa ${esc(c.ventana || '—')} · ` +
+      `entra lo que quede listo hasta las <b>${esc(c.cutoff)}</b>. Lo posterior va a mañana.`;
+  } else if (c) {
+    el.innerHTML = `📦 <b>${esc(c.dia)}</b>: no hay colecta configurada hoy. ` +
+      `Mostramos todo lo que está listo (sin filtro de corte).`;
+  } else {
+    el.textContent = '';
+  }
+}
+
+let SCHEDULE = [];
+async function toggleScheduleEditor() {
+  const ed = document.getElementById('schedule-editor');
+  if (ed.style.display === 'none') {
+    if (!SCHEDULE.length) {
+      try {
+        const r = await fetch(`/api/etiquetas/${accId()}/colecta_schedule`);
+        SCHEDULE = (await r.json()).schedule || [];
+      } catch (e) { SCHEDULE = []; }
+    }
+    renderScheduleEditor();
+    ed.style.display = 'block';
+  } else {
+    ed.style.display = 'none';
+  }
+}
+
+function renderScheduleEditor() {
+  document.getElementById('schedule-body').innerHTML = SCHEDULE.map((s, i) => `
+    <tr>
+      <td>${esc(s.dia)}</td>
+      <td><input type="text" value="${esc(s.cutoff)}" placeholder="HH:MM" data-i="${i}" data-f="cutoff" style="width:90px;"></td>
+      <td><input type="text" value="${esc(s.ventana)}" placeholder="14:00 a 16:00" data-i="${i}" data-f="ventana" style="width:160px;"></td>
+    </tr>`).join('');
+}
+
+async function saveSchedule() {
+  document.querySelectorAll('#schedule-body input').forEach(inp => {
+    const i = +inp.getAttribute('data-i'), f = inp.getAttribute('data-f');
+    if (SCHEDULE[i]) SCHEDULE[i][f] = inp.value.trim();
+  });
+  const msg = document.getElementById('schedule-msg');
+  msg.textContent = 'Guardando...';
+  try {
+    const r = await fetch(`/api/etiquetas/${accId()}/colecta_schedule`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ schedule: SCHEDULE }),
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    msg.textContent = 'Guardado. Recargá los envíos para aplicar el nuevo corte.';
+  } catch (e) {
+    msg.textContent = 'Error al guardar: ' + e.message;
   }
 }
 
