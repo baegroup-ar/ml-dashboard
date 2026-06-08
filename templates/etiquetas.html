@@ -69,8 +69,8 @@
 <main>
   <h1>Etiquetas de envío</h1>
   <p class="lead">
-    Trae los envíos listos para despachar, ordenados por SKU. Filtrá por código postal,
-    imprimí las etiquetas (PDF de ML) y descargá el resumen de unidades por SKU para armar los paquetes.
+    Envíos de hoy agrupados como en ML (Colecta y Flex, con sus sub-estados). Filtrá por código postal,
+    imprimí las etiquetas (PDF de ML) ordenadas por SKU y descargá el resumen de unidades por SKU para armar los paquetes.
   </p>
 
   {% if accounts %}
@@ -88,9 +88,10 @@
       <span id="status-label" style="font-size:12px;color:#888;"></span>
     </div>
     <div class="help-box">
-      Se listan solo los envíos <b>listos para despachar</b> con etiqueta imprimible por el vendedor
-      (Mercado Envíos Flex, colecta y agencia). Los de <b>Full</b> y "a acordar" no se incluyen porque no llevan
-      etiqueta tuya. Si un paquete tiene varios SKU, se ordena por su SKU principal.
+      Replica el panel <b>Envíos de hoy</b> de ML, agrupado en <b>Colecta</b> y <b>Flex</b>, con sus
+      sub-estados (canceladas, reprogramadas, demoradas, etiquetas por imprimir y listas para despachar).
+      Por defecto quedan tildados solo los que hay que <b>armar y despachar</b> (no canceladas ni reprogramadas);
+      esos son los que entran en el resumen por SKU y en la impresión de etiquetas, ordenados por SKU.
     </div>
     <div id="load-msg"></div>
   </div>
@@ -114,26 +115,11 @@
     </div>
   </div>
 
-  <div class="card" id="table-card" style="display:none;">
-    <h3>Envíos a despachar</h3>
-    <div style="overflow-x:auto;">
-      <table id="ship-table">
-        <thead><tr>
-          <th class="nosort" style="width:34px;"><input type="checkbox" id="check-all" onchange="toggleAll(this)" /></th>
-          <th onclick="sortBy('sku_principal')">SKU ▲▼</th>
-          <th onclick="sortBy('total_units')">Unidades</th>
-          <th onclick="sortBy('zip_code')">Cód. Postal</th>
-          <th onclick="sortBy('receiver')">Destinatario</th>
-          <th class="nosort">Envío</th>
-        </tr></thead>
-        <tbody id="ship-body"></tbody>
-      </table>
-    </div>
-    <div id="table-empty" class="empty" style="display:none;">No hay envíos listos para despachar para esta cuenta.</div>
-  </div>
+  <div id="groups-container"></div>
+  <div id="table-empty" class="card empty" style="display:none;">No hay envíos de hoy para esta cuenta.</div>
 
   <div class="card" id="resumen-card" style="display:none;">
-    <h3>Resumen de unidades por SKU (selección actual)</h3>
+    <h3>Resumen de unidades por SKU (lo que hay que armar)</h3>
     <div style="overflow-x:auto;">
       <table>
         <thead><tr><th class="nosort">SKU</th><th class="nosort num">Unidades</th></tr></thead>
@@ -149,18 +135,21 @@
 
 <script>
 let SHIPMENTS = [];          // filas tal como vienen del backend
-let VIEW = [];               // filas visibles (tras filtro), en orden actual
 let SELECTED = new Set();    // shipment_ids seleccionados
-let sortField = 'sku_principal';
-let sortAsc = true;
+
+// Orden de los grupos y de los sub-estados, igual que el panel de ML.
+const GROUP_ORDER = ['colecta', 'flex', 'agencia', 'otros'];
+const BUCKET_ORDER = ['canceladas', 'reprogramadas', 'demoradas', 'etiquetas', 'listas'];
 
 function accId() { return document.getElementById('account-select').value; }
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function skuKey(s) { const v = (s.sku_principal || '').toUpperCase(); return v ? '0' + v : '1'; }
 
 function onAccountChange() {
-  SHIPMENTS = []; VIEW = []; SELECTED = new Set();
+  SHIPMENTS = []; SELECTED = new Set();
   document.getElementById('actions-card').style.display = 'none';
-  document.getElementById('table-card').style.display = 'none';
+  document.getElementById('groups-container').innerHTML = '';
+  document.getElementById('table-empty').style.display = 'none';
   document.getElementById('resumen-card').style.display = 'none';
   document.getElementById('status-label').textContent = '';
   document.getElementById('load-msg').innerHTML = '';
@@ -175,20 +164,16 @@ async function loadEnvios() {
   document.getElementById('status-label').textContent = '';
   try {
     const r = await fetch(`/api/etiquetas/${accId()}`);
-    if (!r.ok) {
-      const t = await r.text();
-      throw new Error('HTTP ' + r.status + ' — ' + t.slice(0, 200));
-    }
+    if (!r.ok) { throw new Error('HTTP ' + r.status + ' — ' + (await r.text()).slice(0, 200)); }
     const data = await r.json();
     SHIPMENTS = data.shipments || [];
-    SELECTED = new Set(SHIPMENTS.map(s => String(s.shipment_id)));
-    sortField = 'sku_principal'; sortAsc = true;
+    // Por defecto seleccionamos solo lo que hay que armar (no canceladas/reprogramadas).
+    SELECTED = new Set(SHIPMENTS.filter(s => s.packable).map(s => String(s.shipment_id)));
     document.getElementById('status-label').textContent =
-      `${data.total_shipments} envíos · ${data.total_units} unidades`;
+      `${data.total_shipments} envíos · ${data.total_units} unidades a armar`;
     document.getElementById('actions-card').style.display = SHIPMENTS.length ? 'block' : 'none';
-    document.getElementById('table-card').style.display = 'block';
     document.getElementById('resumen-card').style.display = SHIPMENTS.length ? 'block' : 'none';
-    applyFilter();
+    render();
   } catch (e) {
     msg.innerHTML = '<div class="msg err">No se pudieron cargar los envíos: ' + esc(e.message) + '</div>';
   } finally {
@@ -197,79 +182,127 @@ async function loadEnvios() {
   }
 }
 
-function sortBy(field) {
-  if (sortField === field) sortAsc = !sortAsc; else { sortField = field; sortAsc = true; }
-  applyFilter();
+function clearZip() { document.getElementById('zip-filter').value = ''; render(); }
+
+function currentZip() { return (document.getElementById('zip-filter').value || '').trim().toLowerCase(); }
+
+function visibleShipments() {
+  const zip = currentZip();
+  return SHIPMENTS.filter(s => !zip || String(s.zip_code || '').toLowerCase().includes(zip));
 }
 
-function applyFilter() {
-  const zip = (document.getElementById('zip-filter').value || '').trim().toLowerCase();
-  VIEW = SHIPMENTS.filter(s => !zip || String(s.zip_code || '').toLowerCase().includes(zip));
-  VIEW.sort((a, b) => {
-    let av = a[sortField], bv = b[sortField];
-    if (sortField === 'total_units') { av = +av || 0; bv = +bv || 0; }
-    else { av = String(av || '').toLowerCase(); bv = String(bv || '').toLowerCase(); }
-    if (av < bv) return sortAsc ? -1 : 1;
-    if (av > bv) return sortAsc ? 1 : -1;
-    return 0;
-  });
-  renderTable();
+function getBucketRows(gk, bk) {
+  return visibleShipments()
+    .filter(s => (s.group_key || 'otros') === gk && (s.bucket_key || 'listas') === bk)
+    .sort((a, b) => skuKey(a).localeCompare(skuKey(b)));
+}
+
+function rowHtml(s) {
+  const id = String(s.shipment_id);
+  const checked = SELECTED.has(id) ? 'checked' : '';
+  const skuLabel = s.skus && s.skus.length > 1
+    ? esc(s.sku_principal) + ' <span class="badge">+' + (s.skus.length - 1) + ' SKU</span>'
+    : (esc(s.sku_principal) || '<span class="badge">Sin SKU</span>');
+  const zona = esc(s.zona) || '—';
+  const loc = s.localidad ? `<div style="color:#999;font-size:11px;">${esc(s.localidad)}</div>` : '';
+  return `<tr>
+    <td><input type="checkbox" data-id="${id}" ${checked} onchange="onCheck(this)"></td>
+    <td>${skuLabel}</td>
+    <td class="num">${s.total_units}</td>
+    <td>${esc(s.zip_code) || '—'}</td>
+    <td>${zona}${loc}</td>
+    <td>${esc(s.receiver) || '—'}</td>
+    <td><span class="badge">${esc(s.logistic_label) || '—'}</span></td>
+  </tr>`;
+}
+
+function bucketHtml(gk, bk, rows) {
+  const units = rows.reduce((a, s) => a + (s.total_units || 0), 0);
+  const allChecked = rows.every(s => SELECTED.has(String(s.shipment_id)));
+  return `<div style="margin-top:14px;">
+    <div style="display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid #eee;">
+      <input type="checkbox" ${allChecked ? 'checked' : ''} onchange="toggleBucket(this,'${gk}','${bk}')">
+      <span style="font-weight:600;font-size:13px;">${esc(rows[0].bucket_label)}</span>
+      <span style="color:#888;font-size:12px;">${rows.length} envíos · ${units} u.</span>
+    </div>
+    <div style="overflow-x:auto;">
+      <table>
+        <thead><tr>
+          <th class="nosort" style="width:34px;"></th>
+          <th class="nosort">SKU</th><th class="nosort num">Unid.</th>
+          <th class="nosort">Cód. Postal</th><th class="nosort">Zona</th>
+          <th class="nosort">Destinatario</th><th class="nosort">Envío</th>
+        </tr></thead>
+        <tbody>${rows.map(rowHtml).join('')}</tbody>
+      </table>
+    </div>
+  </div>`;
+}
+
+function render() {
+  const vis = visibleShipments();
+  const groups = {};
+  for (const s of vis) {
+    const gk = s.group_key || 'otros';
+    (groups[gk] = groups[gk] || { label: s.group_label || 'Otros', buckets: {} });
+    const bk = s.bucket_key || 'listas';
+    (groups[gk].buckets[bk] = groups[gk].buckets[bk] || []).push(s);
+  }
+  const cont = document.getElementById('groups-container');
+  cont.innerHTML = '';
+  let any = false;
+  const keys = GROUP_ORDER.concat(Object.keys(groups).filter(k => !GROUP_ORDER.includes(k)));
+  for (const gk of keys) {
+    const g = groups[gk];
+    if (!g) continue;
+    any = true;
+    const gRows = vis.filter(s => (s.group_key || 'otros') === gk);
+    const gUnits = gRows.reduce((a, s) => a + (s.total_units || 0), 0);
+    let html = `<h3 style="font-size:15px;color:#111;">${esc(g.label)}
+      <span style="color:#888;font-weight:400;font-size:12px;">· ${gRows.length} envíos · ${gUnits} u.</span></h3>`;
+    const bkeys = BUCKET_ORDER.concat(Object.keys(g.buckets).filter(k => !BUCKET_ORDER.includes(k)));
+    for (const bk of bkeys) {
+      const rows = g.buckets[bk];
+      if (!rows || !rows.length) continue;
+      rows.sort((a, b) => skuKey(a).localeCompare(skuKey(b)));
+      html += bucketHtml(gk, bk, rows);
+    }
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.innerHTML = html;
+    cont.appendChild(card);
+  }
+  document.getElementById('table-empty').style.display = any ? 'none' : 'block';
   renderResumen();
   updateSummary();
-}
-
-function clearZip() { document.getElementById('zip-filter').value = ''; applyFilter(); }
-
-function renderTable() {
-  const body = document.getElementById('ship-body');
-  const emptyEl = document.getElementById('table-empty');
-  body.innerHTML = '';
-  if (!VIEW.length) { emptyEl.style.display = 'block'; return; }
-  emptyEl.style.display = 'none';
-  for (const s of VIEW) {
-    const id = String(s.shipment_id);
-    const checked = SELECTED.has(id) ? 'checked' : '';
-    const skuLabel = s.skus && s.skus.length > 1
-      ? esc(s.sku_principal) + ' <span class="badge">+' + (s.skus.length - 1) + '</span>'
-      : (esc(s.sku_principal) || '<span class="badge">Sin SKU</span>');
-    const tr = document.createElement('tr');
-    tr.innerHTML =
-      `<td><input type="checkbox" data-id="${id}" ${checked} onchange="onCheck(this)"></td>` +
-      `<td>${skuLabel}</td>` +
-      `<td class="num">${s.total_units}</td>` +
-      `<td>${esc(s.zip_code) || '—'}</td>` +
-      `<td>${esc(s.receiver) || '—'}</td>` +
-      `<td><span class="badge">${esc(s.logistic_type) || '—'}</span></td>`;
-    body.appendChild(tr);
-  }
-  const allChecked = VIEW.every(s => SELECTED.has(String(s.shipment_id)));
-  document.getElementById('check-all').checked = allChecked && VIEW.length > 0;
 }
 
 function onCheck(el) {
   const id = el.getAttribute('data-id');
   if (el.checked) SELECTED.add(id); else SELECTED.delete(id);
   renderResumen(); updateSummary();
-  const allChecked = VIEW.every(s => SELECTED.has(String(s.shipment_id)));
-  document.getElementById('check-all').checked = allChecked && VIEW.length > 0;
 }
 
-function toggleAll(el) {
-  for (const s of VIEW) {
+function toggleBucket(el, gk, bk) {
+  for (const s of getBucketRows(gk, bk)) {
     const id = String(s.shipment_id);
     if (el.checked) SELECTED.add(id); else SELECTED.delete(id);
   }
-  renderTable(); renderResumen(); updateSummary();
+  render();
 }
 
-// ids seleccionados Y visibles, en el orden actual de la tabla (SKU u otro)
+// ids seleccionados y visibles, ordenados por SKU (para imprimir las etiquetas
+// en ese orden), sin importar el grupo.
 function selectedVisibleIds() {
-  return VIEW.map(s => String(s.shipment_id)).filter(id => SELECTED.has(id));
+  return visibleShipments()
+    .filter(s => SELECTED.has(String(s.shipment_id)))
+    .sort((a, b) => skuKey(a).localeCompare(skuKey(b)))
+    .map(s => String(s.shipment_id));
 }
 
 function selectedRows() {
   const ids = new Set(selectedVisibleIds());
-  return VIEW.filter(s => ids.has(String(s.shipment_id)));
+  return visibleShipments().filter(s => ids.has(String(s.shipment_id)));
 }
 
 function renderResumen() {

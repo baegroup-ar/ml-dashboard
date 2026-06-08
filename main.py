@@ -2356,12 +2356,80 @@ async def api_ranking(request: Request, account_id: int,
 # tenga que volver a bajar todo de ML.
 ETIQUETAS_CACHE: dict = {}
 ETIQUETAS_CACHE_TTL_SECONDS = 300
-# Tipos logísticos cuyo envío tiene etiqueta imprimible por el vendedor
-# (Mercado Envíos Flex / colecta / agencia / cross-docking). Full y "a acordar"
-# no imprimen etiqueta del vendedor, así que se excluyen.
-ETIQUETAS_PRINTABLE_LOGISTICS = {
-    "self_service", "drop_off", "cross_docking", "xd_drop_off",
+
+# Traducción del tipo logístico de ML al nombre que usa el vendedor.
+ETIQUETAS_LOGISTIC_LABELS = {
+    "cross_docking": "Colecta",
+    "self_service": "Flex",
+    "drop_off": "Agencia",
+    "xd_drop_off": "Agencia",
+    "fulfillment": "Full",
 }
+# Tipo logístico → grupo (como agrupa el panel "Envíos de hoy" de ML).
+ETIQUETAS_GROUP_FOR_LOGISTIC = {
+    "cross_docking": ("colecta", "Colecta"),
+    "self_service": ("flex", "Flex"),
+    "drop_off": ("agencia", "Agencia"),
+    "xd_drop_off": ("agencia", "Agencia"),
+}
+# Buckets que SÍ hay que despachar/armar (los que entran al resumen por SKU y
+# quedan seleccionados por defecto). Canceladas y reprogramadas no se arman.
+ETIQUETAS_PACKABLE_BUCKETS = {"listas", "etiquetas", "demoradas"}
+
+
+def _classify_shipment_bucket(status, substatus):
+    """Clasifica un envío en el mismo sub-estado que muestra el panel de ML.
+    Devuelve (bucket_key, etiqueta). Los strings de substatus de ML pueden
+    variar; este es el único lugar a tocar si algún envío cae en el bucket
+    equivocado (cada fila expone su status/substatus crudo para verificar)."""
+    st = (status or "").lower()
+    sub = (substatus or "").lower()
+    if st in ("cancelled", "canceled"):
+        return ("canceladas", "Canceladas. No despachar")
+    if sub in ("reprogrammed", "rescheduled", "delayed_reprogrammed",
+               "waiting_for_carrier_authorization", "buyer_rescheduled"):
+        return ("reprogramadas", "Reprogramadas")
+    if sub in ("delayed", "stale", "overdue", "delivery_failed"):
+        return ("demoradas", "Demoradas. Despachar")
+    if sub in ("ready_to_print", "invoice_pending", "regrouping",
+               "printing", "ready_to_print_pending"):
+        return ("etiquetas", "Etiquetas por imprimir")
+    # printed, ready_to_ship, picked_up, in_packing_list, etc.
+    return ("listas", "Listas para despachar")
+
+
+def _addr_name(v):
+    """receiver_address.state/city puede venir como dict {name} o como string."""
+    if isinstance(v, dict):
+        return (v.get("name") or "").strip()
+    return str(v or "").strip()
+
+
+async def _orders_search_all(client, headers, base, max_pages=60):
+    """Pagina /orders/search con los filtros dados y devuelve todas las órdenes."""
+    out = []
+    offset = 0
+    for _ in range(max_pages):
+        try:
+            r = await client.get(
+                f"{ML_API_URL}/orders/search",
+                headers=headers,
+                params={**base, "offset": offset, "limit": 50},
+            )
+        except Exception:
+            break
+        if r.status_code != 200:
+            break
+        data = r.json()
+        res = data.get("results", []) if isinstance(data, dict) else []
+        if not res:
+            break
+        out.extend(res)
+        offset += len(res)
+        total = (data.get("paging") or {}).get("total", 0)
+        if offset >= total or len(res) < 50:
+            break
+    return out
 
 
 def _etq_latin(s) -> str:
@@ -2376,38 +2444,30 @@ def _etq_sku_sort_key(s):
 
 
 async def _fetch_pending_shipments(account_id, acc, token) -> dict:
-    """Baja las ventas listas para despachar (shipping.status=ready_to_ship) y
-    devuelve {str(shipment_id): fila}. Cada fila trae SKU(s), unidades, código
-    postal, destinatario y tipo logístico. Solo envíos con etiqueta imprimible."""
+    """Baja los envíos de hoy de la cuenta (listos para despachar + canceladas
+    recientes) y devuelve {str(shipment_id): fila}. Cada fila trae SKU(s),
+    unidades, código postal, zona, destinatario, tipo logístico y el grupo
+    (Colecta/Flex/...) y sub-estado (canceladas/reprogramadas/demoradas/
+    etiquetas por imprimir/listas para despachar), igual que el panel de ML."""
     headers = {"Authorization": f"Bearer {token}"}
     seller = acc["ml_user_id"]
-    orders = []
+    now = datetime.utcnow()
+    recent_from = (now - timedelta(days=2)).strftime("%Y-%m-%dT00:00:00.000-00:00")
+    recent_to = now.strftime("%Y-%m-%dT23:59:59.000-00:00")
     async with httpx.AsyncClient(timeout=60) as client:
-        offset = 0
-        for _ in range(60):  # tope defensivo (3000 órdenes pendientes)
-            params = {
-                "seller": seller,
-                "order.status": "paid",
-                "shipping.status": "ready_to_ship",
-                "sort": "date_desc",
-                "limit": 50,
-                "offset": offset,
-            }
-            try:
-                r = await client.get(f"{ML_API_URL}/orders/search", headers=headers, params=params)
-            except Exception:
-                break
-            if r.status_code != 200:
-                break
-            data = r.json()
-            res = data.get("results", []) if isinstance(data, dict) else []
-            if not res:
-                break
-            orders.extend(res)
-            offset += len(res)
-            total = (data.get("paging") or {}).get("total", 0)
-            if offset >= total or len(res) < 50:
-                break
+        # Listos para despachar (demoradas / etiquetas por imprimir / listas /
+        # reprogramadas — se distinguen luego por substatus).
+        ready = await _orders_search_all(client, headers, {
+            "seller": seller, "shipping.status": "ready_to_ship", "sort": "date_desc",
+        })
+        # Canceladas recientes (las "No despachar" del día). Se acotan por
+        # date_last_updated para no traer cancelaciones viejas.
+        cancelled = await _orders_search_all(client, headers, {
+            "seller": seller, "shipping.status": "cancelled", "sort": "date_desc",
+            "order.date_last_updated.from": recent_from,
+            "order.date_last_updated.to": recent_to,
+        })
+        orders = ready + cancelled
 
         # Agrupar ítems por shipment_id (un pack/envío puede tener varias órdenes)
         ship_items: dict = {}
@@ -2425,7 +2485,7 @@ async def _fetch_pending_shipments(account_id, acc, token) -> dict:
                     "qty": int(it.get("quantity", 1) or 1),
                 })
 
-        # Detalle de cada shipment: código postal, tipo logístico, destinatario
+        # Detalle de cada shipment: zona/CP, tipo logístico, status/substatus
         sem = asyncio.Semaphore(10)
 
         async def _get_ship(sid):
@@ -2451,18 +2511,20 @@ async def _fetch_pending_shipments(account_id, acc, token) -> dict:
             e["qty"] += it["qty"]
         items_list = sorted(agg.values(), key=lambda x: _etq_sku_sort_key(x["sku"]))
         skus = [e["sku"] for e in items_list if e["sku"]]
-        zip_code = receiver = logistic_type = substatus = ""
+        zip_code = receiver = zona = localidad = logistic_type = status = substatus = ""
         if isinstance(sh, dict):
             ra = sh.get("receiver_address") or {}
             zip_code = str(ra.get("zip_code") or "").strip()
             receiver = (ra.get("receiver_name") or ra.get("name") or "").strip()
+            zona = _addr_name(ra.get("state"))
+            localidad = _addr_name(ra.get("city")) or _addr_name(ra.get("municipality"))
             logistic_type = (sh.get("logistic_type")
                              or (sh.get("logistic") or {}).get("type") or "")
+            status = sh.get("status") or ""
             substatus = sh.get("substatus") or ""
-        # Excluir envíos sin etiqueta imprimible del vendedor (Full / a acordar).
-        # Si el tipo es desconocido (vacío), lo dejamos para no perder envíos.
-        if logistic_type and logistic_type not in ETIQUETAS_PRINTABLE_LOGISTICS:
-            continue
+        group_key, group_label = ETIQUETAS_GROUP_FOR_LOGISTIC.get(
+            logistic_type, ("otros", "Otros"))
+        bucket_key, bucket_label = _classify_shipment_bucket(status, substatus)
         rows[str(sid)] = {
             "shipment_id": sid,
             "sku_principal": skus[0] if skus else "",
@@ -2470,9 +2532,18 @@ async def _fetch_pending_shipments(account_id, acc, token) -> dict:
             "items": items_list,
             "total_units": sum(e["qty"] for e in items_list),
             "zip_code": zip_code,
+            "zona": zona,
+            "localidad": localidad,
             "receiver": receiver,
             "logistic_type": logistic_type,
-            "substatus": substatus,
+            "logistic_label": ETIQUETAS_LOGISTIC_LABELS.get(logistic_type, logistic_type or "—"),
+            "group_key": group_key,
+            "group_label": group_label,
+            "bucket_key": bucket_key,
+            "bucket_label": bucket_label,
+            "packable": bucket_key in ETIQUETAS_PACKABLE_BUCKETS,
+            "raw_status": status,
+            "raw_substatus": substatus,
         }
     return rows
 
@@ -2544,18 +2615,33 @@ async def api_etiquetas(request: Request, account_id: int):
     rows = await _fetch_pending_shipments(account_id, acc, token)
     ETIQUETAS_CACHE[account_id] = {"at": datetime.utcnow(), "rows": rows}
     shipments = sorted(rows.values(), key=lambda r: _etq_sku_sort_key(r["sku_principal"]))
+    # Resumen por SKU: SOLO los envíos que hay que armar (listas/etiquetas/
+    # demoradas). Canceladas y reprogramadas no se arman, así que no suman.
     agg: dict = {}
     for r in rows.values():
+        if not r.get("packable"):
+            continue
         for it in r["items"]:
             sku = it.get("sku") or it.get("title") or "Sin SKU"
             e = agg.setdefault(sku, {"sku": it.get("sku") or "", "title": it.get("title") or "", "units": 0})
             e["units"] += it["qty"]
     resumen = sorted(agg.values(), key=lambda x: _etq_sku_sort_key(x["sku"]))
+    # Conteos por (grupo, sub-estado) para verificar contra el panel de ML.
+    counts: dict = {}
+    sub_debug: dict = {}
+    for r in rows.values():
+        gk, bk = r["group_key"], r["bucket_key"]
+        counts.setdefault(gk, {}).setdefault(bk, 0)
+        counts[gk][bk] += 1
+        key = f"{r.get('logistic_type') or '-'} / {r.get('raw_status') or '-'} / {r.get('raw_substatus') or '-'}"
+        sub_debug[key] = sub_debug.get(key, 0) + 1
     return {
         "shipments": shipments,
         "resumen": resumen,
         "total_units": sum(e["units"] for e in resumen),
         "total_shipments": len(shipments),
+        "counts": counts,
+        "debug_substatus": sub_debug,
     }
 
 
