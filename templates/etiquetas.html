@@ -133,6 +133,18 @@
     </div>
   </div>
 
+  <div class="card" id="debug-card" style="display:none;">
+    <div style="display:flex;justify-content:space-between;align-items:center;">
+      <h3 style="margin:0;">Diagnóstico (JSON debug)</h3>
+      <button class="ghost" onclick="toggleDebug()">Mostrar / ocultar</button>
+    </div>
+    <p style="font-size:12px;color:#888;margin-top:6px;">
+      Desglose crudo de <code>tipo logístico / status / substatus</code> de ML y conteos por grupo.
+      Copialo y pasámelo si algún envío cae en el grupo equivocado (ej. "Otros").
+    </p>
+    <pre id="debug-pre" style="display:none;white-space:pre-wrap;font-size:11px;background:#f7f7f5;padding:12px;border-radius:8px;margin-top:10px;overflow-x:auto;max-height:420px;"></pre>
+  </div>
+
   {% else %}
   <div class="card"><div class="no-accounts">No tenés cuentas de Mercado Libre conectadas.</div></div>
   {% endif %}
@@ -142,6 +154,7 @@
 let SHIPMENTS = [];          // filas tal como vienen del backend
 let SELECTED = new Set();    // shipment_ids seleccionados
 let EXPANDED = new Set();    // claves "grupo:bucket" desplegadas (vacío = todo plegado)
+let DATA = null;             // payload completo del backend (para el debug)
 
 // Orden de los grupos y de los sub-estados, igual que el panel de ML.
 const GROUP_ORDER = ['colecta', 'flex', 'agencia', 'otros'];
@@ -152,13 +165,29 @@ function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&
 function skuKey(s) { const v = (s.sku_principal || '').toUpperCase(); return v ? '0' + v : '1'; }
 
 function onAccountChange() {
-  SHIPMENTS = []; SELECTED = new Set(); EXPANDED = new Set();
+  SHIPMENTS = []; SELECTED = new Set(); EXPANDED = new Set(); DATA = null;
   document.getElementById('actions-card').style.display = 'none';
   document.getElementById('groups-container').innerHTML = '';
   document.getElementById('table-empty').style.display = 'none';
   document.getElementById('resumen-card').style.display = 'none';
+  document.getElementById('debug-card').style.display = 'none';
   document.getElementById('status-label').textContent = '';
   document.getElementById('load-msg').innerHTML = '';
+}
+
+function toggleDebug() {
+  const pre = document.getElementById('debug-pre');
+  if (pre.style.display === 'none') {
+    pre.textContent = JSON.stringify({
+      total_shipments: DATA && DATA.total_shipments,
+      total_units_a_armar: DATA && DATA.total_units,
+      counts: DATA && DATA.counts,
+      debug_substatus: DATA && DATA.debug_substatus,
+    }, null, 2);
+    pre.style.display = 'block';
+  } else {
+    pre.style.display = 'none';
+  }
 }
 
 async function loadEnvios() {
@@ -172,13 +201,16 @@ async function loadEnvios() {
     const r = await fetch(`/api/etiquetas/${accId()}`);
     if (!r.ok) { throw new Error('HTTP ' + r.status + ' — ' + (await r.text()).slice(0, 200)); }
     const data = await r.json();
+    DATA = data;
     SHIPMENTS = data.shipments || [];
+    EXPANDED = new Set();
     // Por defecto seleccionamos solo lo que hay que armar (no canceladas/reprogramadas).
     SELECTED = new Set(SHIPMENTS.filter(s => s.packable).map(s => String(s.shipment_id)));
     document.getElementById('status-label').textContent =
       `${data.total_shipments} envíos · ${data.total_units} unidades a armar`;
     document.getElementById('actions-card').style.display = SHIPMENTS.length ? 'block' : 'none';
     document.getElementById('resumen-card').style.display = SHIPMENTS.length ? 'block' : 'none';
+    document.getElementById('debug-card').style.display = 'block';
     render();
   } catch (e) {
     msg.innerHTML = '<div class="msg err">No se pudieron cargar los envíos: ' + esc(e.message) + '</div>';
@@ -236,8 +268,11 @@ function rowHtml(s) {
     : (esc(s.sku_principal) || '<span class="badge">Sin SKU</span>');
   const zona = esc(s.zona) || '—';
   const loc = s.localidad ? `<div style="color:#999;font-size:11px;">${esc(s.localidad)}</div>` : '';
+  const ventaExtra = (s.order_ids && s.order_ids.length > 1 && !s.pack_id)
+    ? ` <span class="badge">+${s.order_ids.length - 1}</span>` : '';
   return `<tr>
     <td><input type="checkbox" data-id="${id}" ${checked} onchange="onCheck(this)"></td>
+    <td style="white-space:nowrap;font-variant-numeric:tabular-nums;">#${esc(s.venta)}${ventaExtra}</td>
     <td>${skuLabel}</td>
     <td class="num">${s.total_units}</td>
     <td>${esc(s.zip_code) || '—'}</td>
@@ -257,6 +292,7 @@ function bucketHtml(gk, bk, rows) {
       <table>
         <thead><tr>
           <th class="nosort" style="width:34px;"></th>
+          <th class="nosort">Venta</th>
           <th class="nosort">SKU</th><th class="nosort num">Unid.</th>
           <th class="nosort">Cód. Postal</th><th class="nosort">Zona</th>
           <th class="nosort">Destinatario</th><th class="nosort">Envío</th>

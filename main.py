@@ -2471,12 +2471,19 @@ async def _fetch_pending_shipments(account_id, acc, token) -> dict:
 
         # Agrupar ítems por shipment_id (un pack/envío puede tener varias órdenes)
         ship_items: dict = {}
+        ship_orders: dict = {}   # sid -> {"order_ids": [...], "pack_id": ...}
         for o in orders:
             shp = o.get("shipping") or {}
             sid = shp.get("id")
             if not sid:
                 continue
             bucket = ship_items.setdefault(sid, [])
+            so = ship_orders.setdefault(sid, {"order_ids": [], "pack_id": None})
+            oid = o.get("id")
+            if oid and oid not in so["order_ids"]:
+                so["order_ids"].append(oid)
+            if o.get("pack_id"):
+                so["pack_id"] = o.get("pack_id")
             for it in o.get("order_items", []):
                 itm = it.get("item") or {}
                 bucket.append({
@@ -2525,8 +2532,17 @@ async def _fetch_pending_shipments(account_id, acc, token) -> dict:
         group_key, group_label = ETIQUETAS_GROUP_FOR_LOGISTIC.get(
             logistic_type, ("otros", "Otros"))
         bucket_key, bucket_label = _classify_shipment_bucket(status, substatus)
+        so = ship_orders.get(sid, {})
+        order_ids = [str(x) for x in (so.get("order_ids") or [])]
+        pack_id = so.get("pack_id")
+        # Número de venta como lo muestra ML: el pack si la venta es de varios
+        # ítems, si no el id de la orden.
+        venta = str(pack_id) if pack_id else (order_ids[0] if order_ids else str(sid))
         rows[str(sid)] = {
             "shipment_id": sid,
+            "venta": venta,
+            "order_ids": order_ids,
+            "pack_id": str(pack_id) if pack_id else "",
             "sku_principal": skus[0] if skus else "",
             "skus": skus,
             "items": items_list,
