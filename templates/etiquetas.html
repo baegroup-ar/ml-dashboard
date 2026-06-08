@@ -100,8 +100,13 @@
     <div class="row" style="justify-content:space-between;">
       <div class="row">
         <label>Código postal:</label>
-        <input type="text" id="zip-filter" placeholder="Ej: 1407" oninput="applyFilter()" style="width:140px;" />
-        <button class="ghost" onclick="clearZip()">Limpiar</button>
+        <input type="text" id="zip-filter" placeholder="Ej: 1407" oninput="render()" style="width:120px;" />
+        <label>Zona:</label>
+        <input type="text" id="zona-filter" placeholder="Ej: Córdoba" oninput="render()" style="width:160px;" />
+        <button class="ghost" onclick="clearFilters()">Limpiar</button>
+        <span style="width:1px;height:22px;background:#e5e5e3;"></span>
+        <button class="ghost" onclick="expandAll(true)">Desplegar todo</button>
+        <button class="ghost" onclick="expandAll(false)">Plegar todo</button>
       </div>
       <div class="row">
         <button class="primary" id="btn-print" onclick="printLabels()">🖨 Imprimir etiquetas (PDF)</button>
@@ -136,6 +141,7 @@
 <script>
 let SHIPMENTS = [];          // filas tal como vienen del backend
 let SELECTED = new Set();    // shipment_ids seleccionados
+let EXPANDED = new Set();    // claves "grupo:bucket" desplegadas (vacío = todo plegado)
 
 // Orden de los grupos y de los sub-estados, igual que el panel de ML.
 const GROUP_ORDER = ['colecta', 'flex', 'agencia', 'otros'];
@@ -146,7 +152,7 @@ function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&
 function skuKey(s) { const v = (s.sku_principal || '').toUpperCase(); return v ? '0' + v : '1'; }
 
 function onAccountChange() {
-  SHIPMENTS = []; SELECTED = new Set();
+  SHIPMENTS = []; SELECTED = new Set(); EXPANDED = new Set();
   document.getElementById('actions-card').style.display = 'none';
   document.getElementById('groups-container').innerHTML = '';
   document.getElementById('table-empty').style.display = 'none';
@@ -182,13 +188,38 @@ async function loadEnvios() {
   }
 }
 
-function clearZip() { document.getElementById('zip-filter').value = ''; render(); }
-
-function currentZip() { return (document.getElementById('zip-filter').value || '').trim().toLowerCase(); }
+function clearFilters() {
+  document.getElementById('zip-filter').value = '';
+  document.getElementById('zona-filter').value = '';
+  render();
+}
 
 function visibleShipments() {
-  const zip = currentZip();
-  return SHIPMENTS.filter(s => !zip || String(s.zip_code || '').toLowerCase().includes(zip));
+  const zip = (document.getElementById('zip-filter').value || '').trim().toLowerCase();
+  const zona = (document.getElementById('zona-filter').value || '').trim().toLowerCase();
+  return SHIPMENTS.filter(s => {
+    if (zip && !String(s.zip_code || '').toLowerCase().includes(zip)) return false;
+    if (zona) {
+      const hay = (String(s.zona || '') + ' ' + String(s.localidad || '')).toLowerCase();
+      if (!hay.includes(zona)) return false;
+    }
+    return true;
+  });
+}
+
+function bucketKeyOf(gk, bk) { return gk + ':' + bk; }
+
+function toggleExpand(key) {
+  if (EXPANDED.has(key)) EXPANDED.delete(key); else EXPANDED.add(key);
+  render();
+}
+
+function expandAll(open) {
+  EXPANDED = new Set();
+  if (open) {
+    for (const s of visibleShipments()) EXPANDED.add(bucketKeyOf(s.group_key || 'otros', s.bucket_key || 'listas'));
+  }
+  render();
 }
 
 function getBucketRows(gk, bk) {
@@ -219,13 +250,10 @@ function rowHtml(s) {
 function bucketHtml(gk, bk, rows) {
   const units = rows.reduce((a, s) => a + (s.total_units || 0), 0);
   const allChecked = rows.every(s => SELECTED.has(String(s.shipment_id)));
-  return `<div style="margin-top:14px;">
-    <div style="display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid #eee;">
-      <input type="checkbox" ${allChecked ? 'checked' : ''} onchange="toggleBucket(this,'${gk}','${bk}')">
-      <span style="font-weight:600;font-size:13px;">${esc(rows[0].bucket_label)}</span>
-      <span style="color:#888;font-size:12px;">${rows.length} envíos · ${units} u.</span>
-    </div>
-    <div style="overflow-x:auto;">
+  const key = bucketKeyOf(gk, bk);
+  const open = EXPANDED.has(key);
+  const caret = open ? '▼' : '▶';
+  const body = open ? `<div style="overflow-x:auto;">
       <table>
         <thead><tr>
           <th class="nosort" style="width:34px;"></th>
@@ -235,7 +263,15 @@ function bucketHtml(gk, bk, rows) {
         </tr></thead>
         <tbody>${rows.map(rowHtml).join('')}</tbody>
       </table>
+    </div>` : '';
+  return `<div style="margin-top:12px;">
+    <div onclick="toggleExpand('${key}')" style="display:flex;align-items:center;gap:10px;padding:8px 6px;border-bottom:1px solid #eee;cursor:pointer;background:#fafaf8;border-radius:6px;">
+      <span style="color:#999;font-size:11px;width:12px;">${caret}</span>
+      <input type="checkbox" ${allChecked ? 'checked' : ''} onclick="event.stopPropagation()" onchange="toggleBucket(this,'${gk}','${bk}')">
+      <span style="font-weight:600;font-size:13px;">${esc(rows[0].bucket_label)}</span>
+      <span style="color:#888;font-size:12px;">${rows.length} envíos · ${units} u.</span>
     </div>
+    ${body}
   </div>`;
 }
 
