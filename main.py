@@ -2467,58 +2467,73 @@ async def _orders_search_all(client, headers, base, max_pages=60):
 # editable por cuenta. Default = lo que mostraba el panel de TIENDA BAE.
 AR_TZ = timezone(timedelta(hours=-3))
 ETQ_WEEKDAY_NAMES = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
-ETQ_DEFAULT_CUTOFFS = {
-    0: {"cutoff": "13:30", "ventana": "14:00 a 16:00"},
-    1: {"cutoff": "13:30", "ventana": "14:00 a 16:00"},
-    2: {"cutoff": "13:30", "ventana": "14:00 a 16:00"},
-    3: {"cutoff": "13:30", "ventana": "14:00 a 16:00"},
-    4: {"cutoff": "13:30", "ventana": "14:00 a 16:00"},
-    5: {"cutoff": "07:30", "ventana": "09:30 a 11:30"},
-    6: {"cutoff": "", "ventana": ""},
+# Defaults por tipo logístico (lo que mostraban los paneles de TIENDA BAE).
+# Colecta (cross_docking): cambia semana a semana → se edita a mano.
+# Flex (self_service): lo configura el vendedor y no cambia salvo que lo cambie.
+ETQ_DEFAULTS = {
+    "cross_docking": {
+        0: {"cutoff": "13:30", "ventana": "14:00 a 16:00"},
+        1: {"cutoff": "13:30", "ventana": "14:00 a 16:00"},
+        2: {"cutoff": "13:30", "ventana": "14:00 a 16:00"},
+        3: {"cutoff": "13:30", "ventana": "14:00 a 16:00"},
+        4: {"cutoff": "13:30", "ventana": "14:00 a 16:00"},
+        5: {"cutoff": "07:30", "ventana": "09:30 a 11:30"},
+        6: {"cutoff": "", "ventana": ""},
+    },
+    "self_service": {
+        0: {"cutoff": "13:00", "ventana": "16:00 a 21:00"},
+        1: {"cutoff": "13:00", "ventana": "16:00 a 21:00"},
+        2: {"cutoff": "13:00", "ventana": "16:00 a 21:00"},
+        3: {"cutoff": "13:00", "ventana": "16:00 a 21:00"},
+        4: {"cutoff": "13:00", "ventana": "16:00 a 21:00"},
+        5: {"cutoff": "12:00", "ventana": "09:00 a 21:00"},
+        6: {"cutoff": "", "ventana": ""},
+    },
 }
+ETQ_CUTOFF_LOGISTICS = ("cross_docking", "self_service")
 
 
-def _ensure_colecta_table():
+def _ensure_cutoff_table():
     try:
         db_execute(
-            "CREATE TABLE IF NOT EXISTS etq_colecta_cutoff ("
-            "account_id INTEGER NOT NULL, weekday INTEGER NOT NULL, "
-            "cutoff TEXT, ventana TEXT, PRIMARY KEY (account_id, weekday))",
+            "CREATE TABLE IF NOT EXISTS etq_cutoff ("
+            "account_id INTEGER NOT NULL, logistic TEXT NOT NULL, weekday INTEGER NOT NULL, "
+            "cutoff TEXT, ventana TEXT, PRIMARY KEY (account_id, logistic, weekday))",
             {},
         )
     except Exception:
         pass
 
 
-def _get_colecta_cutoffs(account_id) -> dict:
-    """Devuelve {weekday(0=Lun): {cutoff, ventana}} para la cuenta. Si no hay nada
-    guardado, devuelve los defaults (sin persistir)."""
-    _ensure_colecta_table()
-    result = {k: dict(v) for k, v in ETQ_DEFAULT_CUTOFFS.items()}
+def _get_cutoffs(account_id, logistic) -> dict:
+    """Devuelve {weekday(0=Lun): {cutoff, ventana}} para (cuenta, logística). Si no
+    hay nada guardado, devuelve los defaults (sin persistir)."""
+    _ensure_cutoff_table()
+    base = ETQ_DEFAULTS.get(logistic, {})
+    result = {k: dict(v) for k, v in base.items()}
     try:
         rows = db_fetchall(
-            "SELECT weekday, cutoff, ventana FROM etq_colecta_cutoff WHERE account_id=:a",
-            {"a": account_id},
+            "SELECT weekday, cutoff, ventana FROM etq_cutoff WHERE account_id=:a AND logistic=:l",
+            {"a": account_id, "l": logistic},
         )
         for r in rows:
-            wd = int(r["weekday"])
-            result[wd] = {"cutoff": (r["cutoff"] or ""), "ventana": (r["ventana"] or "")}
+            result[int(r["weekday"])] = {"cutoff": (r["cutoff"] or ""), "ventana": (r["ventana"] or "")}
     except Exception:
         pass
     return result
 
 
-def _save_colecta_cutoffs(account_id, schedule: dict):
-    _ensure_colecta_table()
+def _save_cutoffs(account_id, logistic, schedule: dict):
+    _ensure_cutoff_table()
     for wd in range(7):
         item = schedule.get(wd) or schedule.get(str(wd)) or {}
-        cutoff = str(item.get("cutoff") or "").strip()
-        ventana = str(item.get("ventana") or "").strip()
         db_execute(
-            "INSERT INTO etq_colecta_cutoff (account_id, weekday, cutoff, ventana) "
-            "VALUES (:a, :w, :c, :v) ON CONFLICT (account_id, weekday) "
+            "INSERT INTO etq_cutoff (account_id, logistic, weekday, cutoff, ventana) "
+            "VALUES (:a, :l, :w, :c, :v) ON CONFLICT (account_id, logistic, weekday) "
             "DO UPDATE SET cutoff=EXCLUDED.cutoff, ventana=EXCLUDED.ventana",
-            {"a": account_id, "w": wd, "c": cutoff, "v": ventana},
+            {"a": account_id, "l": logistic, "w": wd,
+             "c": str(item.get("cutoff") or "").strip(),
+             "v": str(item.get("ventana") or "").strip()},
         )
 
 
@@ -2530,10 +2545,10 @@ def _cutoff_minutes(cutoff: str):
         return None
 
 
-def _ready_after_cutoff(ready_iso: str, logistic_type: str, cutoffs: dict, today_ar: str) -> bool:
-    """True si el envío de COLECTA quedó listo HOY pero después del corte → va a la
-    colecta de mañana (no es para despachar hoy)."""
-    if logistic_type != "cross_docking" or not ready_iso:
+def _ready_after_cutoff(ready_iso: str, cutoffs: dict, today_ar: str) -> bool:
+    """True si el envío quedó listo HOY pero después del corte del día → va a la
+    colecta/despacho de mañana (no es para despachar hoy)."""
+    if not ready_iso:
         return False
     try:
         dt = datetime.fromisoformat(ready_iso)
@@ -2544,8 +2559,7 @@ def _ready_after_cutoff(ready_iso: str, logistic_type: str, cutoffs: dict, today
     ar = dt.astimezone(AR_TZ)
     if ar.date().isoformat() != today_ar:
         return False  # listo otro día: ya está esperando, es para despachar
-    co = cutoffs.get(ar.weekday()) or {}
-    cm = _cutoff_minutes(co.get("cutoff") or "")
+    cm = _cutoff_minutes((cutoffs.get(ar.weekday()) or {}).get("cutoff") or "")
     if cm is None:
         return False
     return (ar.hour * 60 + ar.minute) > cm
@@ -2641,7 +2655,7 @@ async def _fetch_pending_shipments(account_id, acc, token) -> dict:
 
         details = await asyncio.gather(*[_get_ship(sid) for sid in ship_items])
 
-    cutoffs = _get_colecta_cutoffs(account_id)
+    cutoffs_by_logistic = {lg: _get_cutoffs(account_id, lg) for lg in ETQ_CUTOFF_LOGISTICS}
     diag = {"today_ar": today_ar, "fetched": len(details), "kept": 0,
             "excluded_future": 0, "excluded_after_cutoff": 0, "excluded_logistic": 0,
             "excluded_logistic_by_type": {}}
@@ -2664,12 +2678,14 @@ async def _fetch_pending_shipments(account_id, acc, token) -> dict:
         if dispatch_date and dispatch_date > today_ar:
             diag["excluded_future"] += 1
             continue
-        # Excluir lo que quedó listo HOY después del corte de la colecta: ese va a
-        # la colecta de MAÑANA (mismo criterio que usa ML para "Próximos días").
+        # Excluir lo que quedó listo HOY después del corte del día: ese va a la
+        # colecta/despacho de MAÑANA (mismo criterio que ML para "Próximos días").
+        # Aplica a Colecta y Flex, cada uno con su propio horario de corte.
         ready_iso_full = ""
         if isinstance(sh, dict):
             ready_iso_full = str((sh.get("status_history") or {}).get("date_ready_to_ship") or "")
-        if status == "ready_to_ship" and _ready_after_cutoff(ready_iso_full, logistic_type, cutoffs, today_ar):
+        cuts = cutoffs_by_logistic.get(logistic_type)
+        if status == "ready_to_ship" and cuts and _ready_after_cutoff(ready_iso_full, cuts, today_ar):
             diag["excluded_after_cutoff"] += 1
             continue
         diag["kept"] += 1
@@ -2820,27 +2836,27 @@ async def api_etiquetas(request: Request, account_id: int):
         counts[gk][bk] += 1
         key = f"{r.get('logistic_type') or '-'} / {r.get('raw_status') or '-'} / {r.get('raw_substatus') or '-'}"
         sub_debug[key] = sub_debug.get(key, 0) + 1
-    # Horario de la colecta de hoy (para mostrarlo arriba del panel).
-    cutoffs = _get_colecta_cutoffs(account_id)
+    # Horario de corte de hoy por logística (para mostrarlo arriba del panel).
     today_wd = (datetime.utcnow() + timedelta(hours=-3)).weekday()
-    colecta_hoy = {
-        "dia": ETQ_WEEKDAY_NAMES[today_wd],
-        "cutoff": (cutoffs.get(today_wd) or {}).get("cutoff") or "",
-        "ventana": (cutoffs.get(today_wd) or {}).get("ventana") or "",
-    }
+
+    def _hoy(lg):
+        c = _get_cutoffs(account_id, lg).get(today_wd) or {}
+        return {"dia": ETQ_WEEKDAY_NAMES[today_wd],
+                "cutoff": c.get("cutoff") or "", "ventana": c.get("ventana") or ""}
+
     return {
         "shipments": shipments,
         "resumen": resumen,
         "total_units": sum(e["units"] for e in resumen),
         "total_shipments": len(shipments),
         "counts": counts,
-        "colecta_hoy": colecta_hoy,
+        "cutoff_hoy": {"cross_docking": _hoy("cross_docking"), "self_service": _hoy("self_service")},
         "debug_substatus": sub_debug,
         "debug_filter": diag,
     }
 
 
-@app.get("/api/etiquetas/{account_id}/colecta_schedule")
+@app.get("/api/etiquetas/{account_id}/cutoff_schedule")
 async def api_etiquetas_get_schedule(request: Request, account_id: int):
     user_id = get_session_user_id(request)
     if not user_id:
@@ -2849,16 +2865,19 @@ async def api_etiquetas_get_schedule(request: Request, account_id: int):
     require_page(user, "etiquetas")
     if not _account_for_user(account_id, user_id):
         raise HTTPException(404)
-    cutoffs = _get_colecta_cutoffs(account_id)
-    return {"schedule": [
-        {"weekday": wd, "dia": ETQ_WEEKDAY_NAMES[wd],
-         "cutoff": cutoffs.get(wd, {}).get("cutoff", ""),
-         "ventana": cutoffs.get(wd, {}).get("ventana", "")}
-        for wd in range(7)
-    ]}
+    out = {}
+    for lg in ETQ_CUTOFF_LOGISTICS:
+        cutoffs = _get_cutoffs(account_id, lg)
+        out[lg] = [
+            {"weekday": wd, "dia": ETQ_WEEKDAY_NAMES[wd],
+             "cutoff": cutoffs.get(wd, {}).get("cutoff", ""),
+             "ventana": cutoffs.get(wd, {}).get("ventana", "")}
+            for wd in range(7)
+        ]
+    return {"schedules": out}
 
 
-@app.post("/api/etiquetas/{account_id}/colecta_schedule")
+@app.post("/api/etiquetas/{account_id}/cutoff_schedule")
 async def api_etiquetas_save_schedule(request: Request, account_id: int):
     user_id = get_session_user_id(request)
     if not user_id:
@@ -2868,15 +2887,20 @@ async def api_etiquetas_save_schedule(request: Request, account_id: int):
     if not _account_for_user(account_id, user_id):
         raise HTTPException(404)
     body = await request.json()
-    schedule = {}
-    for item in (body.get("schedule") or []):
-        try:
-            wd = int(item.get("weekday"))
-        except (TypeError, ValueError):
+    schedules = body.get("schedules") or {}
+    for lg in ETQ_CUTOFF_LOGISTICS:
+        rows = schedules.get(lg)
+        if not isinstance(rows, list):
             continue
-        if 0 <= wd <= 6:
-            schedule[wd] = {"cutoff": item.get("cutoff") or "", "ventana": item.get("ventana") or ""}
-    _save_colecta_cutoffs(account_id, schedule)
+        schedule = {}
+        for item in rows:
+            try:
+                wd = int(item.get("weekday"))
+            except (TypeError, ValueError):
+                continue
+            if 0 <= wd <= 6:
+                schedule[wd] = {"cutoff": item.get("cutoff") or "", "ventana": item.get("ventana") or ""}
+        _save_cutoffs(account_id, lg, schedule)
     ETIQUETAS_CACHE.pop(account_id, None)  # invalida cache: cambió el filtro
     return {"ok": True}
 
