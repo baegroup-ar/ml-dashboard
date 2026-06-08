@@ -67,7 +67,7 @@
 </nav>
 
 <main>
-  <h1>Etiquetas de envío</h1>
+  <h1>Etiquetas de envío <span style="font-size:11px;color:#bbb;font-weight:400;">build etq-10</span></h1>
   <p class="lead">
     Envíos de hoy agrupados como en ML (Colecta y Flex, con sus sub-estados). Filtrá por código postal,
     imprimí las etiquetas (PDF de ML) ordenadas por SKU y descargá el resumen de unidades por SKU para armar los paquetes.
@@ -99,10 +99,11 @@
   <div class="card" id="actions-card" style="display:none;">
     <div class="row" style="justify-content:space-between;">
       <div class="row">
-        <label>Código postal:</label>
-        <input type="text" id="zip-filter" placeholder="Ej: 1407" oninput="render()" style="width:120px;" />
+        <input type="text" id="search-filter" placeholder="Buscar SKU o N° de venta..." oninput="render()" style="width:220px;" />
+        <label>C.P.:</label>
+        <input type="text" id="zip-filter" placeholder="Ej: 1407" oninput="render()" style="width:90px;" />
         <label>Zona:</label>
-        <input type="text" id="zona-filter" placeholder="Ej: Córdoba" oninput="render()" style="width:160px;" />
+        <input type="text" id="zona-filter" placeholder="Ej: Córdoba" oninput="render()" style="width:130px;" />
         <button class="ghost" onclick="clearFilters()">Limpiar</button>
         <span style="width:1px;height:22px;background:#e5e5e3;"></span>
         <button class="ghost" onclick="expandAll(true)">Desplegar todo</button>
@@ -241,12 +242,14 @@ async function loadEnvios() {
 }
 
 function clearFilters() {
+  document.getElementById('search-filter').value = '';
   document.getElementById('zip-filter').value = '';
   document.getElementById('zona-filter').value = '';
   render();
 }
 
 function visibleShipments() {
+  const q = (document.getElementById('search-filter').value || '').trim().toLowerCase();
   const zip = (document.getElementById('zip-filter').value || '').trim().toLowerCase();
   const zona = (document.getElementById('zona-filter').value || '').trim().toLowerCase();
   return SHIPMENTS.filter(s => {
@@ -255,8 +258,21 @@ function visibleShipments() {
       const hay = (String(s.zona || '') + ' ' + String(s.localidad || '')).toLowerCase();
       if (!hay.includes(zona)) return false;
     }
+    if (q) {
+      const skuHay = ((s.skus || []).join(' ') + ' ' +
+        (s.items || []).map(i => (i.sku || '') + ' ' + (i.title || '')).join(' ')).toLowerCase();
+      const ventaHay = (String(s.venta || '') + ' ' + String(s.pack_id || '') + ' ' +
+        (s.order_ids || []).join(' ')).toLowerCase();
+      if (!skuHay.includes(q) && !ventaHay.includes(q)) return false;
+    }
     return true;
   });
+}
+
+function filtersActive() {
+  return !!((document.getElementById('search-filter').value || '').trim()
+    || (document.getElementById('zip-filter').value || '').trim()
+    || (document.getElementById('zona-filter').value || '').trim());
 }
 
 function bucketKeyOf(gk, bk) { return gk + ':' + bk; }
@@ -306,7 +322,7 @@ function bucketHtml(gk, bk, rows) {
   const units = rows.reduce((a, s) => a + (s.total_units || 0), 0);
   const allChecked = rows.every(s => SELECTED.has(String(s.shipment_id)));
   const key = bucketKeyOf(gk, bk);
-  const open = EXPANDED.has(key);
+  const open = filtersActive() || EXPANDED.has(key);
   const caret = open ? '▼' : '▶';
   const body = open ? `<div style="overflow-x:auto;">
       <table>
