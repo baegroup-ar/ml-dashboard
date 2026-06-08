@@ -2798,6 +2798,35 @@ async def api_etiquetas_raw_shipment(request: Request, account_id: int, ref: str
     return JSONResponse(out)
 
 
+@app.get("/api/etiquetas/{account_id}/probe")
+async def api_etiquetas_probe(request: Request, account_id: int, path: str = ""):
+    """Debug: hace GET a un endpoint de la API de ML con el token de la cuenta y
+    devuelve la respuesta. Solo proxea api.mercadolibre.com (no otros hosts).
+    `{uid}` en el path se reemplaza por el ml_user_id de la cuenta."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    user = get_user(user_id)
+    require_page(user, "etiquetas")
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    path = (path or "").strip().replace("{uid}", str(acc.get("ml_user_id") or ""))
+    if not path.startswith("/"):
+        raise HTTPException(400, "El path debe empezar con '/' (ej: /users/{uid}/shipping_preferences)")
+    token = await refresh_ml_token(account_id)
+    if not token:
+        raise HTTPException(502)
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get(f"{ML_API_URL}{path}", headers=headers)
+    try:
+        body = r.json()
+    except Exception:
+        body = r.text[:1500]
+    return JSONResponse({"path": path, "status": r.status_code, "body": body})
+
+
 @app.get("/api/etiquetas/{account_id}/labels.pdf")
 async def api_etiquetas_labels(request: Request, account_id: int, ids: str = ""):
     """Devuelve el PDF combinado de etiquetas (lo genera ML), en el orden de ids."""

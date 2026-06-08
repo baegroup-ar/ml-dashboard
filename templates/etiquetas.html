@@ -67,7 +67,7 @@
 </nav>
 
 <main>
-  <h1>Etiquetas de envío <span style="font-size:11px;color:#bbb;font-weight:400;">build etq-11</span></h1>
+  <h1>Etiquetas de envío <span style="font-size:11px;color:#bbb;font-weight:400;">build etq-12</span></h1>
   <p class="lead">
     Envíos de hoy agrupados como en ML (Colecta y Flex, con sus sub-estados). Filtrá por código postal,
     imprimí las etiquetas (PDF de ML) ordenadas por SKU y descargá el resumen de unidades por SKU para armar los paquetes.
@@ -147,6 +147,11 @@
       <input type="text" id="raw-ref" placeholder="Ej: 2000016836936264" style="width:200px;" />
       <button class="ghost" onclick="verRawShipment()">Ver</button>
     </div>
+    <div class="row" style="margin-top:8px;">
+      <label>Probar endpoint ML:</label>
+      <input type="text" id="probe-path" placeholder="/users/{uid}/shipping_preferences" style="width:340px;" />
+      <button class="ghost" onclick="probeMl()">Probar</button>
+    </div>
     <pre id="debug-pre" style="display:none;white-space:pre-wrap;font-size:11px;background:#f7f7f5;padding:12px;border-radius:8px;margin-top:10px;overflow-x:auto;max-height:420px;"></pre>
   </div>
 
@@ -190,6 +195,20 @@ async function verRawShipment() {
     const r = await fetch(`/api/etiquetas/${accId()}/raw_shipment?ref=${encodeURIComponent(ref)}`);
     const data = await r.json();
     pre.textContent = JSON.stringify(data, null, 2);
+  } catch (e) {
+    pre.textContent = 'Error: ' + e.message;
+  }
+}
+
+async function probeMl() {
+  const path = (document.getElementById('probe-path').value || '').trim();
+  const pre = document.getElementById('debug-pre');
+  if (!path) return;
+  pre.style.display = 'block';
+  pre.textContent = 'Consultando...';
+  try {
+    const r = await fetch(`/api/etiquetas/${accId()}/probe?path=${encodeURIComponent(path)}`);
+    pre.textContent = JSON.stringify(await r.json(), null, 2);
   } catch (e) {
     pre.textContent = 'Error: ' + e.message;
   }
