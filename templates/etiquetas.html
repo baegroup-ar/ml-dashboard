@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Etiquetas · Panel ML</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Inter', sans-serif; background: #f5f5f3; color: #111; }
+    nav { background: #fff; border-bottom: 1px solid #e5e5e3; padding: 0 1.5rem; height: 56px; display: flex; align-items: center; justify-content: space-between; }
+    .nav-brand { font-weight: 600; font-size: 15px; display: flex; align-items: center; gap: 8px; }
+    .nav-brand span { background: #FFE600; border-radius: 6px; padding: 2px 8px; font-size: 12px; }
+    .nav-right { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+    .btn-nav { padding: 6px 14px; border: 1px solid #ddd; border-radius: 8px; background: #fff; font-size: 13px; cursor: pointer; text-decoration: none; color: #111; }
+    main { max-width: 1280px; margin: 0 auto; padding: 1.5rem; }
+    h1 { font-size: 20px; font-weight: 600; margin-bottom: 6px; }
+    p.lead { font-size: 13px; color: #888; margin-bottom: 1.25rem; }
+    .card { background: #fff; border: 1px solid #e5e5e3; border-radius: 12px; padding: 1.25rem; margin-bottom: 1.25rem; }
+    .card h3 { font-size: 14px; font-weight: 600; color: #444; margin-bottom: 12px; }
+    .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .row label { font-size: 13px; color: #666; }
+    .row select, .row input { padding: 7px 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 13px; font-family: 'Inter', sans-serif; }
+    .row select { min-width: 220px; }
+    button.primary { padding: 8px 16px; border: none; border-radius: 8px; background: #3483FA; color: #fff; font-size: 13px; cursor: pointer; }
+    button.green { padding: 8px 16px; border: none; border-radius: 8px; background: #1a8a5a; color: #fff; font-size: 13px; cursor: pointer; }
+    button.ghost { padding: 8px 16px; border: 1px solid #ddd; border-radius: 8px; background: #fff; color: #111; font-size: 13px; cursor: pointer; }
+    button:disabled { background: #ccc !important; color: #fff !important; border-color: #ccc !important; cursor: not-allowed; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 12px; }
+    th { padding: 10px 12px; text-align: left; color: #888; font-weight: 500; border-bottom: 1px solid #eee; font-size: 12px; cursor: pointer; user-select: none; }
+    th.nosort { cursor: default; }
+    td { padding: 9px 12px; border-bottom: 1px solid #f0f0ee; color: #333; }
+    tr:last-child td { border-bottom: none; }
+    tbody tr:hover { background: #fafaf8; }
+    .num { text-align: right; }
+    .empty { padding: 2rem; text-align: center; color: #aaa; font-size: 13px; }
+    .summary { display: flex; gap: 22px; font-size: 13px; padding: 4px 0 2px; flex-wrap: wrap; }
+    .summary b { color: #111; }
+    .msg { padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-top: 10px; }
+    .msg.err { background: #fce9e9; color: #c0392b; border: 1px solid #f5c6c6; }
+    .msg.info { background: #eef4ff; color: #2a5db0; border: 1px solid #cfe0fb; }
+    .help-box { background: #f5f5f3; border-left: 3px solid #3483FA; padding: 10px 14px; font-size: 12px; color: #666; margin-top: 10px; }
+    .badge { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 99px; font-weight: 500; background: #f0f0ee; color: #666; }
+    .no-accounts { text-align: center; padding: 4rem; color: #888; font-size: 14px; }
+    input[type=checkbox] { width: 16px; height: 16px; }
+    .spinner { display:inline-block; width:13px; height:13px; border:2px solid rgba(255,255,255,.5); border-top-color:#fff; border-radius:50%; animation:spin .7s linear infinite; vertical-align:-2px; margin-right:6px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+<nav>
+  <div class="nav-brand">
+    <div style="width:24px;height:24px;background:#FFE600;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;">ML</div>
+    Panel de ventas <span>Beta</span>
+  </div>
+  <div class="nav-right">
+    {% if 'dashboard' in perms %}<a href="/dashboard" class="btn-nav">Dashboard</a>{% endif %}
+    {% if 'costos' in perms %}<a href="/costos" class="btn-nav">Costos</a>{% endif %}
+    {% if 'envios_flex' in perms %}<a href="/costos/envios-flex" class="btn-nav">Envíos Flex</a>{% endif %}
+    {% if 'descuentos' in perms %}<a href="/descuentos" class="btn-nav">Descuentos</a>{% endif %}
+    {% if 'ranking' in perms %}<a href="/ranking" class="btn-nav">Ranking</a>{% endif %}
+    <span style="color:#3483FA;font-weight:500;">Etiquetas</span>
+    <span style="color:#888;">{{ user.name }}</span>
+    {% if user.is_admin %}<a href="/admin" style="font-size:12px;color:#3483FA;text-decoration:none;">Admin</a>{% endif %}
+    <a href="/logout" class="btn-nav">Salir</a>
+  </div>
+</nav>
+
+<main>
+  <h1>Etiquetas de envío</h1>
+  <p class="lead">
+    Trae los envíos listos para despachar, ordenados por SKU. Filtrá por código postal,
+    imprimí las etiquetas (PDF de ML) y descargá el resumen de unidades por SKU para armar los paquetes.
+  </p>
+
+  {% if accounts %}
+  <div class="card">
+    <div class="row">
+      <label>Cuenta ML:</label>
+      <select id="account-select" onchange="onAccountChange()">
+        {% set default_nick = 'TIENDA BAE' %}
+        {% set has_default = accounts | selectattr('nickname', 'equalto', default_nick) | list | length > 0 %}
+        {% for acc in accounts %}
+        <option value="{{ acc.id }}" {% if acc.nickname == default_nick or (not has_default and loop.first) %}selected{% endif %}>{{ acc.nickname }}</option>
+        {% endfor %}
+      </select>
+      <button class="primary" id="btn-load" onclick="loadEnvios()">Cargar envíos a despachar</button>
+      <span id="status-label" style="font-size:12px;color:#888;"></span>
+    </div>
+    <div class="help-box">
+      Se listan solo los envíos <b>listos para despachar</b> con etiqueta imprimible por el vendedor
+      (Mercado Envíos Flex, colecta y agencia). Los de <b>Full</b> y "a acordar" no se incluyen porque no llevan
+      etiqueta tuya. Si un paquete tiene varios SKU, se ordena por su SKU principal.
+    </div>
+    <div id="load-msg"></div>
+  </div>
+
+  <div class="card" id="actions-card" style="display:none;">
+    <div class="row" style="justify-content:space-between;">
+      <div class="row">
+        <label>Código postal:</label>
+        <input type="text" id="zip-filter" placeholder="Ej: 1407" oninput="applyFilter()" style="width:140px;" />
+        <button class="ghost" onclick="clearZip()">Limpiar</button>
+      </div>
+      <div class="row">
+        <button class="primary" id="btn-print" onclick="printLabels()">🖨 Imprimir etiquetas (PDF)</button>
+        <button class="green" id="btn-resumen" onclick="downloadResumen()">⬇ Resumen por SKU (PDF)</button>
+      </div>
+    </div>
+    <div class="summary" style="margin-top:12px;">
+      <span>Envíos seleccionados: <b id="sum-ship">0</b></span>
+      <span>Unidades totales: <b id="sum-units">0</b></span>
+      <span>SKUs distintos: <b id="sum-skus">0</b></span>
+    </div>
+  </div>
+
+  <div class="card" id="table-card" style="display:none;">
+    <h3>Envíos a despachar</h3>
+    <div style="overflow-x:auto;">
+      <table id="ship-table">
+        <thead><tr>
+          <th class="nosort" style="width:34px;"><input type="checkbox" id="check-all" onchange="toggleAll(this)" /></th>
+          <th onclick="sortBy('sku_principal')">SKU ▲▼</th>
+          <th onclick="sortBy('total_units')">Unidades</th>
+          <th onclick="sortBy('zip_code')">Cód. Postal</th>
+          <th onclick="sortBy('receiver')">Destinatario</th>
+          <th class="nosort">Envío</th>
+        </tr></thead>
+        <tbody id="ship-body"></tbody>
+      </table>
+    </div>
+    <div id="table-empty" class="empty" style="display:none;">No hay envíos listos para despachar para esta cuenta.</div>
+  </div>
+
+  <div class="card" id="resumen-card" style="display:none;">
+    <h3>Resumen de unidades por SKU (selección actual)</h3>
+    <div style="overflow-x:auto;">
+      <table>
+        <thead><tr><th class="nosort">SKU</th><th class="nosort num">Unidades</th></tr></thead>
+        <tbody id="resumen-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  {% else %}
+  <div class="card"><div class="no-accounts">No tenés cuentas de Mercado Libre conectadas.</div></div>
+  {% endif %}
+</main>
+
+<script>
+let SHIPMENTS = [];          // filas tal como vienen del backend
+let VIEW = [];               // filas visibles (tras filtro), en orden actual
+let SELECTED = new Set();    // shipment_ids seleccionados
+let sortField = 'sku_principal';
+let sortAsc = true;
+
+function accId() { return document.getElementById('account-select').value; }
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+function onAccountChange() {
+  SHIPMENTS = []; VIEW = []; SELECTED = new Set();
+  document.getElementById('actions-card').style.display = 'none';
+  document.getElementById('table-card').style.display = 'none';
+  document.getElementById('resumen-card').style.display = 'none';
+  document.getElementById('status-label').textContent = '';
+  document.getElementById('load-msg').innerHTML = '';
+}
+
+async function loadEnvios() {
+  const btn = document.getElementById('btn-load');
+  const msg = document.getElementById('load-msg');
+  msg.innerHTML = '';
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>Cargando...';
+  document.getElementById('status-label').textContent = '';
+  try {
+    const r = await fetch(`/api/etiquetas/${accId()}`);
+    if (!r.ok) {
+      const t = await r.text();
+      throw new Error('HTTP ' + r.status + ' — ' + t.slice(0, 200));
+    }
+    const data = await r.json();
+    SHIPMENTS = data.shipments || [];
+    SELECTED = new Set(SHIPMENTS.map(s => String(s.shipment_id)));
+    sortField = 'sku_principal'; sortAsc = true;
+    document.getElementById('status-label').textContent =
+      `${data.total_shipments} envíos · ${data.total_units} unidades`;
+    document.getElementById('actions-card').style.display = SHIPMENTS.length ? 'block' : 'none';
+    document.getElementById('table-card').style.display = 'block';
+    document.getElementById('resumen-card').style.display = SHIPMENTS.length ? 'block' : 'none';
+    applyFilter();
+  } catch (e) {
+    msg.innerHTML = '<div class="msg err">No se pudieron cargar los envíos: ' + esc(e.message) + '</div>';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Cargar envíos a despachar';
+  }
+}
+
+function sortBy(field) {
+  if (sortField === field) sortAsc = !sortAsc; else { sortField = field; sortAsc = true; }
+  applyFilter();
+}
+
+function applyFilter() {
+  const zip = (document.getElementById('zip-filter').value || '').trim().toLowerCase();
+  VIEW = SHIPMENTS.filter(s => !zip || String(s.zip_code || '').toLowerCase().includes(zip));
+  VIEW.sort((a, b) => {
+    let av = a[sortField], bv = b[sortField];
+    if (sortField === 'total_units') { av = +av || 0; bv = +bv || 0; }
+    else { av = String(av || '').toLowerCase(); bv = String(bv || '').toLowerCase(); }
+    if (av < bv) return sortAsc ? -1 : 1;
+    if (av > bv) return sortAsc ? 1 : -1;
+    return 0;
+  });
+  renderTable();
+  renderResumen();
+  updateSummary();
+}
+
+function clearZip() { document.getElementById('zip-filter').value = ''; applyFilter(); }
+
+function renderTable() {
+  const body = document.getElementById('ship-body');
+  const emptyEl = document.getElementById('table-empty');
+  body.innerHTML = '';
+  if (!VIEW.length) { emptyEl.style.display = 'block'; return; }
+  emptyEl.style.display = 'none';
+  for (const s of VIEW) {
+    const id = String(s.shipment_id);
+    const checked = SELECTED.has(id) ? 'checked' : '';
+    const skuLabel = s.skus && s.skus.length > 1
+      ? esc(s.sku_principal) + ' <span class="badge">+' + (s.skus.length - 1) + '</span>'
+      : (esc(s.sku_principal) || '<span class="badge">Sin SKU</span>');
+    const tr = document.createElement('tr');
+    tr.innerHTML =
+      `<td><input type="checkbox" data-id="${id}" ${checked} onchange="onCheck(this)"></td>` +
+      `<td>${skuLabel}</td>` +
+      `<td class="num">${s.total_units}</td>` +
+      `<td>${esc(s.zip_code) || '—'}</td>` +
+      `<td>${esc(s.receiver) || '—'}</td>` +
+      `<td><span class="badge">${esc(s.logistic_type) || '—'}</span></td>`;
+    body.appendChild(tr);
+  }
+  const allChecked = VIEW.every(s => SELECTED.has(String(s.shipment_id)));
+  document.getElementById('check-all').checked = allChecked && VIEW.length > 0;
+}
+
+function onCheck(el) {
+  const id = el.getAttribute('data-id');
+  if (el.checked) SELECTED.add(id); else SELECTED.delete(id);
+  renderResumen(); updateSummary();
+  const allChecked = VIEW.every(s => SELECTED.has(String(s.shipment_id)));
+  document.getElementById('check-all').checked = allChecked && VIEW.length > 0;
+}
+
+function toggleAll(el) {
+  for (const s of VIEW) {
+    const id = String(s.shipment_id);
+    if (el.checked) SELECTED.add(id); else SELECTED.delete(id);
+  }
+  renderTable(); renderResumen(); updateSummary();
+}
+
+// ids seleccionados Y visibles, en el orden actual de la tabla (SKU u otro)
+function selectedVisibleIds() {
+  return VIEW.map(s => String(s.shipment_id)).filter(id => SELECTED.has(id));
+}
+
+function selectedRows() {
+  const ids = new Set(selectedVisibleIds());
+  return VIEW.filter(s => ids.has(String(s.shipment_id)));
+}
+
+function renderResumen() {
+  const agg = {};
+  for (const s of selectedRows()) {
+    for (const it of (s.items || [])) {
+      const sku = it.sku || it.title || 'Sin SKU';
+      agg[sku] = (agg[sku] || 0) + (it.qty || 0);
+    }
+  }
+  const rows = Object.keys(agg).map(k => [k, agg[k]]).sort((a, b) => a[0].localeCompare(b[0]));
+  const body = document.getElementById('resumen-body');
+  body.innerHTML = rows.length
+    ? rows.map(r => `<tr><td>${esc(r[0])}</td><td class="num">${r[1]}</td></tr>`).join('')
+    : '<tr><td colspan="2" class="empty">Sin envíos seleccionados.</td></tr>';
+}
+
+function updateSummary() {
+  const rows = selectedRows();
+  let units = 0; const skus = new Set();
+  for (const s of rows) for (const it of (s.items || [])) {
+    units += (it.qty || 0);
+    skus.add(it.sku || it.title || 'Sin SKU');
+  }
+  document.getElementById('sum-ship').textContent = rows.length;
+  document.getElementById('sum-units').textContent = units;
+  document.getElementById('sum-skus').textContent = skus.size;
+  const none = rows.length === 0;
+  document.getElementById('btn-print').disabled = none;
+  document.getElementById('btn-resumen').disabled = none;
+}
+
+function printLabels() {
+  const ids = selectedVisibleIds();
+  if (!ids.length) return;
+  window.open(`/api/etiquetas/${accId()}/labels.pdf?ids=${encodeURIComponent(ids.join(','))}`, '_blank');
+}
+
+function downloadResumen() {
+  const ids = selectedVisibleIds();
+  if (!ids.length) return;
+  window.location = `/api/etiquetas/${accId()}/resumen.pdf?ids=${encodeURIComponent(ids.join(','))}`;
+}
+</script>
+</body>
+</html>

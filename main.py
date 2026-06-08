@@ -9,7 +9,7 @@ from typing import Optional
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, HTTPException, Form
-from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from itsdangerous import URLSafeTimedSerializer, BadSignature
@@ -2342,6 +2342,299 @@ async def api_ranking(request: Request, account_id: int,
         out.append(r)
     out.sort(key=lambda x: x["facturacion"], reverse=True)
     return {"items": out, "period": {"from": df, "to": dt}}
+
+
+# ════════════════════════ ETIQUETAS (envíos a despachar) ════════════════════════
+# Trae los envíos LISTOS PARA DESPACHAR de una cuenta, arma una fila por envío
+# (SKU, unidades, código postal, destinatario) y permite:
+#   - imprimir las etiquetas listas (PDF que devuelve ML), ordenadas por SKU y
+#     filtrables por código postal;
+#   - descargar un resumen de unidades por SKU en PDF para armar los paquetes.
+# Las etiquetas NO las generamos: las da ML vía /shipment_labels (response_type=pdf).
+
+# Cache liviano por cuenta: que pedir el PDF de etiquetas o el de resumen no
+# tenga que volver a bajar todo de ML.
+ETIQUETAS_CACHE: dict = {}
+ETIQUETAS_CACHE_TTL_SECONDS = 300
+# Tipos logísticos cuyo envío tiene etiqueta imprimible por el vendedor
+# (Mercado Envíos Flex / colecta / agencia / cross-docking). Full y "a acordar"
+# no imprimen etiqueta del vendedor, así que se excluyen.
+ETIQUETAS_PRINTABLE_LOGISTICS = {
+    "self_service", "drop_off", "cross_docking", "xd_drop_off",
+}
+
+
+def _etq_latin(s) -> str:
+    """fpdf2 con fuentes core usa latin-1; reemplaza lo que no entre."""
+    return str(s or "").encode("latin-1", "replace").decode("latin-1")
+
+
+def _etq_sku_sort_key(s):
+    """Ordena por SKU; los vacíos van al final."""
+    s = (s or "").strip().upper()
+    return (s == "", s)
+
+
+async def _fetch_pending_shipments(account_id, acc, token) -> dict:
+    """Baja las ventas listas para despachar (shipping.status=ready_to_ship) y
+    devuelve {str(shipment_id): fila}. Cada fila trae SKU(s), unidades, código
+    postal, destinatario y tipo logístico. Solo envíos con etiqueta imprimible."""
+    headers = {"Authorization": f"Bearer {token}"}
+    seller = acc["ml_user_id"]
+    orders = []
+    async with httpx.AsyncClient(timeout=60) as client:
+        offset = 0
+        for _ in range(60):  # tope defensivo (3000 órdenes pendientes)
+            params = {
+                "seller": seller,
+                "order.status": "paid",
+                "shipping.status": "ready_to_ship",
+                "sort": "date_desc",
+                "limit": 50,
+                "offset": offset,
+            }
+            try:
+                r = await client.get(f"{ML_API_URL}/orders/search", headers=headers, params=params)
+            except Exception:
+                break
+            if r.status_code != 200:
+                break
+            data = r.json()
+            res = data.get("results", []) if isinstance(data, dict) else []
+            if not res:
+                break
+            orders.extend(res)
+            offset += len(res)
+            total = (data.get("paging") or {}).get("total", 0)
+            if offset >= total or len(res) < 50:
+                break
+
+        # Agrupar ítems por shipment_id (un pack/envío puede tener varias órdenes)
+        ship_items: dict = {}
+        for o in orders:
+            shp = o.get("shipping") or {}
+            sid = shp.get("id")
+            if not sid:
+                continue
+            bucket = ship_items.setdefault(sid, [])
+            for it in o.get("order_items", []):
+                itm = it.get("item") or {}
+                bucket.append({
+                    "sku": (itm.get("seller_sku") or "").strip(),
+                    "title": itm.get("title") or "",
+                    "qty": int(it.get("quantity", 1) or 1),
+                })
+
+        # Detalle de cada shipment: código postal, tipo logístico, destinatario
+        sem = asyncio.Semaphore(10)
+
+        async def _get_ship(sid):
+            async with sem:
+                try:
+                    rs = await client.get(f"{ML_API_URL}/shipments/{sid}", headers=headers)
+                    if rs.status_code == 200:
+                        return sid, rs.json()
+                except Exception:
+                    pass
+                return sid, None
+
+        details = await asyncio.gather(*[_get_ship(sid) for sid in ship_items])
+
+    rows: dict = {}
+    for sid, sh in details:
+        items = ship_items.get(sid, [])
+        # Consolidar SKUs repetidos dentro del mismo envío
+        agg: dict = {}
+        for it in items:
+            key = it["sku"] or it["title"] or "Sin SKU"
+            e = agg.setdefault(key, {"sku": it["sku"], "title": it["title"], "qty": 0})
+            e["qty"] += it["qty"]
+        items_list = sorted(agg.values(), key=lambda x: _etq_sku_sort_key(x["sku"]))
+        skus = [e["sku"] for e in items_list if e["sku"]]
+        zip_code = receiver = logistic_type = substatus = ""
+        if isinstance(sh, dict):
+            ra = sh.get("receiver_address") or {}
+            zip_code = str(ra.get("zip_code") or "").strip()
+            receiver = (ra.get("receiver_name") or ra.get("name") or "").strip()
+            logistic_type = (sh.get("logistic_type")
+                             or (sh.get("logistic") or {}).get("type") or "")
+            substatus = sh.get("substatus") or ""
+        # Excluir envíos sin etiqueta imprimible del vendedor (Full / a acordar).
+        # Si el tipo es desconocido (vacío), lo dejamos para no perder envíos.
+        if logistic_type and logistic_type not in ETIQUETAS_PRINTABLE_LOGISTICS:
+            continue
+        rows[str(sid)] = {
+            "shipment_id": sid,
+            "sku_principal": skus[0] if skus else "",
+            "skus": skus,
+            "items": items_list,
+            "total_units": sum(e["qty"] for e in items_list),
+            "zip_code": zip_code,
+            "receiver": receiver,
+            "logistic_type": logistic_type,
+            "substatus": substatus,
+        }
+    return rows
+
+
+def _build_resumen_pdf(items, total_units, account_name="") -> bytes:
+    """Arma el PDF de resumen de unidades por SKU con fpdf2."""
+    from fpdf import FPDF
+    from fpdf.enums import XPos, YPos
+    pdf = FPDF(orientation="P", unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.cell(0, 10, "Resumen de unidades por SKU", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.set_font("Helvetica", "", 10)
+    pdf.set_text_color(110, 110, 110)
+    sub = f"Cuenta: {account_name or '-'}   |   Generado: {datetime.now().strftime('%d/%m/%Y %H:%M')}"
+    pdf.cell(0, 6, _etq_latin(sub), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.set_text_color(0, 0, 0)
+    pdf.ln(4)
+    col_sku, col_qty = 150, 35
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.set_fill_color(240, 240, 238)
+    pdf.cell(col_sku, 8, "SKU", border=1, fill=True)
+    pdf.cell(col_qty, 8, "Unidades", border=1, fill=True, align="R",
+             new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.set_font("Helvetica", "", 10)
+    for e in items:
+        label = e.get("sku") or e.get("title") or "Sin SKU"
+        pdf.cell(col_sku, 7, _etq_latin(label), border=1)
+        pdf.cell(col_qty, 7, str(e.get("units", 0)), border=1, align="R",
+                 new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.set_fill_color(248, 248, 246)
+    pdf.cell(col_sku, 8, "TOTAL", border=1, fill=True)
+    pdf.cell(col_qty, 8, str(total_units), border=1, align="R", fill=True,
+             new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    return bytes(pdf.output())
+
+
+@app.get("/etiquetas", response_class=HTMLResponse)
+async def etiquetas_page(request: Request):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse("/")
+    user = get_user(user_id)
+    require_page(user, "etiquetas")
+    accounts = get_visible_accounts(user_id, user)
+    accounts = await refresh_visible_account_nicknames(accounts)
+    return templates.TemplateResponse("etiquetas.html", {
+        "request": request, "user": user, "accounts": accounts,
+        "perms": user_permissions(user),
+    })
+
+
+@app.get("/api/etiquetas/{account_id}")
+async def api_etiquetas(request: Request, account_id: int):
+    """Lista los envíos listos para despachar de la cuenta + resumen por SKU."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    user = get_user(user_id)
+    require_page(user, "etiquetas")
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    token = await refresh_ml_token(account_id)
+    if not token:
+        raise HTTPException(502)
+    rows = await _fetch_pending_shipments(account_id, acc, token)
+    ETIQUETAS_CACHE[account_id] = {"at": datetime.utcnow(), "rows": rows}
+    shipments = sorted(rows.values(), key=lambda r: _etq_sku_sort_key(r["sku_principal"]))
+    agg: dict = {}
+    for r in rows.values():
+        for it in r["items"]:
+            sku = it.get("sku") or it.get("title") or "Sin SKU"
+            e = agg.setdefault(sku, {"sku": it.get("sku") or "", "title": it.get("title") or "", "units": 0})
+            e["units"] += it["qty"]
+    resumen = sorted(agg.values(), key=lambda x: _etq_sku_sort_key(x["sku"]))
+    return {
+        "shipments": shipments,
+        "resumen": resumen,
+        "total_units": sum(e["units"] for e in resumen),
+        "total_shipments": len(shipments),
+    }
+
+
+def _etq_filter_ids(account_id, ids: str) -> list:
+    """Normaliza el parámetro ids (CSV) e intersecta con lo cacheado de la cuenta
+    (cuando hay cache) para no mandar shipment_ids de otra cuenta a ML."""
+    id_list = [s.strip() for s in (ids or "").split(",") if s.strip()]
+    cache = ETIQUETAS_CACHE.get(account_id)
+    rows = (cache or {}).get("rows") or {}
+    if rows:
+        if id_list:
+            id_list = [s for s in id_list if s in rows]
+        else:
+            id_list = list(rows.keys())
+    return id_list
+
+
+@app.get("/api/etiquetas/{account_id}/labels.pdf")
+async def api_etiquetas_labels(request: Request, account_id: int, ids: str = ""):
+    """Devuelve el PDF combinado de etiquetas (lo genera ML), en el orden de ids."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    user = get_user(user_id)
+    require_page(user, "etiquetas")
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    id_list = _etq_filter_ids(account_id, ids)
+    if not id_list:
+        raise HTTPException(400, "No hay envíos seleccionados para imprimir.")
+    token = await refresh_ml_token(account_id)
+    if not token:
+        raise HTTPException(502)
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(timeout=120) as client:
+        r = await client.get(
+            f"{ML_API_URL}/shipment_labels",
+            headers=headers,
+            params={"shipment_ids": ",".join(id_list), "response_type": "pdf"},
+        )
+    if r.status_code != 200:
+        raise HTTPException(502, f"ML no devolvió las etiquetas (HTTP {r.status_code}): {r.text[:200]}")
+    return Response(
+        content=r.content, media_type="application/pdf",
+        headers={"Content-Disposition": "inline; filename=etiquetas.pdf"},
+    )
+
+
+@app.get("/api/etiquetas/{account_id}/resumen.pdf")
+async def api_etiquetas_resumen(request: Request, account_id: int, ids: str = ""):
+    """Genera el PDF de resumen de unidades por SKU (fpdf2) de los envíos dados."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    user = get_user(user_id)
+    require_page(user, "etiquetas")
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    cache = ETIQUETAS_CACHE.get(account_id)
+    rows = (cache or {}).get("rows") or {}
+    id_list = _etq_filter_ids(account_id, ids)
+    agg: dict = {}
+    for sid in id_list:
+        row = rows.get(str(sid))
+        if not row:
+            continue
+        for it in row["items"]:
+            sku = it.get("sku") or it.get("title") or "Sin SKU"
+            e = agg.setdefault(sku, {"sku": it.get("sku") or "", "title": it.get("title") or "", "units": 0})
+            e["units"] += it["qty"]
+    items = sorted(agg.values(), key=lambda x: _etq_sku_sort_key(x["sku"]))
+    total = sum(e["units"] for e in items)
+    pdf_bytes = _build_resumen_pdf(items, total, acc.get("nickname"))
+    return Response(
+        content=pdf_bytes, media_type="application/pdf",
+        headers={"Content-Disposition": "attachment; filename=resumen_skus.pdf"},
+    )
 
 
 def _normalize_mla(value) -> str:
@@ -5098,6 +5391,7 @@ PAGES = [
     ("envios_flex", "Envíos Flex"),
     ("descuentos",  "Descuentos"),
     ("ranking",     "Ranking por SKU"),
+    ("etiquetas",   "Etiquetas"),
 ]
 PAGE_KEYS = {k for k, _ in PAGES}
 
