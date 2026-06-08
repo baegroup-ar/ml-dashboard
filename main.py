@@ -2554,6 +2554,25 @@ async def _fetch_pending_shipments(account_id, acc, token) -> dict:
             substatus = sh.get("substatus") or ""
             if diag["sample_lead_time"] is None and sh.get("lead_time"):
                 diag["sample_lead_time"] = sh.get("lead_time")
+            # Volcado de estructura del primer envío colecta listo: para ubicar
+            # el campo con la fecha/hora de despacho (la colecta), y así poder
+            # separar "Demoradas" de "Listas" (ML usa el mismo substatus para
+            # ambas y las distingue por esa fecha).
+            if (diag.get("sample_shipment") is None
+                    and logistic_type == "cross_docking"
+                    and substatus == "ready_for_pickup"):
+                diag["sample_shipment"] = {
+                    "keys": sorted(sh.keys()),
+                    "shipping_option": sh.get("shipping_option"),
+                    "status_history": sh.get("status_history"),
+                    "lead_time": sh.get("lead_time"),
+                    "date_fields": {
+                        k: v for k, v in sh.items()
+                        if any(w in k.lower() for w in (
+                            "date", "limit", "estimated", "handling",
+                            "pickup", "ship_date", "schedul"))
+                    },
+                }
         # Excluir Full / "a acordar" / sin tipo: no imprimen etiqueta del vendedor.
         if logistic_type not in ETIQUETAS_ALLOWED_LOGISTICS:
             diag["excluded_logistic"] += 1
