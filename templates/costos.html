@@ -110,6 +110,10 @@
     <div class="upload-row">
       <input type="file" id="file-input" accept=".xlsx,.xlsm,.csv" />
       <button onclick="uploadFile()" id="btn-upload">Subir archivo</button>
+      <a href="#" onclick="downloadCostos(event)"
+         style="padding:8px 14px;border:1px solid #1a8a5a;border-radius:8px;background:#fff;color:#1a8a5a;font-size:13px;text-decoration:none;">
+        ⬇ Descargar cargados
+      </a>
       <a href="/api/costos/template" download="plantilla_costos.xlsx"
          style="padding:8px 14px;border:1px solid #3483FA;border-radius:8px;background:#fff;color:#3483FA;font-size:13px;text-decoration:none;">
         Descargar plantilla
@@ -172,6 +176,13 @@
   function onAccountChange() {
     currentAccountId = document.getElementById('account-select').value;
     loadCosts();
+  }
+
+  function downloadCostos(e) {
+    if (e) e.preventDefault();
+    const aid = document.getElementById('account-select').value;
+    if (!aid) return;
+    window.location = `/api/costos/${aid}/export`;
   }
 
   async function loadCosts() {

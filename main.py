@@ -1634,6 +1634,77 @@ async def api_costos_template(request: Request):
     )
 
 
+@app.get("/api/costos/{account_id}/export")
+async def api_costos_export(request: Request, account_id: int):
+    """Descarga los costos cargados como .xlsx, en el mismo formato que la
+    plantilla (SKU, Costo sin IVA, Fecha, IVA), para editarlo y volver a subirlo."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    user = get_user(user_id)
+    cost_aid = _cost_account_id_for(user, account_id)
+    rows = db_fetchall(
+        "SELECT sku, cost, iva_rate, valid_from FROM product_costs"
+        " WHERE account_id=:aid ORDER BY sku, valid_from DESC",
+        {"aid": cost_aid},
+    )
+    import io
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from fastapi.responses import StreamingResponse
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Costos"
+    ws.append(["SKU", "Costo", "Fecha", "IVA"])
+    fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
+    font = Font(bold=True)
+    for col in range(1, 5):
+        c = ws.cell(row=1, column=col)
+        c.fill = fill
+        c.font = font
+        c.alignment = Alignment(horizontal="center")
+    for r in rows:
+        vf = r.get("valid_from")
+        vf_str = vf.isoformat() if hasattr(vf, "isoformat") else str(vf or "")
+        ws.append([
+            r.get("sku") or "",
+            float(r.get("cost") or 0),
+            vf_str,
+            float(r["iva_rate"] if r.get("iva_rate") is not None else 21),
+        ])
+    ws.column_dimensions["A"].width = 20
+    ws.column_dimensions["B"].width = 14
+    ws.column_dimensions["C"].width = 14
+    ws.column_dimensions["D"].width = 10
+    ws2 = wb.create_sheet("Instrucciones")
+    info = [
+        ["Cómo modificar tus costos desde Excel"],
+        [""],
+        ["1.", "Editá esta planilla: cambiá costos, fechas o IVA, agregá SKUs nuevos."],
+        ["2.", "El Costo va SIN IVA (el sistema aplica la tasa automáticamente)."],
+        ["3.", "Mantené las columnas SKU / Costo / Fecha / IVA (en ese orden)."],
+        ["4.", "Subila desde 'Cargar desde Excel o CSV' con 'Subir archivo'."],
+        ["5.", "Cada SKU + Fecha es una versión histórica; las ventas toman la vigente."],
+    ]
+    for r in info:
+        ws2.append(r)
+    ws2.column_dimensions["A"].width = 6
+    ws2.column_dimensions["B"].width = 90
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    nick = (acc.get("nickname") or acc.get("ml_user_id") or "cuenta").replace(" ", "_")
+    fname = f"costos_{nick}.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
 @app.get("/api/costos/{account_id}")
 async def api_costos_list(request: Request, account_id: int):
     user_id = get_session_user_id(request)
