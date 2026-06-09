@@ -311,6 +311,16 @@ def init_db():
                 PRIMARY KEY (promotion_id, item_id)
             )
         """))
+        # Precios de venta por SKU (base que sube el usuario, para Stock valorizado).
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS product_sale_prices (
+                account_id INTEGER NOT NULL REFERENCES ml_accounts(id) ON DELETE CASCADE,
+                sku TEXT NOT NULL,
+                price NUMERIC(14,2) NOT NULL,
+                updated_at TIMESTAMP DEFAULT NOW(),
+                PRIMARY KEY (account_id, sku)
+            )
+        """))
         # Migrar iva_included → iva_rate UNA VEZ (controlado por app_meta).
         iva_migrated = conn.execute(text(
             "SELECT 1 FROM app_meta WHERE key='iva_rate_migrated'"
@@ -1008,6 +1018,7 @@ PAGE_ROUTES = {
     "descuentos": "/descuentos",
     "ranking": "/ranking",
     "etiquetas": "/etiquetas",
+    "stock": "/stock",
 }
 
 
@@ -1855,6 +1866,391 @@ async def api_costos_upload(request: Request, account_id: int):
     saved = db_save_product_costs(cost_aid, items)
     _invalidate_all_user_accounts_cache(user, account_id)
     return {"ok": True, "saved": saved, "rows_parsed": len(items)}
+
+
+# ════════════════════════ STOCK VALORIZADO ════════════════════════
+# Trae el stock por SKU desde ML, lo cruza con la base de precios de venta (que
+# sube el usuario), la última fecha de compra (de Costos) y la venta promedio de
+# los últimos 7 días, y sugiere reposición según días de cobertura objetivo.
+
+STOCK_CACHE: dict = {}            # account_id -> {"at": dt, "stock": {sku: qty}}
+STOCK_CACHE_TTL_SECONDS = 300
+
+
+def _stock_sku_from_obj(obj: dict) -> str:
+    sku = (obj.get("seller_sku") or "").strip()
+    if sku:
+        return sku
+    for attr in (obj.get("attributes") or []):
+        if isinstance(attr, dict) and attr.get("id") in ("SELLER_SKU", "SELLER_CUSTOM_FIELD"):
+            v = (attr.get("value_name") or attr.get("value") or "").strip()
+            if v:
+                return v
+    return ""
+
+
+def _stock_sku_qty(item: dict):
+    """[(sku, qty)] del item. Si tiene variaciones, una entrada por variación."""
+    out = []
+    variations = item.get("variations") or []
+    if variations:
+        for var in variations:
+            if isinstance(var, dict):
+                out.append((_stock_sku_from_obj(var), int(var.get("available_quantity") or 0)))
+    else:
+        out.append((_stock_sku_from_obj(item), int(item.get("available_quantity") or 0)))
+    return out
+
+
+async def _fetch_stock_by_sku(account_id, acc, token) -> dict:
+    """Devuelve {sku: stock_total} sumando available_quantity de todas las
+    publicaciones activas (y sus variaciones)."""
+    now = datetime.utcnow()
+    cached = STOCK_CACHE.get(account_id)
+    if cached and (now - cached["at"]).total_seconds() < STOCK_CACHE_TTL_SECONDS:
+        return dict(cached["stock"])
+    headers = {"Authorization": f"Bearer {token}"}
+    seller_id = acc["ml_user_id"]
+    stock: dict = {}
+    async with httpx.AsyncClient(timeout=60) as client:
+        ids = await fetch_all_seller_item_ids(client, headers, seller_id)
+        chunks = [ids[i:i + 20] for i in range(0, len(ids), 20)]
+        sem = asyncio.Semaphore(8)
+
+        async def _get_chunk(chunk):
+            async with sem:
+                try:
+                    r = await client.get(
+                        f"{ML_API_URL}/items",
+                        headers=headers,
+                        params={"ids": ",".join(chunk),
+                                "attributes": "id,seller_sku,available_quantity,attributes,variations,status"},
+                    )
+                    if r.status_code == 200:
+                        return r.json()
+                except Exception:
+                    pass
+                return []
+
+        results = await asyncio.gather(*[_get_chunk(c) for c in chunks])
+    for res in results:
+        if not isinstance(res, list):
+            continue
+        for entry in res:
+            body = entry.get("body") if isinstance(entry, dict) else None
+            if not isinstance(body, dict):
+                continue
+            for sku, qty in _stock_sku_qty(body):
+                if sku:
+                    stock[sku] = stock.get(sku, 0) + qty
+    STOCK_CACHE[account_id] = {"at": datetime.utcnow(), "stock": dict(stock)}
+    return stock
+
+
+def _avg_sales_7d_by_sku(account_id) -> dict:
+    """Unidades vendidas (pagadas) por SKU en los últimos 7 días, desde el caché
+    de órdenes (el mismo que usa Ranking)."""
+    today = datetime.utcnow().date()
+    df = str(today - timedelta(days=6))
+    dt = str(today)
+    orders = db_fetch_order_snapshots(account_id, df, dt)
+    units: dict = {}
+    for o in orders:
+        if o.get("estado") != "paid":
+            continue
+        for it in (o.get("items") or []):
+            sku = (it.get("sku") or "").strip()
+            if not sku:
+                continue
+            units[sku] = units.get(sku, 0) + int(it.get("cantidad", 0) or 0)
+    return units
+
+
+def _last_purchase_by_sku(cost_aid) -> dict:
+    rows = db_fetchall(
+        "SELECT sku, MAX(valid_from) AS last FROM product_costs"
+        " WHERE account_id=:a GROUP BY sku",
+        {"a": cost_aid},
+    )
+    out = {}
+    for r in rows:
+        last = r.get("last")
+        out[r["sku"]] = last.isoformat() if hasattr(last, "isoformat") else (str(last) if last else "")
+    return out
+
+
+def _coerce_price(v):
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v).strip().replace("$", "").replace(" ", "")
+    if not s:
+        return None
+    if "," in s and "." in s:
+        s = s.replace(".", "").replace(",", ".")
+    elif "," in s:
+        s = s.replace(",", ".")
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _parse_sale_prices(content: bytes, filename: str) -> list:
+    import io
+    filename = (filename or "").lower()
+    if filename.endswith(".xlsx") or filename.endswith(".xlsm"):
+        from openpyxl import load_workbook
+        wb = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+        rows = list(wb.worksheets[0].iter_rows(values_only=True))
+    else:
+        import csv
+        text_data = content.decode("utf-8-sig", errors="replace")
+        rows = list(csv.reader(io.StringIO(text_data)))
+    out = []
+    for i, row in enumerate(rows):
+        if not row:
+            continue
+        sku = str(row[0] or "").strip()
+        if not sku:
+            continue
+        if i == 0 and "sku" in sku.lower():  # header
+            continue
+        price = _coerce_price(row[1] if len(row) > 1 else None)
+        if price is None:
+            continue
+        out.append({"sku": sku, "price": price})
+    return out
+
+
+def db_save_sale_prices(account_id, items) -> int:
+    saved = 0
+    for it in items:
+        sku = str(it.get("sku") or "").strip()
+        price = it.get("price")
+        if not sku or price is None:
+            continue
+        db_execute(
+            "INSERT INTO product_sale_prices (account_id, sku, price, updated_at)"
+            " VALUES (:a, :s, :p, NOW()) ON CONFLICT (account_id, sku)"
+            " DO UPDATE SET price=EXCLUDED.price, updated_at=NOW()",
+            {"a": account_id, "s": sku, "p": price},
+        )
+        saved += 1
+    return saved
+
+
+@app.get("/stock", response_class=HTMLResponse)
+async def stock_page(request: Request):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse("/")
+    user = get_user(user_id)
+    _r = _page_redirect(user, "stock")
+    if _r:
+        return _r
+    accounts = get_visible_accounts(user_id, user)
+    accounts = await refresh_visible_account_nicknames(accounts)
+    return templates.TemplateResponse("stock.html", {
+        "request": request, "user": user, "accounts": accounts,
+        "perms": user_permissions(user),
+    })
+
+
+@app.get("/api/stock/{account_id:int}")
+async def api_stock(request: Request, account_id: int, target_days: int = 15):
+    """Stock por SKU + precio de venta + última compra + venta prom 7d +
+    reposición sugerida (días de cobertura objetivo)."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    user = get_user(user_id)
+    token = await refresh_ml_token(account_id)
+    if not token:
+        raise HTTPException(502)
+    td = max(1, min(int(target_days or 15), 365))
+    stock = await _fetch_stock_by_sku(account_id, acc, token)
+    sales7 = _avg_sales_7d_by_sku(account_id)
+    cost_aid = _cost_account_id_for(user, account_id)
+    last_buy = _last_purchase_by_sku(cost_aid)
+    price_rows = db_fetchall(
+        "SELECT sku, price FROM product_sale_prices WHERE account_id=:a", {"a": account_id})
+    prices = {r["sku"]: float(r["price"]) for r in price_rows}
+
+    skus = set(stock) | set(sales7)
+    items = []
+    total_valor = 0.0
+    sin_precio = 0
+    for sku in skus:
+        st = int(stock.get(sku, 0))
+        price = prices.get(sku)
+        valor = round(st * price, 2) if price is not None else None
+        if valor is not None:
+            total_valor += valor
+        elif st > 0:
+            sin_precio += 1
+        u7 = int(sales7.get(sku, 0))
+        avg_daily = u7 / 7.0
+        cobertura = round(st / avg_daily, 1) if avg_daily > 0 else None
+        sugerido = max(0, round(avg_daily * td - st)) if avg_daily > 0 else 0
+        items.append({
+            "sku": sku,
+            "stock": st,
+            "price": price,
+            "valor_venta": valor,
+            "ultima_compra": last_buy.get(sku, ""),
+            "ventas_7d": u7,
+            "venta_prom_diaria": round(avg_daily, 2),
+            "dias_cobertura": cobertura,
+            "reposicion_sugerida": sugerido,
+        })
+    items.sort(key=lambda x: (-(x["reposicion_sugerida"] or 0), x["sku"]))
+    return {
+        "items": items,
+        "target_days": td,
+        "total_skus": len(items),
+        "total_stock_units": sum(i["stock"] for i in items),
+        "total_valor_venta": round(total_valor, 2),
+        "skus_sin_precio": sin_precio,
+        "sales_cache_empty": not bool(sales7),
+    }
+
+
+@app.get("/api/stock/prices/template")
+async def api_stock_prices_template(request: Request):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    import io
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from fastapi.responses import StreamingResponse
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Precios"
+    ws.append(["SKU", "Precio de venta"])
+    fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
+    for col in (1, 2):
+        c = ws.cell(row=1, column=col)
+        c.fill = fill
+        c.font = Font(bold=True)
+        c.alignment = Alignment(horizontal="center")
+    for ex in [["SOP68-443", 21000], ["SOP78-446", 49500]]:
+        ws.append(ex)
+    ws.column_dimensions["A"].width = 20
+    ws.column_dimensions["B"].width = 16
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return StreamingResponse(
+        buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="plantilla_precios_venta.xlsx"'})
+
+
+@app.get("/api/stock/{account_id:int}/prices")
+async def api_stock_prices_list(request: Request, account_id: int):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    if not _account_for_user(account_id, user_id):
+        raise HTTPException(404)
+    rows = db_fetchall(
+        "SELECT sku, price, updated_at FROM product_sale_prices"
+        " WHERE account_id=:a ORDER BY sku", {"a": account_id})
+    return {"items": [
+        {"sku": r["sku"], "price": float(r["price"]),
+         "updated_at": r["updated_at"].isoformat() if r.get("updated_at") else None}
+        for r in rows]}
+
+
+@app.post("/api/stock/{account_id:int}/prices")
+async def api_stock_prices_add(request: Request, account_id: int):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    if not _account_for_user(account_id, user_id):
+        raise HTTPException(404)
+    body = await request.json()
+    sku = str(body.get("sku") or "").strip()
+    price = _coerce_price(body.get("price"))
+    if not sku or price is None:
+        raise HTTPException(400, "SKU y precio son obligatorios.")
+    db_save_sale_prices(account_id, [{"sku": sku, "price": price}])
+    return {"ok": True}
+
+
+@app.delete("/api/stock/{account_id:int}/prices/{sku}")
+async def api_stock_prices_delete(request: Request, account_id: int, sku: str):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    if not _account_for_user(account_id, user_id):
+        raise HTTPException(404)
+    db_execute("DELETE FROM product_sale_prices WHERE account_id=:a AND sku=:s",
+               {"a": account_id, "s": sku})
+    return {"ok": True}
+
+
+@app.post("/api/stock/{account_id:int}/prices/upload")
+async def api_stock_prices_upload(request: Request, account_id: int):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    if not _account_for_user(account_id, user_id):
+        raise HTTPException(404)
+    form = await request.form()
+    upload = form.get("file")
+    if upload is None or not hasattr(upload, "read"):
+        raise HTTPException(400, "Falta el archivo")
+    content = await upload.read()
+    try:
+        items = _parse_sale_prices(content, getattr(upload, "filename", "") or "")
+    except Exception as e:
+        raise HTTPException(400, f"No pude leer el archivo: {e}")
+    saved = db_save_sale_prices(account_id, items)
+    return {"ok": True, "saved": saved, "rows_parsed": len(items)}
+
+
+@app.get("/api/stock/{account_id:int}/prices/export")
+async def api_stock_prices_export(request: Request, account_id: int):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    rows = db_fetchall(
+        "SELECT sku, price FROM product_sale_prices WHERE account_id=:a ORDER BY sku",
+        {"a": account_id})
+    import io
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from fastapi.responses import StreamingResponse
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Precios"
+    ws.append(["SKU", "Precio de venta"])
+    fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
+    for col in (1, 2):
+        c = ws.cell(row=1, column=col)
+        c.fill = fill
+        c.font = Font(bold=True)
+        c.alignment = Alignment(horizontal="center")
+    for r in rows:
+        ws.append([r.get("sku") or "", float(r.get("price") or 0)])
+    ws.column_dimensions["A"].width = 20
+    ws.column_dimensions["B"].width = 16
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    nick = (acc.get("nickname") or acc.get("ml_user_id") or "cuenta").replace(" ", "_")
+    return StreamingResponse(
+        buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="precios_venta_{nick}.xlsx"'})
 
 
 # Caché invalidator: cuando cambian los costos hay que recalcular las órdenes.
@@ -6181,6 +6577,7 @@ PAGES = [
     ("descuentos",  "Descuentos"),
     ("ranking",     "Ranking por SKU"),
     ("etiquetas",   "Etiquetas"),
+    ("stock",       "Stock valorizado"),
 ]
 PAGE_KEYS = {k for k, _ in PAGES}
 

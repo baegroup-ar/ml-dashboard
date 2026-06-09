@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Stock valorizado · Panel ML</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Inter', sans-serif; background: #f5f5f3; color: #111; }
+    nav { background: #fff; border-bottom: 1px solid #e5e5e3; padding: 0 1.5rem; height: 56px; display: flex; align-items: center; justify-content: space-between; }
+    .nav-brand { font-weight: 600; font-size: 15px; display: flex; align-items: center; gap: 8px; }
+    .nav-brand span { background: #FFE600; border-radius: 6px; padding: 2px 8px; font-size: 12px; }
+    .nav-right { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+    .btn-nav { padding: 6px 14px; border: 1px solid #ddd; border-radius: 8px; background: #fff; font-size: 13px; cursor: pointer; text-decoration: none; color: #111; }
+    main { max-width: 1320px; margin: 0 auto; padding: 1.5rem; }
+    h1 { font-size: 20px; font-weight: 600; margin-bottom: 6px; }
+    p.lead { font-size: 13px; color: #888; margin-bottom: 1.25rem; }
+    .card { background: #fff; border: 1px solid #e5e5e3; border-radius: 12px; padding: 1.25rem; margin-bottom: 1.25rem; }
+    .card h3 { font-size: 14px; font-weight: 600; color: #444; margin-bottom: 12px; }
+    .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .row label { font-size: 13px; color: #666; }
+    .row select, .row input { padding: 7px 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 13px; font-family: 'Inter', sans-serif; }
+    .row select { min-width: 220px; }
+    button.primary { padding: 8px 16px; border: none; border-radius: 8px; background: #3483FA; color: #fff; font-size: 13px; cursor: pointer; }
+    button.green { padding: 8px 16px; border: none; border-radius: 8px; background: #1a8a5a; color: #fff; font-size: 13px; cursor: pointer; }
+    button.ghost { padding: 8px 14px; border: 1px solid #ddd; border-radius: 8px; background: #fff; color: #111; font-size: 13px; cursor: pointer; }
+    button:disabled { background: #ccc !important; color: #fff !important; cursor: not-allowed; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 12px; }
+    th { padding: 9px 12px; text-align: left; color: #888; font-weight: 500; border-bottom: 1px solid #eee; font-size: 12px; }
+    td { padding: 8px 12px; border-bottom: 1px solid #f0f0ee; color: #333; }
+    tbody tr:hover { background: #fafaf8; }
+    .num { text-align: right; font-variant-numeric: tabular-nums; }
+    .empty { padding: 2rem; text-align: center; color: #aaa; font-size: 13px; }
+    .badge { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 99px; font-weight: 500; }
+    .badge.rep { background: #fdecea; color: #c0392b; }
+    .badge.ok { background: #e6f5ee; color: #1a8a5a; }
+    .badge.warn { background: #fef0e6; color: #c47a1e; }
+    .summary { display: flex; gap: 22px; font-size: 13px; padding: 6px 0; flex-wrap: wrap; }
+    .summary b { color: #111; font-size: 15px; }
+    .summary .lbl { color: #888; display: block; font-size: 11px; }
+    .help-box { background: #f5f5f3; border-left: 3px solid #3483FA; padding: 10px 14px; font-size: 12px; color: #666; margin-top: 10px; }
+    .help-box code { background: #fff; padding: 1px 6px; border-radius: 4px; border: 1px solid #e5e5e3; font-family: monospace; }
+    .msg { padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-top: 10px; }
+    .msg.ok { background: #e6f5ee; color: #1a8a5a; border: 1px solid #c5e9d8; }
+    .msg.err { background: #fce9e9; color: #c0392b; border: 1px solid #f5c6c6; }
+    .btn-delete { color: #c0392b; background: none; border: none; cursor: pointer; font-size: 12px; }
+    .no-accounts { text-align: center; padding: 4rem; color: #888; font-size: 14px; }
+    .spinner { display:inline-block; width:13px; height:13px; border:2px solid rgba(255,255,255,.5); border-top-color:#fff; border-radius:50%; animation:spin .7s linear infinite; vertical-align:-2px; margin-right:6px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+<nav>
+  <div class="nav-brand">
+    <div style="width:24px;height:24px;background:#FFE600;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;">ML</div>
+    Panel de ventas <span>Beta</span>
+  </div>
+  <div class="nav-right">
+    {% if 'dashboard' in perms %}<a href="/dashboard" class="btn-nav">Dashboard</a>{% endif %}
+    {% if 'costos' in perms %}<a href="/costos" class="btn-nav">Costos</a>{% endif %}
+    {% if 'envios_flex' in perms %}<a href="/costos/envios-flex" class="btn-nav">Envíos Flex</a>{% endif %}
+    {% if 'descuentos' in perms %}<a href="/descuentos" class="btn-nav">Descuentos</a>{% endif %}
+    {% if 'ranking' in perms %}<a href="/ranking" class="btn-nav">Ranking</a>{% endif %}
+    {% if 'etiquetas' in perms %}<a href="/etiquetas" class="btn-nav">Etiquetas</a>{% endif %}
+    <span style="color:#3483FA;font-weight:500;">Stock valorizado</span>
+    <span style="color:#888;">{{ user.name }}</span>
+    {% if user.is_admin %}<a href="/admin" style="font-size:12px;color:#3483FA;text-decoration:none;">Admin</a>{% endif %}
+    <a href="/logout" class="btn-nav">Salir</a>
+  </div>
+</nav>
+
+<main>
+  <h1>Stock valorizado</h1>
+  <p class="lead">
+    Stock por SKU traído de Mercado Libre, valorizado a tu precio de venta. Trae la última fecha de compra
+    (de Costos) y la venta promedio de los últimos 7 días, y sugiere reposición según los días de cobertura objetivo.
+  </p>
+
+  {% if accounts %}
+  <div class="card">
+    <div class="row">
+      <label>Cuenta ML:</label>
+      <select id="account-select" onchange="onAccountChange()">
+        {% set default_nick = 'TIENDA BAE' %}
+        {% set has_default = accounts | selectattr('nickname', 'equalto', default_nick) | list | length > 0 %}
+        {% for acc in accounts %}
+        <option value="{{ acc.id }}" {% if acc.nickname == default_nick or (not has_default and loop.first) %}selected{% endif %}>{{ acc.nickname }}</option>
+        {% endfor %}
+      </select>
+      <button class="primary" id="btn-load" onclick="loadStock()">Cargar stock</button>
+      <span id="status-label" style="font-size:12px;color:#888;"></span>
+    </div>
+    <div id="load-msg"></div>
+  </div>
+
+  <!-- Base de precios de venta -->
+  <div class="card">
+    <h3>Base de precios de venta por SKU</h3>
+    <div class="row" style="flex-wrap:wrap;">
+      <input type="file" id="price-file" accept=".xlsx,.xlsm,.csv" />
+      <button class="green" onclick="uploadPrices()" id="btn-price-upload">Subir archivo</button>
+      <a href="#" onclick="downloadPrices(event)" style="padding:8px 14px;border:1px solid #1a8a5a;border-radius:8px;background:#fff;color:#1a8a5a;font-size:13px;text-decoration:none;">⬇ Descargar cargados</a>
+      <a href="/api/stock/prices/template" download="plantilla_precios_venta.xlsx" style="padding:8px 14px;border:1px solid #3483FA;border-radius:8px;background:#fff;color:#3483FA;font-size:13px;text-decoration:none;">Descargar plantilla</a>
+    </div>
+    <div class="help-box">Columnas esperadas: <code>SKU</code> y <code>Precio de venta</code>. Subir actualiza los SKU existentes y agrega los nuevos.</div>
+    <div class="row" style="margin-top:12px;">
+      <input type="text" id="price-sku" placeholder="SKU" style="width:200px;text-transform:uppercase;" />
+      <input type="number" id="price-val" placeholder="Precio de venta" step="0.01" style="width:160px;" />
+      <button class="primary" onclick="addPrice()">Agregar / actualizar</button>
+      <span id="price-msg" style="font-size:12px;color:#888;"></span>
+    </div>
+  </div>
+
+  <div class="card" id="result-card" style="display:none;">
+    <div class="row" style="justify-content:space-between;">
+      <div class="row">
+        <input type="text" id="search" placeholder="Buscar SKU..." oninput="renderTable()" style="width:220px;" />
+        <label>Días de cobertura objetivo:</label>
+        <input type="number" id="target-days" value="15" min="1" max="365" oninput="renderTable()" style="width:80px;" />
+        <label style="font-size:12px;"><input type="checkbox" id="only-rep" onchange="renderTable()" style="vertical-align:-2px;"> Solo con reposición</label>
+      </div>
+    </div>
+    <div class="summary" style="margin-top:12px;">
+      <span><span class="lbl">SKUs</span><b id="sum-skus">0</b></span>
+      <span><span class="lbl">Unidades en stock</span><b id="sum-units">0</b></span>
+      <span><span class="lbl">Valor a precio de venta</span><b id="sum-valor">$0</b></span>
+      <span><span class="lbl">SKUs con stock sin precio</span><b id="sum-sinprecio">0</b></span>
+    </div>
+    <div id="sales-warn"></div>
+    <div style="overflow-x:auto;">
+      <table>
+        <thead><tr>
+          <th>SKU</th><th class="num">Stock</th><th class="num">Precio venta</th>
+          <th class="num">Valor a venta</th><th>Última compra</th>
+          <th class="num">Ventas 7d</th><th class="num">Prom/día</th>
+          <th class="num">Días cob.</th><th class="num">Reposición sug.</th>
+        </tr></thead>
+        <tbody id="stock-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  {% else %}
+  <div class="card"><div class="no-accounts">No tenés cuentas de Mercado Libre conectadas.</div></div>
+  {% endif %}
+</main>
+
+<script>
+const fmt = n => '$' + Number(n || 0).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+let DATA = null;
+function accId() { return document.getElementById('account-select').value; }
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+function onAccountChange() {
+  DATA = null;
+  document.getElementById('result-card').style.display = 'none';
+  document.getElementById('status-label').textContent = '';
+  document.getElementById('load-msg').innerHTML = '';
+}
+
+async function loadStock() {
+  const btn = document.getElementById('btn-load');
+  const msg = document.getElementById('load-msg');
+  msg.innerHTML = '';
+  btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>Cargando stock...';
+  try {
+    const r = await fetch(`/api/stock/${accId()}`);
+    if (!r.ok) throw new Error('HTTP ' + r.status + ' — ' + (await r.text()).slice(0, 200));
+    DATA = await r.json();
+    document.getElementById('result-card').style.display = 'block';
+    document.getElementById('status-label').textContent =
+      `${DATA.total_skus} SKUs · ${DATA.total_stock_units} unidades`;
+    renderTable();
+  } catch (e) {
+    msg.innerHTML = '<div class="msg err">No se pudo cargar el stock: ' + esc(e.message) + '</div>';
+  } finally {
+    btn.disabled = false; btn.textContent = 'Cargar stock';
+  }
+}
+
+function renderTable() {
+  if (!DATA) return;
+  const td = Math.max(1, parseInt(document.getElementById('target-days').value) || 15);
+  const q = (document.getElementById('search').value || '').trim().toLowerCase();
+  const onlyRep = document.getElementById('only-rep').checked;
+  let rows = (DATA.items || []).map(it => {
+    const avg = (it.ventas_7d || 0) / 7;
+    const sugerido = avg > 0 ? Math.max(0, Math.round(avg * td - it.stock)) : 0;
+    const cobertura = avg > 0 ? Math.round((it.stock / avg) * 10) / 10 : null;
+    return Object.assign({}, it, { _sug: sugerido, _cob: cobertura, _avg: avg });
+  });
+  if (q) rows = rows.filter(r => (r.sku || '').toLowerCase().includes(q));
+  if (onlyRep) rows = rows.filter(r => r._sug > 0);
+  rows.sort((a, b) => (b._sug - a._sug) || a.sku.localeCompare(b.sku));
+
+  let totalValor = 0, totalUnits = 0, sinPrecio = 0;
+  for (const r of (DATA.items || [])) {
+    totalUnits += r.stock;
+    if (r.price != null) totalValor += (r.valor_venta || 0);
+    else if (r.stock > 0) sinPrecio += 1;
+  }
+  document.getElementById('sum-skus').textContent = (DATA.items || []).length;
+  document.getElementById('sum-units').textContent = totalUnits;
+  document.getElementById('sum-valor').textContent = fmt(totalValor);
+  document.getElementById('sum-sinprecio').textContent = sinPrecio;
+
+  document.getElementById('sales-warn').innerHTML = DATA.sales_cache_empty
+    ? '<div class="msg err">No hay ventas en caché para los últimos 7 días. Cargá el Dashboard de esta cuenta para que la venta promedio y la reposición funcionen.</div>'
+    : '';
+
+  const body = document.getElementById('stock-body');
+  if (!rows.length) { body.innerHTML = '<tr><td colspan="9" class="empty">Sin datos.</td></tr>'; return; }
+  body.innerHTML = rows.map(r => {
+    const cob = r._cob == null ? '—' : (r._cob + ' d');
+    const repBadge = r._sug > 0
+      ? `<span class="badge rep">${r._sug}</span>`
+      : (r.stock > 0 ? '<span class="badge ok">OK</span>' : '<span class="badge warn">0</span>');
+    return `<tr>
+      <td><b>${esc(r.sku)}</b></td>
+      <td class="num">${r.stock}</td>
+      <td class="num">${r.price != null ? fmt(r.price) : '—'}</td>
+      <td class="num">${r.valor_venta != null ? fmt(r.valor_venta) : '—'}</td>
+      <td>${esc(r.ultima_compra) || '—'}</td>
+      <td class="num">${r.ventas_7d}</td>
+      <td class="num">${r._avg.toFixed(2)}</td>
+      <td class="num">${cob}</td>
+      <td class="num">${repBadge}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ── Base de precios ──
+function downloadPrices(e) { if (e) e.preventDefault(); window.location = `/api/stock/${accId()}/prices/export`; }
+
+async function uploadPrices() {
+  const f = document.getElementById('price-file').files[0];
+  const msg = document.getElementById('price-msg');
+  if (!f) { msg.textContent = 'Elegí un archivo.'; return; }
+  const btn = document.getElementById('btn-price-upload');
+  btn.disabled = true; const fd = new FormData(); fd.append('file', f);
+  try {
+    const r = await fetch(`/api/stock/${accId()}/prices/upload`, { method: 'POST', body: fd });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.detail || 'error');
+    msg.textContent = `Listo: ${j.saved} precios cargados.`;
+    if (DATA) loadStock();
+  } catch (e) { msg.textContent = 'Error: ' + e.message; }
+  finally { btn.disabled = false; }
+}
+
+async function addPrice() {
+  const sku = (document.getElementById('price-sku').value || '').trim();
+  const price = document.getElementById('price-val').value;
+  const msg = document.getElementById('price-msg');
+  if (!sku || price === '') { msg.textContent = 'SKU y precio obligatorios.'; return; }
+  try {
+    const r = await fetch(`/api/stock/${accId()}/prices`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sku, price }) });
+    if (!r.ok) throw new Error('error');
+    msg.textContent = 'Precio guardado.';
+    document.getElementById('price-sku').value = ''; document.getElementById('price-val').value = '';
+    if (DATA) loadStock();
+  } catch (e) { msg.textContent = 'Error: ' + e.message; }
+}
+</script>
+</body>
+</html>
