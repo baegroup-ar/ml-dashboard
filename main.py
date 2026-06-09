@@ -1008,21 +1008,33 @@ PAGE_ROUTES = {
 }
 
 
-def _landing_path(user) -> str:
-    """Primera pestaña (en orden de PAGES) que el usuario puede ver. Evita el 403
-    cuando no tiene permiso de Dashboard."""
+def _landing_path(user):
+    """Primera pestaña (en orden de PAGES) que el usuario puede ver, o None si no
+    tiene ninguna. Evita el 403 cuando no tiene permiso de Dashboard."""
     perms = user_permissions(user)
     for key, _label in PAGES:
         if key in perms:
-            return PAGE_ROUTES.get(key, "/dashboard")
-    return "/dashboard"
+            return PAGE_ROUTES.get(key)
+    return None
+
+
+def _page_redirect(user, page):
+    """Para handlers de PÁGINA (HTML): si el usuario no tiene la pestaña, devuelve
+    un RedirectResponse a la primera que sí tenga (en vez de cortar con 403). Si
+    no tiene ninguna, recién ahí 403."""
+    if page in user_permissions(user):
+        return None
+    landing = _landing_path(user)
+    if landing and landing != PAGE_ROUTES.get(page):
+        return RedirectResponse(landing)
+    raise HTTPException(403, "No tenés permiso para acceder a esta sección")
 
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     uid = get_session_user_id(request)
     if uid:
-        return RedirectResponse(_landing_path(get_user(uid)))
+        return RedirectResponse(_landing_path(get_user(uid)) or "/dashboard")
     return templates.TemplateResponse("login.html", {"request": request, "error": None})
 
 
@@ -1036,7 +1048,7 @@ async def do_login(request: Request, email: str = Form(...), password: str = For
     if not user or not user.get("password_hash") or not bcrypt.checkpw(password.encode(), user["password_hash"].encode()):
         return templates.TemplateResponse("login.html", {"request": request, "error": "Email o contraseña incorrectos"})
     session_token = serializer.dumps(user["id"])
-    response = RedirectResponse(_landing_path(user), status_code=303)
+    response = RedirectResponse(_landing_path(user) or "/dashboard", status_code=303)
     response.set_cookie("session", session_token, max_age=86400 * 7, httponly=True)
     return response
 
@@ -1156,7 +1168,9 @@ async def dashboard(request: Request):
     if not user_id:
         return RedirectResponse("/")
     user = get_user(user_id)
-    require_page(user, "dashboard")
+    _r = _page_redirect(user, "dashboard")
+    if _r:
+        return _r
     accounts = get_visible_accounts(user_id, user)
     accounts = await refresh_visible_account_nicknames(accounts)
     return templates.TemplateResponse("dashboard.html", {
@@ -1520,7 +1534,9 @@ async def costos_page(request: Request):
     if not user_id:
         return RedirectResponse("/")
     user = get_user(user_id)
-    require_page(user, "costos")
+    _r = _page_redirect(user, "costos")
+    if _r:
+        return _r
     accounts = get_visible_accounts(user_id, user)
     accounts = await refresh_visible_account_nicknames(accounts)
     return templates.TemplateResponse("costos.html", {
@@ -1779,7 +1795,9 @@ async def envios_flex_page(request: Request):
     if not user_id:
         return RedirectResponse("/")
     user = get_user(user_id)
-    require_page(user, "envios_flex")
+    _r = _page_redirect(user, "envios_flex")
+    if _r:
+        return _r
     accounts = get_visible_accounts(user_id, user)
     accounts = await refresh_visible_account_nicknames(accounts)
     return templates.TemplateResponse("envios_flex.html", {
@@ -2248,7 +2266,9 @@ async def descuentos_page(request: Request):
     if not user_id:
         return RedirectResponse("/")
     user = get_user(user_id)
-    require_page(user, "descuentos")
+    _r = _page_redirect(user, "descuentos")
+    if _r:
+        return _r
     accounts = get_visible_accounts(user_id, user)
     accounts = await refresh_visible_account_nicknames(accounts)
     return templates.TemplateResponse("descuentos.html", {
@@ -2263,7 +2283,9 @@ async def ranking_page(request: Request):
     if not user_id:
         return RedirectResponse("/")
     user = get_user(user_id)
-    require_page(user, "ranking")
+    _r = _page_redirect(user, "ranking")
+    if _r:
+        return _r
     accounts = get_visible_accounts(user_id, user)
     accounts = await refresh_visible_account_nicknames(accounts)
     return templates.TemplateResponse("ranking.html", {
@@ -2857,7 +2879,9 @@ async def etiquetas_page(request: Request):
     if not user_id:
         return RedirectResponse("/")
     user = get_user(user_id)
-    require_page(user, "etiquetas")
+    _r = _page_redirect(user, "etiquetas")
+    if _r:
+        return _r
     accounts = get_visible_accounts(user_id, user)
     accounts = await refresh_visible_account_nicknames(accounts)
     return templates.TemplateResponse("etiquetas.html", {
