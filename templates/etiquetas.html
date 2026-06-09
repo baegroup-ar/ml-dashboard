@@ -68,7 +68,7 @@
 </nav>
 
 <main>
-  <h1>Etiquetas de envío <span style="font-size:11px;color:#bbb;font-weight:400;">build etq-20</span></h1>
+  <h1>Etiquetas de envío <span style="font-size:11px;color:#bbb;font-weight:400;">build etq-21</span></h1>
   <p class="lead">
     Envíos de hoy agrupados como en ML (Colecta y Flex, con sus sub-estados). Filtrá por código postal,
     imprimí las etiquetas (PDF de ML) ordenadas por SKU y descargá el resumen de unidades por SKU para armar los paquetes.
@@ -640,8 +640,13 @@ async function postPdf(url, ids, filename, openInline, btn) {
     }
     const blob = await r.blob();
     const u = URL.createObjectURL(blob);
-    if (openInline) window.open(u, '_blank');
-    else { const a = document.createElement('a'); a.href = u; a.download = filename; document.body.appendChild(a); a.click(); a.remove(); }
+    const dl = () => { const a = document.createElement('a'); a.href = u; a.download = filename; document.body.appendChild(a); a.click(); a.remove(); };
+    if (openInline) {
+      // Tras el await el navegador suele bloquear window.open (pop-up): si lo
+      // bloquea, descargamos el PDF para que nunca quede sin generar.
+      const w = window.open(u, '_blank');
+      if (!w) dl();
+    } else { dl(); }
     setTimeout(() => URL.revokeObjectURL(u), 60000);
   } catch (e) {
     alert('Error de red: ' + e.message);
