@@ -67,7 +67,7 @@
 </nav>
 
 <main>
-  <h1>Etiquetas de envío <span style="font-size:11px;color:#bbb;font-weight:400;">build etq-16</span></h1>
+  <h1>Etiquetas de envío <span style="font-size:11px;color:#bbb;font-weight:400;">build etq-17</span></h1>
   <p class="lead">
     Envíos de hoy agrupados como en ML (Colecta y Flex, con sus sub-estados). Filtrá por código postal,
     imprimí las etiquetas (PDF de ML) ordenadas por SKU y descargá el resumen de unidades por SKU para armar los paquetes.
@@ -440,13 +440,8 @@ function rowHtml(s) {
   </tr>`;
 }
 
-function bucketHtml(gk, bk, rows) {
-  const units = rows.reduce((a, s) => a + (s.total_units || 0), 0);
-  const allChecked = rows.every(s => SELECTED.has(String(s.shipment_id)));
-  const key = bucketKeyOf(gk, bk);
-  const open = filtersActive() || EXPANDED.has(key);
-  const caret = open ? '▼' : '▶';
-  const body = open ? `<div style="overflow-x:auto;">
+function rowsTableHtml(rows) {
+  return `<div style="overflow-x:auto;">
       <table>
         <thead><tr>
           <th class="nosort" style="width:34px;"></th>
@@ -458,7 +453,31 @@ function bucketHtml(gk, bk, rows) {
         </tr></thead>
         <tbody>${rows.map(rowHtml).join('')}</tbody>
       </table>
-    </div>` : '';
+    </div>`;
+}
+
+function bucketHtml(gk, bk, rows) {
+  const units = rows.reduce((a, s) => a + (s.total_units || 0), 0);
+  const allChecked = rows.every(s => SELECTED.has(String(s.shipment_id)));
+  const key = bucketKeyOf(gk, bk);
+  const open = filtersActive() || EXPANDED.has(key);
+  const caret = open ? '▼' : '▶';
+  // Flex: dividir por zona (cercanas / lejanas), segun los CP del GBA.
+  let inner = rowsTableHtml(rows);
+  if (gk === 'flex') {
+    const g = { cercana: [], lejana: [], otras: [] };
+    for (const s of rows) g[s.distancia === 'cercana' ? 'cercana' : (s.distancia === 'lejana' ? 'lejana' : 'otras')].push(s);
+    const sub = (rws, label) => {
+      if (!rws.length) return '';
+      const u = rws.reduce((a, s) => a + (s.total_units || 0), 0);
+      return `<div style="margin-top:6px;">
+        <div style="font-size:12px;font-weight:600;color:#555;margin:8px 0 2px;">${label}
+          <span style="color:#888;font-weight:400;">· ${rws.length} envíos · ${u} u.</span></div>
+        ${rowsTableHtml(rws)}</div>`;
+    };
+    inner = sub(g.cercana, '📍 Zonas cercanas') + sub(g.lejana, '🚚 Zonas lejanas') + sub(g.otras, '❓ Otras zonas');
+  }
+  const body = open ? inner : '';
   return `<div style="margin-top:12px;">
     <div onclick="toggleExpand('${key}')" style="display:flex;align-items:center;gap:10px;padding:8px 6px;border-bottom:1px solid #eee;cursor:pointer;background:#fafaf8;border-radius:6px;">
       <span style="color:#999;font-size:11px;width:12px;">${caret}</span>

@@ -2372,6 +2372,43 @@ ETIQUETAS_GROUP_FOR_LOGISTIC = {
     "drop_off": ("agencia", "Agencia"),
     "xd_drop_off": ("agencia", "Agencia"),
 }
+# Rangos de código postal GBA → distancia (cercana/lejana), del archivo
+# "codigos_postales_gba.xlsx". Para Flex separamos las etiquetas por zona.
+# (low, high, distancia). Al matchear se usa el rango MÁS ANGOSTO que contenga
+# el CP (hay solapamientos donde un partido lejano cae dentro de uno cercano).
+GBA_CP_RANGES = [
+    (1000, 1499, "cercana"), (1602, 1638, "cercana"), (1611, 1616, "lejana"),
+    (1619, 1619, "lejana"), (1621, 1621, "lejana"), (1623, 1623, "lejana"),
+    (1625, 1625, "lejana"), (1629, 1629, "lejana"), (1629, 1631, "lejana"),
+    (1640, 1644, "cercana"), (1646, 1646, "lejana"), (1648, 1649, "lejana"),
+    (1650, 1672, "cercana"), (1661, 1664, "lejana"), (1665, 1665, "lejana"),
+    (1669, 1669, "lejana"), (1670, 1670, "lejana"), (1678, 1685, "cercana"),
+    (1686, 1688, "lejana"), (1706, 1712, "lejana"), (1714, 1714, "lejana"),
+    (1722, 1728, "lejana"), (1727, 1727, "lejana"), (1744, 1746, "lejana"),
+    (1748, 1748, "lejana"), (1752, 1766, "lejana"), (1759, 1778, "lejana"),
+    (1802, 1806, "lejana"), (1813, 1813, "lejana"), (1814, 1814, "lejana"),
+    (1822, 1826, "lejana"), (1828, 1838, "lejana"), (1840, 1852, "lejana"),
+    (1842, 1844, "lejana"), (1858, 1858, "lejana"), (1870, 1878, "lejana"),
+    (1878, 1882, "lejana"), (1880, 1893, "lejana"), (1888, 1889, "lejana"),
+    (1894, 1902, "lejana"), (1900, 1900, "lejana"), (1903, 1904, "lejana"),
+    (1923, 1923, "lejana"), (1925, 1925, "lejana"), (2800, 2800, "lejana"),
+    (2804, 2804, "lejana"), (6700, 6700, "lejana"),
+]
+
+
+def _zona_distancia(zip_code) -> str:
+    """cercana / lejana / '' según el CP (rango más angosto que lo contenga)."""
+    digits = "".join(ch for ch in str(zip_code or "") if ch.isdigit())[:4]
+    if not digits:
+        return ""
+    z = int(digits)
+    best = None  # (span, distancia)
+    for low, high, dist in GBA_CP_RANGES:
+        if low <= z <= high:
+            span = high - low
+            if best is None or span < best[0]:
+                best = (span, dist)
+    return best[1] if best else ""
 # Buckets que SÍ hay que despachar/armar (los que entran al resumen por SKU y
 # quedan seleccionados por defecto). Canceladas y reprogramadas no se arman.
 ETIQUETAS_PACKABLE_BUCKETS = {"listas", "etiquetas", "demoradas"}
@@ -2746,6 +2783,7 @@ async def _fetch_pending_shipments(account_id, acc, token) -> dict:
             "zip_code": zip_code,
             "zona": zona,
             "localidad": localidad,
+            "distancia": _zona_distancia(zip_code),
             "receiver": receiver,
             "dispatch_date": dispatch_date,
             "ready_date": ready_date,
