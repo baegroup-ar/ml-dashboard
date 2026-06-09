@@ -997,10 +997,32 @@ async def get_shipping_cost(client, shipping_id, headers) -> dict:
 
 # ── Auth ────────────────────────────────────────────────────────
 
+# Ruta de cada pestaña (para mandar al usuario a la primera que tenga permitida).
+PAGE_ROUTES = {
+    "dashboard": "/dashboard",
+    "costos": "/costos",
+    "envios_flex": "/costos/envios-flex",
+    "descuentos": "/descuentos",
+    "ranking": "/ranking",
+    "etiquetas": "/etiquetas",
+}
+
+
+def _landing_path(user) -> str:
+    """Primera pestaña (en orden de PAGES) que el usuario puede ver. Evita el 403
+    cuando no tiene permiso de Dashboard."""
+    perms = user_permissions(user)
+    for key, _label in PAGES:
+        if key in perms:
+            return PAGE_ROUTES.get(key, "/dashboard")
+    return "/dashboard"
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    if get_session_user_id(request):
-        return RedirectResponse("/dashboard")
+    uid = get_session_user_id(request)
+    if uid:
+        return RedirectResponse(_landing_path(get_user(uid)))
     return templates.TemplateResponse("login.html", {"request": request, "error": None})
 
 
@@ -1014,7 +1036,7 @@ async def do_login(request: Request, email: str = Form(...), password: str = For
     if not user or not user.get("password_hash") or not bcrypt.checkpw(password.encode(), user["password_hash"].encode()):
         return templates.TemplateResponse("login.html", {"request": request, "error": "Email o contraseña incorrectos"})
     session_token = serializer.dumps(user["id"])
-    response = RedirectResponse("/dashboard", status_code=303)
+    response = RedirectResponse(_landing_path(user), status_code=303)
     response.set_cookie("session", session_token, max_age=86400 * 7, httponly=True)
     return response
 
