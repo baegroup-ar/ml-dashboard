@@ -166,6 +166,9 @@ def init_db():
         conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_token TEXT"))
         conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_expires_at TIMESTAMP"))
         conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_master BOOLEAN DEFAULT FALSE"))
+        # owner_id: el admin "dueño" de un colaborador. El colaborador ve las
+        # cuentas de ML de su dueño. NULL para admins/master (cuentas propias).
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS owner_id INTEGER"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_users_reset_token ON users(reset_token)"))
         conn.execute(text("ALTER TABLE ml_accounts ADD COLUMN IF NOT EXISTS cache_fetched_from DATE DEFAULT NULL"))
         # Backfill: set cache_fetched_from from existing order_snapshot_cache so existing accounts
@@ -1062,14 +1065,23 @@ async def logout():
 
 # ── Dashboard ───────────────────────────────────────────────────
 
+def _accounts_owner_id(user: Optional[dict], user_id: int) -> int:
+    """Dueño de las cuentas de ML que ve un usuario: si es colaborador (tiene
+    owner_id), las del dueño; si no, las propias."""
+    if user and user.get("owner_id"):
+        return user["owner_id"]
+    return user_id
+
+
 def _account_for_user(account_id: int, user_id: int):
-    """Devuelve la cuenta ML propia del usuario si puede operarla."""
+    """Devuelve la cuenta ML que el usuario (o su dueño) puede operar."""
     user = get_user(user_id)
     if not user:
         return None
+    owner = _accounts_owner_id(user, user_id)
     return db_fetchone(
         "SELECT * FROM ml_accounts WHERE id=:id AND user_id=:uid",
-        {"id": account_id, "uid": user_id},
+        {"id": account_id, "uid": owner},
     )
 
 
@@ -1077,9 +1089,10 @@ def _cost_account_id_for(user: dict, account_id: int) -> int:
     """Admin users share costs/flex across all their accounts; master uses per-account costs."""
     if is_master_user(user):
         return account_id
+    owner = _accounts_owner_id(user, user["id"])
     row = db_fetchone(
         "SELECT MIN(id) as min_id FROM ml_accounts WHERE user_id=:uid",
-        {"uid": user["id"]}
+        {"uid": owner}
     )
     return (row["min_id"] if row and row["min_id"] else account_id)
 
@@ -1089,18 +1102,21 @@ def _invalidate_all_user_accounts_cache(user: dict, account_id: int):
     if is_master_user(user):
         invalidate_orders_cache_for_account(account_id)
         return
-    accs = db_fetchall("SELECT id FROM ml_accounts WHERE user_id=:uid", {"uid": user["id"]})
+    owner = _accounts_owner_id(user, user["id"])
+    accs = db_fetchall("SELECT id FROM ml_accounts WHERE user_id=:uid", {"uid": owner})
     for a in accs:
         invalidate_orders_cache_for_account(a["id"])
 
 
 def get_visible_accounts(user_id: int, user: dict) -> list:
-    """Cuentas ML propias del usuario. Los permisos solo controlan pestanas."""
+    """Cuentas ML que ve el usuario: las propias, o las del dueño si es
+    colaborador. Los permisos solo controlan pestañas."""
+    owner = _accounts_owner_id(user, user_id)
     return db_fetchall(
         "SELECT id, nickname, ml_user_id FROM ml_accounts"
         " WHERE user_id=:uid AND COALESCE(access_token, '') <> ''"
         " ORDER BY id",
-        {"uid": user_id},
+        {"uid": owner},
     )
 
 
@@ -6279,16 +6295,18 @@ async def admin_create_user(
 
     token = secrets.token_urlsafe(32)
     expires = datetime.utcnow() + timedelta(hours=24)
+    # El colaborador queda "bajo" el dueño de las cuentas del admin que lo crea.
+    owner = _accounts_owner_id(admin, user_id)
     try:
         with engine.connect() as conn:
             conn.execute(
                 text(
                     "INSERT INTO users (email, name, role_label, permissions,"
-                    " reset_token, reset_expires_at, password_hash)"
-                    " VALUES (:e, :n, :r, CAST(:p AS JSONB), :t, :ex, NULL)"
+                    " reset_token, reset_expires_at, password_hash, owner_id)"
+                    " VALUES (:e, :n, :r, CAST(:p AS JSONB), :t, :ex, NULL, :owner)"
                 ),
                 {"e": email.lower().strip(), "n": name, "r": role,
-                 "p": json.dumps(perms), "t": token, "ex": expires},
+                 "p": json.dumps(perms), "t": token, "ex": expires, "owner": owner},
             )
             conn.commit()
     except Exception as e:
@@ -6342,6 +6360,7 @@ async def admin_update_permissions(
         raise HTTPException(403)
     perms = [p for p in (permissions or []) if p in PAGE_KEYS]
     role = (role_label or "Colaborador").strip() or "Colaborador"
+    owner = _accounts_owner_id(admin, user_id)
     with engine.connect() as conn:
         conn.execute(
             text("""
@@ -6350,6 +6369,17 @@ async def admin_update_permissions(
                 WHERE id=:id AND COALESCE(is_master, FALSE) = FALSE
             """),
             {"r": role, "p": json.dumps(perms), "id": target_id},
+        )
+        # Vincula al colaborador con su dueño (backfill de usuarios viejos sin
+        # owner_id). No piso si ya tiene dueño ni si es admin.
+        conn.execute(
+            text("""
+                UPDATE users SET owner_id=:owner
+                WHERE id=:id AND owner_id IS NULL
+                  AND COALESCE(is_admin, FALSE) = FALSE
+                  AND COALESCE(is_master, FALSE) = FALSE
+            """),
+            {"owner": owner, "id": target_id},
         )
         conn.commit()
     return RedirectResponse(f"/admin?success=Permisos actualizados", status_code=303)
