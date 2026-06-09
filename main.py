@@ -2844,7 +2844,7 @@ async def etiquetas_page(request: Request):
     })
 
 
-@app.get("/api/etiquetas/{account_id}")
+@app.get("/api/etiquetas/{account_id:int}")
 async def api_etiquetas(request: Request, account_id: int):
     """Lista los envíos listos para despachar de la cuenta + resumen por SKU."""
     user_id = get_session_user_id(request)
@@ -2901,7 +2901,7 @@ async def api_etiquetas(request: Request, account_id: int):
     }
 
 
-@app.get("/api/etiquetas/{account_id}/cutoff_schedule")
+@app.get("/api/etiquetas/{account_id:int}/cutoff_schedule")
 async def api_etiquetas_get_schedule(request: Request, account_id: int):
     user_id = get_session_user_id(request)
     if not user_id:
@@ -2922,7 +2922,7 @@ async def api_etiquetas_get_schedule(request: Request, account_id: int):
     return {"schedules": out}
 
 
-@app.post("/api/etiquetas/{account_id}/cutoff_schedule")
+@app.post("/api/etiquetas/{account_id:int}/cutoff_schedule")
 async def api_etiquetas_save_schedule(request: Request, account_id: int):
     user_id = get_session_user_id(request)
     if not user_id:
@@ -3147,7 +3147,7 @@ async def api_etiquetas_all_resumen(request: Request):
                     headers={"Content-Disposition": "attachment; filename=resumen_todas.pdf"})
 
 
-@app.get("/api/etiquetas/{account_id}/raw_shipment")
+@app.get("/api/etiquetas/{account_id:int}/raw_shipment")
 async def api_etiquetas_raw_shipment(request: Request, account_id: int, ref: str = ""):
     """Debug: vuelca los campos relevantes (sin datos del comprador) de un envío,
     buscado por N° de venta (order/pack id) o por shipment_id. Sirve para ubicar
@@ -3200,7 +3200,7 @@ async def api_etiquetas_raw_shipment(request: Request, account_id: int, ref: str
     return JSONResponse(out)
 
 
-@app.get("/api/etiquetas/{account_id}/probe")
+@app.get("/api/etiquetas/{account_id:int}/probe")
 async def api_etiquetas_probe(request: Request, account_id: int, path: str = ""):
     """Debug: hace GET a un endpoint de la API de ML con el token de la cuenta y
     devuelve la respuesta. Solo proxea api.mercadolibre.com (no otros hosts).
@@ -3229,7 +3229,7 @@ async def api_etiquetas_probe(request: Request, account_id: int, path: str = "")
     return JSONResponse({"path": path, "status": r.status_code, "body": body})
 
 
-@app.get("/api/etiquetas/{account_id}/labels.pdf")
+@app.get("/api/etiquetas/{account_id:int}/labels.pdf")
 async def api_etiquetas_labels(request: Request, account_id: int, ids: str = ""):
     """Devuelve el PDF combinado de etiquetas (lo genera ML), en el orden de ids."""
     user_id = get_session_user_id(request)
@@ -3261,7 +3261,7 @@ async def api_etiquetas_labels(request: Request, account_id: int, ids: str = "")
     )
 
 
-@app.get("/api/etiquetas/{account_id}/resumen.pdf")
+@app.get("/api/etiquetas/{account_id:int}/resumen.pdf")
 async def api_etiquetas_resumen(request: Request, account_id: int, ids: str = ""):
     """Genera el PDF de resumen de unidades por SKU (fpdf2) de los envíos dados."""
     user_id = get_session_user_id(request)
