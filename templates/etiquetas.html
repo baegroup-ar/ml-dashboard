@@ -67,7 +67,7 @@
 </nav>
 
 <main>
-  <h1>Etiquetas de envío <span style="font-size:11px;color:#bbb;font-weight:400;">build etq-17</span></h1>
+  <h1>Etiquetas de envío <span style="font-size:11px;color:#bbb;font-weight:400;">build etq-18</span></h1>
   <p class="lead">
     Envíos de hoy agrupados como en ML (Colecta y Flex, con sus sub-estados). Filtrá por código postal,
     imprimí las etiquetas (PDF de ML) ordenadas por SKU y descargá el resumen de unidades por SKU para armar los paquetes.
@@ -83,6 +83,7 @@
         {% for acc in accounts %}
         <option value="{{ acc.id }}" {% if acc.nickname == default_nick or (not has_default and loop.first) %}selected{% endif %}>{{ acc.nickname }}</option>
         {% endfor %}
+        {% if accounts | length > 1 %}<option value="all">★ TODAS las cuentas</option>{% endif %}
       </select>
       <button class="primary" id="btn-load" onclick="loadEnvios()">Cargar envíos a despachar</button>
       <span id="status-label" style="font-size:12px;color:#888;"></span>
@@ -124,7 +125,7 @@
   <div class="card" id="colecta-card" style="display:none;">
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
       <div id="cutoff-hoy" style="font-size:13px;color:#333;"></div>
-      <button class="ghost" onclick="toggleScheduleEditor()">Editar horarios de corte</button>
+      <button class="ghost" id="edit-schedule-btn" onclick="toggleScheduleEditor()">Editar horarios de corte</button>
     </div>
     <div id="schedule-editor" style="display:none;margin-top:14px;border-top:1px solid #f0f0ee;padding-top:14px;">
       <p style="font-size:12px;color:#888;margin-bottom:10px;">
@@ -191,6 +192,7 @@ const GROUP_ORDER = ['colecta', 'flex', 'agencia', 'otros'];
 const BUCKET_ORDER = ['canceladas', 'reprogramadas', 'demoradas', 'etiquetas', 'listas', 'en_camino'];
 
 function accId() { return document.getElementById('account-select').value; }
+function isAll() { return accId() === 'all'; }
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function skuKey(s) { const v = (s.sku_principal || '').toUpperCase(); return v ? '0' + v : '1'; }
 
@@ -261,7 +263,8 @@ async function loadEnvios() {
   btn.innerHTML = '<span class="spinner"></span>Cargando...';
   document.getElementById('status-label').textContent = '';
   try {
-    const r = await fetch(`/api/etiquetas/${accId()}`);
+    const url = isAll() ? `/api/etiquetas/all` : `/api/etiquetas/${accId()}`;
+    const r = await fetch(url);
     if (!r.ok) { throw new Error('HTTP ' + r.status + ' — ' + (await r.text()).slice(0, 200)); }
     const data = await r.json();
     DATA = data;
@@ -269,8 +272,14 @@ async function loadEnvios() {
     EXPANDED = new Set();
     // Por defecto seleccionamos solo lo que hay que armar (no canceladas/reprogramadas).
     SELECTED = new Set(SHIPMENTS.filter(s => s.packable).map(s => String(s.shipment_id)));
-    document.getElementById('status-label').textContent =
-      `${data.total_shipments} envíos · ${data.total_units} unidades a armar`;
+    let statusTxt = `${data.total_shipments} envíos · ${data.total_units} unidades a armar`;
+    if (isAll() && data.accounts) {
+      const okc = data.accounts.filter(a => a.ok).length;
+      const failed = data.accounts.filter(a => !a.ok);
+      statusTxt += ` · ${okc} cuentas`;
+      if (failed.length) statusTxt += ` ⚠ ${failed.length} con error`;
+    }
+    document.getElementById('status-label').textContent = statusTxt;
     document.getElementById('actions-card').style.display = SHIPMENTS.length ? 'block' : 'none';
     document.getElementById('resumen-card').style.display = SHIPMENTS.length ? 'block' : 'none';
     document.getElementById('debug-card').style.display = 'block';
@@ -298,7 +307,14 @@ function cutoffLine(label, c) {
 function renderColectaHoy(co) {
   const el = document.getElementById('cutoff-hoy');
   document.getElementById('colecta-card').style.display = 'block';
-  if (!co) { el.textContent = ''; return; }
+  const editBtn = document.getElementById('edit-schedule-btn');
+  if (isAll() || !co) {
+    el.innerHTML = '★ <b>TODAS las cuentas</b>. El corte de hoy se aplica con la config de cada cuenta. ' +
+      'Para editar horarios, elegí una cuenta puntual.';
+    if (editBtn) editBtn.style.display = isAll() ? 'none' : '';
+    return;
+  }
+  if (editBtn) editBtn.style.display = '';
   el.innerHTML = '📦 ' + cutoffLine('Colecta', co.cross_docking) +
     ' &nbsp;|&nbsp; 🛵 ' + cutoffLine('Flex', co.self_service) +
     '<div style="color:#999;font-size:11px;margin-top:4px;">Lo que entra después del corte va a mañana.</div>';
@@ -414,6 +430,18 @@ function getBucketRows(gk, bk) {
     .sort((a, b) => skuKey(a).localeCompare(skuKey(b)));
 }
 
+function distKey(s) {
+  return s.distancia === 'cercana' ? 'cercana' : (s.distancia === 'lejana' ? 'lejana' : 'otras');
+}
+
+function toggleZona(el, gk, bk, dist) {
+  for (const s of getBucketRows(gk, bk).filter(s => distKey(s) === dist)) {
+    const id = String(s.shipment_id);
+    if (el.checked) SELECTED.add(id); else SELECTED.delete(id);
+  }
+  render();
+}
+
 function rowHtml(s) {
   const id = String(s.shipment_id);
   const checked = SELECTED.has(id) ? 'checked' : '';
@@ -427,9 +455,11 @@ function rowHtml(s) {
   const listo = s.ready_hora
     ? `<b>${esc(s.ready_hora)}</b><div style="color:#999;font-size:11px;">${esc(s.ready_fecha)}</div>`
     : '—';
+  const ventaAcc = (s.account_nick)
+    ? `<div style="color:#999;font-size:11px;">${esc(s.account_nick)}</div>` : '';
   return `<tr>
     <td><input type="checkbox" data-id="${id}" ${checked} onchange="onCheck(this)"></td>
-    <td style="white-space:nowrap;font-variant-numeric:tabular-nums;">#${esc(s.venta)}${ventaExtra}</td>
+    <td style="white-space:nowrap;font-variant-numeric:tabular-nums;">#${esc(s.venta)}${ventaExtra}${ventaAcc}</td>
     <td>${skuLabel}</td>
     <td class="num">${s.total_units}</td>
     <td style="white-space:nowrap;">${listo}</td>
@@ -467,15 +497,17 @@ function bucketHtml(gk, bk, rows) {
   if (gk === 'flex') {
     const g = { cercana: [], lejana: [], otras: [] };
     for (const s of rows) g[s.distancia === 'cercana' ? 'cercana' : (s.distancia === 'lejana' ? 'lejana' : 'otras')].push(s);
-    const sub = (rws, label) => {
+    const sub = (rws, dist, label) => {
       if (!rws.length) return '';
       const u = rws.reduce((a, s) => a + (s.total_units || 0), 0);
+      const allCk = rws.every(s => SELECTED.has(String(s.shipment_id)));
       return `<div style="margin-top:6px;">
-        <div style="font-size:12px;font-weight:600;color:#555;margin:8px 0 2px;">${label}
-          <span style="color:#888;font-weight:400;">· ${rws.length} envíos · ${u} u.</span></div>
+        <div style="font-size:12px;font-weight:600;color:#555;margin:8px 0 2px;display:flex;align-items:center;gap:8px;">
+          <input type="checkbox" ${allCk ? 'checked' : ''} onchange="toggleZona(this,'${gk}','${bk}','${dist}')" title="Seleccionar toda la zona">
+          ${label} <span style="color:#888;font-weight:400;">· ${rws.length} envíos · ${u} u.</span></div>
         ${rowsTableHtml(rws)}</div>`;
     };
-    inner = sub(g.cercana, '📍 Zonas cercanas') + sub(g.lejana, '🚚 Zonas lejanas') + sub(g.otras, '❓ Otras zonas');
+    inner = sub(g.cercana, 'cercana', '📍 Zonas cercanas') + sub(g.lejana, 'lejana', '🚚 Zonas lejanas') + sub(g.otras, 'otras', '❓ Otras zonas');
   }
   const body = open ? inner : '';
   return `<div style="margin-top:12px;">
@@ -585,16 +617,56 @@ function updateSummary() {
   document.getElementById('btn-resumen').disabled = none;
 }
 
+// Para TODAS las cuentas mandamos los ids por POST (pueden ser cientos) y
+// recibimos el PDF como blob, así podemos mostrar errores claros (sin imprimir
+// incompleto) en vez de abrir un JSON en otra pestaña.
+async function postPdf(url, ids, filename, openInline, btn) {
+  const original = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>Generando...'; }
+  try {
+    const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }) });
+    const ct = r.headers.get('content-type') || '';
+    if (!r.ok || ct.indexOf('application/pdf') === -1) {
+      let msg = 'Error ' + r.status;
+      try {
+        const j = await r.json();
+        msg = j.error || msg;
+        if (j.failed) msg += '\n' + j.failed.map(f => `· cuenta ${f.account_id}: ${f.count} envíos — ${f.reason}`).join('\n');
+        if (j.missing_count) msg += `\n(${j.missing_count} envíos no estaban en la lista)`;
+      } catch (e) {}
+      alert(msg);
+      return;
+    }
+    const blob = await r.blob();
+    const u = URL.createObjectURL(blob);
+    if (openInline) window.open(u, '_blank');
+    else { const a = document.createElement('a'); a.href = u; a.download = filename; document.body.appendChild(a); a.click(); a.remove(); }
+    setTimeout(() => URL.revokeObjectURL(u), 60000);
+  } catch (e) {
+    alert('Error de red: ' + e.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = original; }
+  }
+}
+
 function printLabels() {
   const ids = selectedVisibleIds();
   if (!ids.length) return;
-  window.open(`/api/etiquetas/${accId()}/labels.pdf?ids=${encodeURIComponent(ids.join(','))}`, '_blank');
+  if (isAll()) {
+    postPdf(`/api/etiquetas/all/labels.pdf`, ids, 'etiquetas_todas.pdf', true, document.getElementById('btn-print'));
+  } else {
+    window.open(`/api/etiquetas/${accId()}/labels.pdf?ids=${encodeURIComponent(ids.join(','))}`, '_blank');
+  }
 }
 
 function downloadResumen() {
   const ids = selectedVisibleIds();
   if (!ids.length) return;
-  window.location = `/api/etiquetas/${accId()}/resumen.pdf?ids=${encodeURIComponent(ids.join(','))}`;
+  if (isAll()) {
+    postPdf(`/api/etiquetas/all/resumen.pdf`, ids, 'resumen_todas.pdf', false, document.getElementById('btn-resumen'));
+  } else {
+    window.location = `/api/etiquetas/${accId()}/resumen.pdf?ids=${encodeURIComponent(ids.join(','))}`;
+  }
 }
 </script>
 </body>

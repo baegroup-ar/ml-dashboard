@@ -2972,6 +2972,189 @@ def _etq_filter_ids(account_id, ids: str) -> list:
     return id_list
 
 
+# ── TODAS las cuentas: junta los envíos de todas y combina las etiquetas ──────
+ETIQUETAS_ALL_CACHE: dict = {}
+
+
+def _merge_pdfs(pdf_list) -> bytes:
+    import io
+    from pypdf import PdfReader, PdfWriter
+    writer = PdfWriter()
+    for b in pdf_list:
+        reader = PdfReader(io.BytesIO(b))
+        for page in reader.pages:
+            writer.add_page(page)
+    out = io.BytesIO()
+    writer.write(out)
+    return out.getvalue()
+
+
+def _etiquetas_parts(rows: dict):
+    """Arma (shipments ordenados, resumen por SKU, counts, sub_debug) desde un
+    dict de filas. Compartido entre una cuenta y TODAS."""
+    shipments = sorted(rows.values(), key=lambda r: _etq_sku_sort_key(r["sku_principal"]))
+    agg: dict = {}
+    for r in rows.values():
+        if not r.get("packable"):
+            continue
+        for it in r["items"]:
+            sku = it.get("sku") or it.get("title") or "Sin SKU"
+            e = agg.setdefault(sku, {"sku": it.get("sku") or "", "title": it.get("title") or "", "units": 0})
+            e["units"] += it["qty"]
+    resumen = sorted(agg.values(), key=lambda x: _etq_sku_sort_key(x["sku"]))
+    counts: dict = {}
+    sub_debug: dict = {}
+    for r in rows.values():
+        gk, bk = r["group_key"], r["bucket_key"]
+        counts.setdefault(gk, {}).setdefault(bk, 0)
+        counts[gk][bk] += 1
+        key = f"{r.get('logistic_type') or '-'} / {r.get('raw_status') or '-'} / {r.get('raw_substatus') or '-'}"
+        sub_debug[key] = sub_debug.get(key, 0) + 1
+    return shipments, resumen, counts, sub_debug
+
+
+async def _fetch_all_accounts(user_id, user):
+    """Baja los envíos de TODAS las cuentas visibles, etiquetando cada fila con su
+    cuenta. Devuelve (rows_dict, info_por_cuenta)."""
+    accounts = get_visible_accounts(user_id, user)
+    all_rows: dict = {}
+    info = []
+    for acc in accounts:
+        a = {"account_id": acc["id"], "nick": acc.get("nickname") or str(acc["id"]),
+             "ok": False, "count": 0, "error": None}
+        token = await refresh_ml_token(acc["id"])
+        if not token:
+            a["error"] = "sin token"
+            info.append(a)
+            continue
+        try:
+            rows, _diag = await _fetch_pending_shipments(acc["id"], acc, token)
+        except Exception as e:
+            a["error"] = str(e)[:140]
+            info.append(a)
+            continue
+        for sid, row in rows.items():
+            row["account_id"] = acc["id"]
+            row["account_nick"] = acc.get("nickname") or str(acc["id"])
+            all_rows[str(sid)] = row
+        a["ok"] = True
+        a["count"] = len(rows)
+        info.append(a)
+    return all_rows, info
+
+
+@app.get("/api/etiquetas/all")
+async def api_etiquetas_all(request: Request):
+    """Envíos de TODAS las cuentas del usuario, juntos."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    user = get_user(user_id)
+    require_page(user, "etiquetas")
+    all_rows, accounts_info = await _fetch_all_accounts(user_id, user)
+    ETIQUETAS_ALL_CACHE[user_id] = {"at": datetime.utcnow(), "rows": all_rows}
+    shipments, resumen, counts, sub_debug = _etiquetas_parts(all_rows)
+    return {
+        "shipments": shipments,
+        "resumen": resumen,
+        "total_units": sum(e["units"] for e in resumen),
+        "total_shipments": len(shipments),
+        "counts": counts,
+        "cutoff_hoy": None,
+        "accounts": accounts_info,
+        "debug_substatus": sub_debug,
+        "debug_filter": {"accounts": accounts_info},
+    }
+
+
+@app.post("/api/etiquetas/all/labels.pdf")
+async def api_etiquetas_all_labels(request: Request):
+    """Combina en UN PDF las etiquetas de los envíos seleccionados de todas las
+    cuentas. GARANTÍA: si ML falla para alguna cuenta, NO devuelve un PDF parcial
+    — corta con error indicando qué faltó, para no imprimir incompleto."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    user = get_user(user_id)
+    require_page(user, "etiquetas")
+    body = await request.json()
+    ids = [str(x).strip() for x in (body.get("ids") or []) if str(x).strip()]
+    if not ids:
+        raise HTTPException(400, "No hay envíos seleccionados.")
+    rows = (ETIQUETAS_ALL_CACHE.get(user_id) or {}).get("rows") or {}
+    by_acc: dict = {}
+    unknown = []
+    for sid in ids:
+        row = rows.get(str(sid))
+        if not row or not row.get("account_id"):
+            unknown.append(str(sid))
+            continue
+        by_acc.setdefault(row["account_id"], []).append(str(sid))
+    if unknown:
+        return JSONResponse(status_code=409, content={
+            "error": "Algunos envíos no están en la lista cargada. Recargá 'TODAS' y reintentá.",
+            "missing_count": len(unknown), "missing": unknown[:50]})
+    pdfs = []
+    failures = []
+    async with httpx.AsyncClient(timeout=180) as client:
+        for acc_id, acc_ids in by_acc.items():
+            token = await refresh_ml_token(acc_id)
+            if not token:
+                failures.append({"account_id": acc_id, "count": len(acc_ids), "reason": "sin token"})
+                continue
+            try:
+                r = await client.get(
+                    f"{ML_API_URL}/shipment_labels",
+                    headers={"Authorization": f"Bearer {token}"},
+                    params={"shipment_ids": ",".join(acc_ids), "response_type": "pdf"},
+                )
+            except Exception as e:
+                failures.append({"account_id": acc_id, "count": len(acc_ids), "reason": str(e)[:120]})
+                continue
+            if r.status_code != 200 or not r.content:
+                failures.append({"account_id": acc_id, "count": len(acc_ids),
+                                 "reason": f"HTTP {r.status_code}: {r.text[:120]}"})
+                continue
+            pdfs.append(r.content)
+    if failures:
+        return JSONResponse(status_code=502, content={
+            "error": "Faltaron etiquetas de algunas cuentas. NO se generó el PDF para que no imprimas incompleto. Reintentá.",
+            "failed": failures})
+    try:
+        merged = _merge_pdfs(pdfs)
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"No se pudieron combinar los PDF: {str(e)[:120]}"})
+    return Response(content=merged, media_type="application/pdf",
+                    headers={"Content-Disposition": "inline; filename=etiquetas_todas.pdf"})
+
+
+@app.post("/api/etiquetas/all/resumen.pdf")
+async def api_etiquetas_all_resumen(request: Request):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    user = get_user(user_id)
+    require_page(user, "etiquetas")
+    body = await request.json()
+    ids = [str(x).strip() for x in (body.get("ids") or []) if str(x).strip()]
+    rows = (ETIQUETAS_ALL_CACHE.get(user_id) or {}).get("rows") or {}
+    id_set = set(ids) if ids else set(rows.keys())
+    agg: dict = {}
+    for sid in id_set:
+        row = rows.get(str(sid))
+        if not row:
+            continue
+        for it in row["items"]:
+            sku = it.get("sku") or it.get("title") or "Sin SKU"
+            e = agg.setdefault(sku, {"sku": it.get("sku") or "", "title": it.get("title") or "", "units": 0})
+            e["units"] += it["qty"]
+    items = sorted(agg.values(), key=lambda x: _etq_sku_sort_key(x["sku"]))
+    total = sum(e["units"] for e in items)
+    pdf_bytes = _build_resumen_pdf(items, total, "Todas las cuentas")
+    return Response(content=pdf_bytes, media_type="application/pdf",
+                    headers={"Content-Disposition": "attachment; filename=resumen_todas.pdf"})
+
+
 @app.get("/api/etiquetas/{account_id}/raw_shipment")
 async def api_etiquetas_raw_shipment(request: Request, account_id: int, ref: str = ""):
     """Debug: vuelca los campos relevantes (sin datos del comprador) de un envío,
