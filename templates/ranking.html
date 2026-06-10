@@ -103,7 +103,7 @@
       <span style="color:#ddd;">|</span>
       <label>Desde:</label><input type="date" id="date-from" onchange="onDateChange()" />
       <label>Hasta:</label><input type="date" id="date-to" onchange="onDateChange()" />
-      <button class="period-btn" onclick="loadRanking()" style="margin-left:auto;background:#3483FA;color:#fff;border-color:#3483FA;">
+      <button class="period-btn" onclick="loadRanking(true)" style="margin-left:auto;background:#3483FA;color:#fff;border-color:#3483FA;">
         <span id="spinner" style="display:none;" class="spinner"></span>Actualizar
       </button>
     </div>
@@ -189,7 +189,7 @@
     return await r.json();
   }
 
-  async function loadRanking() {
+  async function loadRanking(force) {
     if(!currentAccountId) return;
     const df = document.getElementById('date-from').value;
     const dt = document.getElementById('date-to').value;
@@ -208,6 +208,7 @@
         const op = new URLSearchParams();
         if(df) op.set('date_from', df);
         if(dt) op.set('date_to', dt);
+        if(force) op.set('refresh', '1');  // fuerza re-bajar todo el rango
         await fetch(`/api/orders/${currentAccountId}?${op}`);
       } catch(e) {}
 

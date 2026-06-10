@@ -103,11 +103,10 @@
       <a href="#" onclick="downloadPrices(event)" style="padding:8px 14px;border:1px solid #1a8a5a;border-radius:8px;background:#fff;color:#1a8a5a;font-size:13px;text-decoration:none;">⬇ Descargar cargados</a>
       <a href="/api/stock/prices/template" download="plantilla_precios_venta.xlsx" style="padding:8px 14px;border:1px solid #3483FA;border-radius:8px;background:#fff;color:#3483FA;font-size:13px;text-decoration:none;">Descargar plantilla</a>
     </div>
-    <div class="help-box">Columnas esperadas: <code>SKU</code>, <code>Precio de venta</code> y opcionalmente <code>Stock físico</code>. Subir actualiza los SKU existentes y agrega los nuevos. Usá el <b>SKU base</b> (sin cuotas).</div>
+    <div class="help-box">Columnas esperadas: <code>SKU</code> y <code>Precio de venta</code>. Subir actualiza los SKU existentes y agrega los nuevos. Usá el <b>SKU base</b> (sin cuotas).</div>
     <div class="row" style="margin-top:12px;">
-      <input type="text" id="price-sku" placeholder="SKU" style="width:180px;text-transform:uppercase;" />
-      <input type="number" id="price-val" placeholder="Precio de venta" step="0.01" style="width:150px;" />
-      <input type="number" id="price-stock" placeholder="Stock físico" step="1" style="width:130px;" />
+      <input type="text" id="price-sku" placeholder="SKU" style="width:200px;text-transform:uppercase;" />
+      <input type="number" id="price-val" placeholder="Precio de venta" step="0.01" style="width:160px;" />
       <button class="primary" onclick="addPrice()">Agregar / actualizar</button>
       <span id="price-msg" style="font-size:12px;color:#888;"></span>
     </div>
@@ -135,8 +134,9 @@
       <table>
         <thead><tr>
           <th>SKU</th><th class="num">Stock ML</th><th class="num">Stock Full</th>
-          <th class="num">Stock físico</th><th class="num">Dif.</th>
-          <th class="num">Precio venta</th><th class="num">Valorizado</th><th>Última compra</th>
+          <th class="num">Stock total</th>
+          <th class="num">Precio venta</th><th class="num">Valorizado</th>
+          <th>Última compra</th><th class="num">Aging</th>
           <th class="num">Ventas 7d</th><th class="num">Prom/día</th>
           <th class="num">Días cob.</th><th class="num">Reposición sug.</th>
         </tr></thead>
@@ -169,6 +169,14 @@ async function loadStock() {
   msg.innerHTML = '';
   btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>Cargando stock...';
   try {
+    // Aseguramos que las ventas de los últimos 7 días estén en caché (mismo
+    // origen que Ranking), así "Ventas 7d" sale confiable.
+    try {
+      const today = new Date();
+      const from = new Date(today.getTime() - 6 * 86400000);
+      const iso = d => d.toISOString().slice(0, 10);
+      await fetch(`/api/orders/${accId()}?date_from=${iso(from)}&date_to=${iso(today)}`);
+    } catch (e) {}
     const r = await fetch(`/api/stock/${accId()}`);
     if (!r.ok) throw new Error('HTTP ' + r.status + ' — ' + (await r.text()).slice(0, 200));
     DATA = await r.json();
@@ -232,22 +240,17 @@ function renderTable() {
     const repBadge = r._sug > 0
       ? `<span class="badge rep">${r._sug}</span>`
       : (r._total > 0 ? '<span class="badge ok">OK</span>' : '<span class="badge warn">0</span>');
-    const sf = r.stock_fisico != null ? r.stock_fisico : '—';
     const full = (r.stock_full != null) ? r.stock_full : 0;
-    let dif = '—';
-    if (r.diferencia != null) {
-      const color = r.diferencia === 0 ? '#1a8a5a' : '#c0392b';
-      dif = `<span style="color:${color};">${r.diferencia > 0 ? '+' : ''}${r.diferencia}</span>`;
-    }
+    const aging = (r.aging != null) ? (r.aging + ' d') : '—';
     return `<tr>
       <td><b>${esc(r.sku)}</b></td>
       <td class="num">${r.stock}</td>
       <td class="num">${full > 0 ? full : '—'}</td>
-      <td class="num">${sf}</td>
-      <td class="num">${dif}</td>
+      <td class="num"><b>${r._total}</b></td>
       <td class="num">${r.price != null ? fmt(r.price) : '—'}</td>
       <td class="num">${r.valor_venta != null ? fmt(r.valor_venta) : '—'}</td>
       <td>${esc(r.ultima_compra) || '—'}</td>
+      <td class="num">${aging}</td>
       <td class="num">${r.ventas_7d}</td>
       <td class="num">${r._avg.toFixed(2)}</td>
       <td class="num">${cob}</td>
@@ -278,17 +281,15 @@ async function uploadPrices() {
 async function addPrice() {
   const sku = (document.getElementById('price-sku').value || '').trim();
   const price = document.getElementById('price-val').value;
-  const stock_fisico = document.getElementById('price-stock').value;
   const msg = document.getElementById('price-msg');
   if (!sku || price === '') { msg.textContent = 'SKU y precio obligatorios.'; return; }
   try {
     const r = await fetch(`/api/stock/${accId()}/prices`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sku, price, stock_fisico: stock_fisico === '' ? null : stock_fisico }) });
+      body: JSON.stringify({ sku, price }) });
     if (!r.ok) throw new Error('error');
     msg.textContent = 'Guardado.';
     document.getElementById('price-sku').value = ''; document.getElementById('price-val').value = '';
-    document.getElementById('price-stock').value = '';
     if (DATA) loadStock();
   } catch (e) { msg.textContent = 'Error: ' + e.message; }
 }

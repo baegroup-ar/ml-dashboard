@@ -2050,8 +2050,7 @@ def _parse_sale_prices(content: bytes, filename: str) -> list:
         price = _coerce_price(row[1] if len(row) > 1 else None)
         if price is None:
             continue
-        stock_fis = _coerce_price(row[2] if len(row) > 2 else None)
-        out.append({"sku": sku, "price": price, "stock_fisico": stock_fis})
+        out.append({"sku": sku, "price": price})
     return out
 
 
@@ -2063,12 +2062,10 @@ def db_save_sale_prices(account_id, items) -> int:
         if not sku or price is None:
             continue
         db_execute(
-            "INSERT INTO product_sale_prices (account_id, sku, price, stock_fisico, updated_at)"
-            " VALUES (:a, :s, :p, :sf, NOW()) ON CONFLICT (account_id, sku)"
-            " DO UPDATE SET price=EXCLUDED.price,"
-            " stock_fisico=COALESCE(EXCLUDED.stock_fisico, product_sale_prices.stock_fisico),"
-            " updated_at=NOW()",
-            {"a": account_id, "s": sku, "p": price, "sf": it.get("stock_fisico")},
+            "INSERT INTO product_sale_prices (account_id, sku, price, updated_at)"
+            " VALUES (:a, :s, :p, NOW()) ON CONFLICT (account_id, sku)"
+            " DO UPDATE SET price=EXCLUDED.price, updated_at=NOW()",
+            {"a": account_id, "s": sku, "p": price},
         )
         saved += 1
     return saved
@@ -2111,15 +2108,12 @@ async def api_stock(request: Request, account_id: int, target_days: int = 15):
     cost_aid = _cost_account_id_for(user, account_id)
     last_buy = _last_purchase_by_sku(cost_aid)
     price_rows = db_fetchall(
-        "SELECT sku, price, stock_fisico FROM product_sale_prices WHERE account_id=:a", {"a": account_id})
+        "SELECT sku, price FROM product_sale_prices WHERE account_id=:a", {"a": account_id})
     prices = {}
     for r in price_rows:
-        base = _base_sku(r["sku"])
-        prices[base] = {
-            "price": float(r["price"]),
-            "stock_fisico": (float(r["stock_fisico"]) if r.get("stock_fisico") is not None else None),
-        }
+        prices[_base_sku(r["sku"])] = float(r["price"])
 
+    today_ar = (datetime.utcnow() - timedelta(hours=3)).date()
     skus = set(stock) | set(sales7) | set(prices)
     items = []
     total_valor = 0.0
@@ -2129,17 +2123,20 @@ async def api_stock(request: Request, account_id: int, target_days: int = 15):
         st_propio = int(sinfo.get("propio", 0))
         st_full = int(sinfo.get("full", 0))
         st_total = st_propio + st_full
-        pinfo = prices.get(sku) or {}
-        price = pinfo.get("price")
-        stock_fisico = pinfo.get("stock_fisico")
-        # La diferencia se compara contra el stock PROPIO (lo que contás en tu
-        # depósito); Full está en el depósito de ML.
-        diferencia = (st_propio - stock_fisico) if stock_fisico is not None else None
+        price = prices.get(sku)
         valor = round(st_total * price, 2) if price is not None else None
         if valor is not None:
             total_valor += valor
         elif st_total > 0:
             sin_precio += 1
+        # Aging = días desde la última compra (antigüedad del stock).
+        ultima = last_buy.get(sku, "")
+        aging = None
+        if ultima:
+            try:
+                aging = (today_ar - datetime.strptime(ultima[:10], "%Y-%m-%d").date()).days
+            except Exception:
+                aging = None
         u7 = int(sales7.get(sku, 0))
         avg_daily = u7 / 7.0
         cobertura = round(st_total / avg_daily, 1) if avg_daily > 0 else None
@@ -2149,11 +2146,10 @@ async def api_stock(request: Request, account_id: int, target_days: int = 15):
             "stock": st_propio,
             "stock_full": st_full,
             "stock_total": st_total,
-            "stock_fisico": stock_fisico,
-            "diferencia": diferencia,
             "price": price,
             "valor_venta": valor,
-            "ultima_compra": last_buy.get(sku, ""),
+            "ultima_compra": ultima,
+            "aging": aging,
             "ventas_7d": u7,
             "venta_prom_diaria": round(avg_daily, 2),
             "dias_cobertura": cobertura,
@@ -2183,18 +2179,17 @@ async def api_stock_prices_template(request: Request):
     wb = Workbook()
     ws = wb.active
     ws.title = "Precios"
-    ws.append(["SKU", "Precio de venta", "Stock físico"])
+    ws.append(["SKU", "Precio de venta"])
     fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
-    for col in (1, 2, 3):
+    for col in (1, 2):
         c = ws.cell(row=1, column=col)
         c.fill = fill
         c.font = Font(bold=True)
         c.alignment = Alignment(horizontal="center")
-    for ex in [["SOP68-443", 21000, 12], ["SOP78-446", 49500, 5]]:
+    for ex in [["SOP68-443", 21000], ["SOP78-446", 49500]]:
         ws.append(ex)
     ws.column_dimensions["A"].width = 20
     ws.column_dimensions["B"].width = 16
-    ws.column_dimensions["C"].width = 14
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
@@ -2211,11 +2206,10 @@ async def api_stock_prices_list(request: Request, account_id: int):
     if not _account_for_user(account_id, user_id):
         raise HTTPException(404)
     rows = db_fetchall(
-        "SELECT sku, price, stock_fisico, updated_at FROM product_sale_prices"
+        "SELECT sku, price, updated_at FROM product_sale_prices"
         " WHERE account_id=:a ORDER BY sku", {"a": account_id})
     return {"items": [
         {"sku": r["sku"], "price": float(r["price"]),
-         "stock_fisico": (float(r["stock_fisico"]) if r.get("stock_fisico") is not None else None),
          "updated_at": r["updated_at"].isoformat() if r.get("updated_at") else None}
         for r in rows]}
 
@@ -2232,10 +2226,7 @@ async def api_stock_prices_add(request: Request, account_id: int):
     price = _coerce_price(body.get("price"))
     if not sku or price is None:
         raise HTTPException(400, "SKU y precio son obligatorios.")
-    db_save_sale_prices(account_id, [{
-        "sku": sku, "price": price,
-        "stock_fisico": _coerce_price(body.get("stock_fisico")),
-    }])
+    db_save_sale_prices(account_id, [{"sku": sku, "price": price}])
     return {"ok": True}
 
 
@@ -2280,7 +2271,7 @@ async def api_stock_prices_export(request: Request, account_id: int):
     if not acc:
         raise HTTPException(404)
     rows = db_fetchall(
-        "SELECT sku, price, stock_fisico FROM product_sale_prices WHERE account_id=:a ORDER BY sku",
+        "SELECT sku, price FROM product_sale_prices WHERE account_id=:a ORDER BY sku",
         {"a": account_id})
     import io
     from openpyxl import Workbook
@@ -2289,20 +2280,17 @@ async def api_stock_prices_export(request: Request, account_id: int):
     wb = Workbook()
     ws = wb.active
     ws.title = "Precios"
-    ws.append(["SKU", "Precio de venta", "Stock físico"])
+    ws.append(["SKU", "Precio de venta"])
     fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
-    for col in (1, 2, 3):
+    for col in (1, 2):
         c = ws.cell(row=1, column=col)
         c.fill = fill
         c.font = Font(bold=True)
         c.alignment = Alignment(horizontal="center")
     for r in rows:
-        sf = r.get("stock_fisico")
-        ws.append([r.get("sku") or "", float(r.get("price") or 0),
-                   (float(sf) if sf is not None else None)])
+        ws.append([r.get("sku") or "", float(r.get("price") or 0)])
     ws.column_dimensions["A"].width = 20
     ws.column_dimensions["B"].width = 16
-    ws.column_dimensions["C"].width = 14
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
@@ -2316,6 +2304,14 @@ async def api_stock_prices_export(request: Request, account_id: int):
 def invalidate_orders_cache_for_account(account_id: int):
     db_execute(
         "DELETE FROM order_snapshot_cache WHERE account_id = :aid",
+        {"aid": account_id},
+    )
+    # IMPORTANTE: resetear también cache_fetched_from. Si solo borramos los
+    # snapshots pero dejamos esta marca, el sistema "cree" que el histórico sigue
+    # cubierto y no lo vuelve a bajar → sirve datos incompletos (mismo número en
+    # todos los períodos del Ranking).
+    db_execute(
+        "UPDATE ml_accounts SET cache_fetched_from = NULL WHERE id = :aid",
         {"aid": account_id},
     )
 
