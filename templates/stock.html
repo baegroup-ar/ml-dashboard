@@ -116,10 +116,12 @@
   <div class="card" id="result-card" style="display:none;">
     <div class="row" style="justify-content:space-between;">
       <div class="row">
-        <input type="text" id="search" placeholder="Buscar SKU..." oninput="renderTable()" style="width:220px;" />
-        <label>Días de cobertura objetivo:</label>
-        <input type="number" id="target-days" value="15" min="1" max="365" oninput="renderTable()" style="width:80px;" />
-        <label style="font-size:12px;"><input type="checkbox" id="only-rep" onchange="renderTable()" style="vertical-align:-2px;"> Solo con reposición</label>
+        <input type="text" id="search" placeholder="Buscar SKU..." oninput="renderTable()" style="width:200px;" />
+        <label>Días de cobertura:</label>
+        <input type="number" id="target-days" value="15" min="1" max="365" oninput="renderTable()" style="width:70px;" />
+        <label style="font-size:12px;"><input type="checkbox" id="f-activas" onchange="renderTable()" style="vertical-align:-2px;"> Activas (con stock)</label>
+        <label style="font-size:12px;"><input type="checkbox" id="f-sinstock" onchange="renderTable()" style="vertical-align:-2px;"> Sin stock</label>
+        <label style="font-size:12px;"><input type="checkbox" id="only-rep" onchange="renderTable()" style="vertical-align:-2px;"> Con reposición</label>
       </div>
     </div>
     <div class="summary" style="margin-top:12px;">
@@ -132,9 +134,9 @@
     <div style="overflow-x:auto;">
       <table>
         <thead><tr>
-          <th>SKU</th><th class="num">Stock propio</th><th class="num">Stock Full</th>
+          <th>SKU</th><th class="num">Stock ML</th><th class="num">Stock Full</th>
           <th class="num">Stock físico</th><th class="num">Dif.</th>
-          <th class="num">Precio venta</th><th class="num">Valor a venta</th><th>Última compra</th>
+          <th class="num">Precio venta</th><th class="num">Valorizado</th><th>Última compra</th>
           <th class="num">Ventas 7d</th><th class="num">Prom/día</th>
           <th class="num">Días cob.</th><th class="num">Reposición sug.</th>
         </tr></thead>
@@ -186,6 +188,8 @@ function renderTable() {
   const td = Math.max(1, parseInt(document.getElementById('target-days').value) || 15);
   const q = (document.getElementById('search').value || '').trim().toLowerCase();
   const onlyRep = document.getElementById('only-rep').checked;
+  const fActivas = document.getElementById('f-activas').checked;
+  const fSinStock = document.getElementById('f-sinstock').checked;
   let rows = (DATA.items || []).map(it => {
     const total = (it.stock_total != null) ? it.stock_total : (it.stock || 0);
     const avg = (it.ventas_7d || 0) / 7;
@@ -195,7 +199,16 @@ function renderTable() {
   });
   if (q) rows = rows.filter(r => (r.sku || '').toLowerCase().includes(q));
   if (onlyRep) rows = rows.filter(r => r._sug > 0);
-  rows.sort((a, b) => (b._sug - a._sug) || a.sku.localeCompare(b.sku));
+  // Activas = stock > 0; Sin stock = stock == 0. Si tildás solo una, filtra;
+  // si tildás las dos (o ninguna), muestra todo.
+  if (fActivas && !fSinStock) rows = rows.filter(r => r._total > 0);
+  else if (fSinStock && !fActivas) rows = rows.filter(r => r._total === 0);
+  // Orden: por VALORIZADO de mayor a menor (los sin precio van al final).
+  rows.sort((a, b) => {
+    const va = a.valor_venta == null ? -1 : a.valor_venta;
+    const vb = b.valor_venta == null ? -1 : b.valor_venta;
+    return vb - va || a.sku.localeCompare(b.sku);
+  });
 
   let totalValor = 0, totalUnits = 0, sinPrecio = 0;
   for (const r of (DATA.items || [])) {

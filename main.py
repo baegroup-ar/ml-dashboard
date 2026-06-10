@@ -1880,8 +1880,9 @@ STOCK_CACHE_TTL_SECONDS = 300
 
 import re as _re_stock
 # Sufijos de cuotas: son la MISMA publicación física en distintos planes de pago.
-# Se colapsan al SKU base (sin sufijo) y se toma el stock de UNA sola, no la suma.
-_CUOTA_SUFFIX_RE = _re_stock.compile(r"[-_ ](3C|6C|9C|12C|SE|SAR)$", _re_stock.IGNORECASE)
+# Se colapsan al SKU base. Cortamos desde el marcador de cuota (3C/6C/9C/12C/SE/
+# SAR) hasta el final, así también se pliegan sufijos compuestos como "-3C-CE".
+_CUOTA_SUFFIX_RE = _re_stock.compile(r"[-_ ](3C|6C|9C|12C|SE|SAR)([-_ ].*)?$", _re_stock.IGNORECASE)
 
 
 def _base_sku(sku: str) -> str:

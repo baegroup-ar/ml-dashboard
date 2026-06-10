@@ -199,20 +199,28 @@
     tbody.innerHTML = '<tr><td colspan="12" class="empty"><span class="spinner"></span> Calculando ranking...</td></tr>';
     document.getElementById('info-msg').innerHTML = '';
     try {
+      // Asegura que el caché de órdenes cubra el período pedido (si el caché
+      // sólo tenía datos de un día, traía lo mismo para Hoy/7d/30d). Es
+      // cache-aware: si ya está cubierto responde al toque; si falta el tramo
+      // viejo, lo baja y lo cachea. Por eso lo pedimos siempre antes del ranking.
+      tbody.innerHTML = '<tr><td colspan="12" class="empty"><span class="spinner"></span> Trayendo ventas del período (la primera vez puede demorar)...</td></tr>';
+      try {
+        const op = new URLSearchParams();
+        if(df) op.set('date_from', df);
+        if(dt) op.set('date_to', dt);
+        await fetch(`/api/orders/${currentAccountId}?${op}`);
+      } catch(e) {}
+
       let data = await fetchRanking(df, dt);
 
-      // Si no hay caché para esta cuenta + período, lo populamos
-      // automáticamente llamando al endpoint de órdenes y volvemos a
-      // pedir el ranking. Así no requiere abrir el Dashboard primero.
+      // Fallback: si aún no hay datos, forzar refresh del rango y reintentar.
       if(!data.items?.length && data.info) {
-        tbody.innerHTML = '<tr><td colspan="12" class="empty"><span class="spinner"></span> Trayendo ventas de ML para esta cuenta (puede demorar 30s-2min en la primera carga)...</td></tr>';
         const orderParams = new URLSearchParams();
         if(df) orderParams.set('date_from', df);
         if(dt) orderParams.set('date_to', dt);
         orderParams.set('refresh', '1');
         const ordersResp = await fetch(`/api/orders/${currentAccountId}?${orderParams}`);
         if(!ordersResp.ok) throw new Error('No pude traer las ventas de esta cuenta');
-        // Esperar a que se complete y refetchear ranking
         data = await fetchRanking(df, dt);
       }
 
