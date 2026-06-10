@@ -68,7 +68,7 @@
 </nav>
 
 <main>
-  <h1>Etiquetas de envío <span style="font-size:11px;color:#bbb;font-weight:400;">build etq-21</span></h1>
+  <h1>Etiquetas de envío <span style="font-size:11px;color:#bbb;font-weight:400;">build etq-22</span></h1>
   <p class="lead">
     Envíos de hoy agrupados como en ML (Colecta y Flex, con sus sub-estados). Filtrá por código postal,
     imprimí las etiquetas (PDF de ML) ordenadas por SKU y descargá el resumen de unidades por SKU para armar los paquetes.
@@ -271,8 +271,8 @@ async function loadEnvios() {
     DATA = data;
     SHIPMENTS = data.shipments || [];
     EXPANDED = new Set();
-    // Por defecto seleccionamos solo lo que hay que armar (no canceladas/reprogramadas).
-    SELECTED = new Set(SHIPMENTS.filter(s => s.packable).map(s => String(s.shipment_id)));
+    // Por defecto seleccionamos SOLO "Etiquetas por imprimir". Si no hay, nada.
+    SELECTED = new Set(SHIPMENTS.filter(s => s.bucket_key === 'etiquetas').map(s => String(s.shipment_id)));
     let statusTxt = `${data.total_shipments} envíos · ${data.total_units} unidades a armar`;
     if (isAll() && data.accounts) {
       const okc = data.accounts.filter(a => a.ok).length;
