@@ -231,7 +231,12 @@
       }
       renderTable();
       const ts = new Date().toLocaleString('es-AR',{dateStyle:'short',timeStyle:'short'});
-      document.getElementById('last-update').textContent = `Actualizado: ${ts}`;
+      let lu = `Actualizado: ${ts}`;
+      if (data.cache_info) {
+        const ci = data.cache_info;
+        lu += ` · caché: ${ci.count} órdenes, del ${ci.min || '?'} al ${ci.max || '?'}`;
+      }
+      document.getElementById('last-update').textContent = lu;
     } catch(e) {
       tbody.innerHTML = `<tr><td colspan="12" class="empty" style="color:#c0392b;">Error: ${e.message}</td></tr>`;
     } finally {

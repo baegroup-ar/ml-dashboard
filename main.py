@@ -2082,6 +2082,10 @@ async def stock_page(request: Request):
         return _r
     accounts = get_visible_accounts(user_id, user)
     accounts = await refresh_visible_account_nicknames(accounts)
+    # Stock valorizado: por ahora solo TIENDA BAE (si existe). Si no, todas.
+    only_bae = [a for a in accounts if (a.get("nickname") or "").strip().upper() == "TIENDA BAE"]
+    if only_bae:
+        accounts = only_bae
     return templates.TemplateResponse("stock.html", {
         "request": request, "user": user, "accounts": accounts,
         "perms": user_permissions(user),
@@ -2859,9 +2863,19 @@ async def api_ranking(request: Request, account_id: int,
     if (datetime.strptime(dt, "%Y-%m-%d") - datetime.strptime(df, "%Y-%m-%d")).days > 365:
         df = str(datetime.strptime(dt, "%Y-%m-%d").date() - timedelta(days=365))
 
+    # Diagnóstico: qué rango de fechas tiene realmente el caché de órdenes.
+    cstats = db_fetchone(
+        "SELECT MIN(paid_date) AS mn, MAX(paid_date) AS mx, COUNT(*) AS c"
+        " FROM order_snapshot_cache WHERE account_id=:a", {"a": account_id})
+    cache_info = {
+        "min": str(cstats["mn"]) if cstats and cstats.get("mn") else None,
+        "max": str(cstats["mx"]) if cstats and cstats.get("mx") else None,
+        "count": int(cstats["c"]) if cstats and cstats.get("c") is not None else 0,
+    }
+
     cached_orders = db_fetch_order_snapshots(account_id, df, dt)
     if not cached_orders:
-        return {"items": [], "period": {"from": df, "to": dt},
+        return {"items": [], "period": {"from": df, "to": dt}, "cache_info": cache_info,
                 "info": "No hay datos cacheados para este período. Cargá el Dashboard primero para generar el caché."}
 
     # Sólo ventas pagadas cuentan para ranking
@@ -2923,7 +2937,7 @@ async def api_ranking(request: Request, account_id: int,
         r["margen_pct"] = round((r["ganancia"] / r["facturacion"]) * 100, 2) if r["facturacion"] > 0 else 0
         out.append(r)
     out.sort(key=lambda x: x["facturacion"], reverse=True)
-    return {"items": out, "period": {"from": df, "to": dt}}
+    return {"items": out, "period": {"from": df, "to": dt}, "cache_info": cache_info}
 
 
 # ════════════════════════ ETIQUETAS (envíos a despachar) ════════════════════════
