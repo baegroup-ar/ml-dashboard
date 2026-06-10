@@ -64,6 +64,7 @@
     {% if 'ranking' in perms %}<a href="/ranking" class="btn-nav">Ranking</a>{% endif %}
     {% if 'etiquetas' in perms %}<a href="/etiquetas" class="btn-nav">Etiquetas</a>{% endif %}
     <span style="color:#3483FA;font-weight:500;">Stock valorizado</span>
+    {% if 'base_sku' in perms %}<a href="/base-sku" class="btn-nav">Base SKU</a>{% endif %}
     <span style="color:#888;">{{ user.name }}</span>
     {% if user.is_admin %}<a href="/admin" style="font-size:12px;color:#3483FA;text-decoration:none;">Admin</a>{% endif %}
     <a href="/logout" class="btn-nav">Salir</a>
@@ -153,6 +154,7 @@
 <script>
 const fmt = n => '$' + Number(n || 0).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 let DATA = null;
+let EXPANDED = new Set();
 function accId() { return document.getElementById('account-select').value; }
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 
@@ -242,8 +244,14 @@ function renderTable() {
       : (r._total > 0 ? '<span class="badge ok">OK</span>' : '<span class="badge warn">0</span>');
     const full = (r.stock_full != null) ? r.stock_full : 0;
     const aging = (r.aging != null) ? (r.aging + ' d') : '—';
-    return `<tr>
-      <td><b>${esc(r.sku)}</b></td>
+    const vars = r.variantes || [];
+    const open = EXPANDED.has(r.sku);
+    const caret = vars.length
+      ? `<span style="cursor:pointer;color:#999;font-size:11px;" onclick="toggleExp('${esc(r.sku)}')">${open ? '▼' : '▶'}</span> `
+      : '';
+    const varTag = vars.length ? ` <span class="badge" style="background:#eef4ff;color:#2a5db0;">${vars.length} var.</span>` : '';
+    let html = `<tr>
+      <td>${caret}<b>${esc(r.sku)}</b>${varTag}</td>
       <td class="num">${r.stock}</td>
       <td class="num">${full > 0 ? full : '—'}</td>
       <td class="num"><b>${r._total}</b></td>
@@ -256,7 +264,24 @@ function renderTable() {
       <td class="num">${cob}</td>
       <td class="num">${repBadge}</td>
     </tr>`;
+    if (open) {
+      for (const v of vars) {
+        html += `<tr style="background:#fcfcfb;">
+          <td style="padding-left:32px;color:#777;">↳ ${esc(v.sku)}</td>
+          <td class="num" style="color:#999;">${v.stock_total}</td>
+          <td></td><td></td><td></td><td></td><td></td><td></td>
+          <td class="num" style="color:#777;">${v.ventas_7d}</td>
+          <td></td><td></td><td></td>
+        </tr>`;
+      }
+    }
+    return html;
   }).join('');
+}
+
+function toggleExp(sku) {
+  if (EXPANDED.has(sku)) EXPANDED.delete(sku); else EXPANDED.add(sku);
+  renderTable();
 }
 
 // ── Base de precios ──

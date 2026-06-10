@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Base SKU · Panel ML</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Inter', sans-serif; background: #f5f5f3; color: #111; }
+    nav { background: #fff; border-bottom: 1px solid #e5e5e3; padding: 0 1.5rem; height: 56px; display: flex; align-items: center; justify-content: space-between; }
+    .nav-brand { font-weight: 600; font-size: 15px; display: flex; align-items: center; gap: 8px; }
+    .nav-brand span { background: #FFE600; border-radius: 6px; padding: 2px 8px; font-size: 12px; }
+    .nav-right { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+    .btn-nav { padding: 6px 14px; border: 1px solid #ddd; border-radius: 8px; background: #fff; font-size: 13px; cursor: pointer; text-decoration: none; color: #111; }
+    main { max-width: 1100px; margin: 0 auto; padding: 1.5rem; }
+    h1 { font-size: 20px; font-weight: 600; margin-bottom: 6px; }
+    p.lead { font-size: 13px; color: #888; margin-bottom: 1.25rem; }
+    .card { background: #fff; border: 1px solid #e5e5e3; border-radius: 12px; padding: 1.25rem; margin-bottom: 1.25rem; }
+    .card h3 { font-size: 14px; font-weight: 600; color: #444; margin-bottom: 12px; }
+    .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .row label { font-size: 13px; color: #666; }
+    .row select, .row input { padding: 7px 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 13px; font-family: 'Inter', sans-serif; }
+    .row select { min-width: 220px; }
+    button.primary { padding: 8px 16px; border: none; border-radius: 8px; background: #3483FA; color: #fff; font-size: 13px; cursor: pointer; }
+    button.green { padding: 8px 16px; border: none; border-radius: 8px; background: #1a8a5a; color: #fff; font-size: 13px; cursor: pointer; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 12px; }
+    th { padding: 9px 12px; text-align: left; color: #888; font-weight: 500; border-bottom: 1px solid #eee; font-size: 12px; }
+    td { padding: 8px 12px; border-bottom: 1px solid #f0f0ee; color: #333; }
+    tbody tr:hover { background: #fafaf8; }
+    .empty { padding: 2rem; text-align: center; color: #aaa; font-size: 13px; }
+    .help-box { background: #f5f5f3; border-left: 3px solid #3483FA; padding: 10px 14px; font-size: 12px; color: #666; margin-top: 10px; }
+    .help-box code { background: #fff; padding: 1px 6px; border-radius: 4px; border: 1px solid #e5e5e3; font-family: monospace; }
+    .btn-delete { color: #c0392b; background: none; border: none; cursor: pointer; font-size: 12px; }
+    .no-accounts { text-align: center; padding: 4rem; color: #888; font-size: 14px; }
+  </style>
+</head>
+<body>
+<nav>
+  <div class="nav-brand">
+    <div style="width:24px;height:24px;background:#FFE600;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;">ML</div>
+    Panel de ventas <span>Beta</span>
+  </div>
+  <div class="nav-right">
+    {% if 'dashboard' in perms %}<a href="/dashboard" class="btn-nav">Dashboard</a>{% endif %}
+    {% if 'costos' in perms %}<a href="/costos" class="btn-nav">Costos</a>{% endif %}
+    {% if 'envios_flex' in perms %}<a href="/costos/envios-flex" class="btn-nav">Envíos Flex</a>{% endif %}
+    {% if 'descuentos' in perms %}<a href="/descuentos" class="btn-nav">Descuentos</a>{% endif %}
+    {% if 'ranking' in perms %}<a href="/ranking" class="btn-nav">Ranking</a>{% endif %}
+    {% if 'etiquetas' in perms %}<a href="/etiquetas" class="btn-nav">Etiquetas</a>{% endif %}
+    {% if 'stock' in perms %}<a href="/stock" class="btn-nav">Stock valorizado</a>{% endif %}
+    <span style="color:#3483FA;font-weight:500;">Base SKU</span>
+    <span style="color:#888;">{{ user.name }}</span>
+    {% if user.is_admin %}<a href="/admin" style="font-size:12px;color:#3483FA;text-decoration:none;">Admin</a>{% endif %}
+    <a href="/logout" class="btn-nav">Salir</a>
+  </div>
+</nav>
+
+<main>
+  <h1>Base SKU</h1>
+  <p class="lead">
+    Indicá qué SKU son <b>variantes</b> y cuál es su <b>SKU original</b>. Otras pestañas (ej. Stock valorizado)
+    levantan este mapeo: agrupan las variantes bajo el original, toman el stock del original y suman las ventas de todas.
+    Los SKU que no estén acá se usan tal cual.
+  </p>
+
+  {% if accounts %}
+  <div class="card">
+    <div class="row">
+      <label>Cuenta ML:</label>
+      <select id="account-select" onchange="loadList()">
+        {% set default_nick = 'TIENDA BAE' %}
+        {% set has_default = accounts | selectattr('nickname', 'equalto', default_nick) | list | length > 0 %}
+        {% for acc in accounts %}
+        <option value="{{ acc.id }}" {% if acc.nickname == default_nick or (not has_default and loop.first) %}selected{% endif %}>{{ acc.nickname }}</option>
+        {% endfor %}
+      </select>
+      <span id="count-label" style="font-size:12px;color:#888;"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Cargar mapeo de variantes</h3>
+    <div class="row" style="flex-wrap:wrap;">
+      <input type="file" id="file" accept=".xlsx,.xlsm,.csv" />
+      <button class="green" onclick="uploadFile()" id="btn-upload">Subir archivo</button>
+      <a href="#" onclick="downloadExport(event)" style="padding:8px 14px;border:1px solid #1a8a5a;border-radius:8px;background:#fff;color:#1a8a5a;font-size:13px;text-decoration:none;">⬇ Descargar cargados</a>
+      <a href="/api/base-sku/template" download="plantilla_base_sku.xlsx" style="padding:8px 14px;border:1px solid #3483FA;border-radius:8px;background:#fff;color:#3483FA;font-size:13px;text-decoration:none;">Descargar plantilla</a>
+    </div>
+    <div class="help-box">Columnas esperadas: <code>SKU variante</code> y <code>SKU original</code>. Cada fila dice que ese variante pertenece a ese original. Subir actualiza los existentes y agrega los nuevos.</div>
+    <div class="row" style="margin-top:12px;">
+      <input type="text" id="m-variant" placeholder="SKU variante" style="width:220px;text-transform:uppercase;" />
+      <span style="color:#888;">→</span>
+      <input type="text" id="m-original" placeholder="SKU original" style="width:220px;text-transform:uppercase;" />
+      <button class="primary" onclick="addOne()">Agregar / actualizar</button>
+      <span id="msg" style="font-size:12px;color:#888;"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Mapeo cargado</h3>
+    <input type="text" id="search" placeholder="Buscar SKU..." oninput="renderList()" style="padding:6px 10px;border:1px solid #ddd;border-radius:8px;font-size:13px;width:280px;" />
+    <div style="overflow-x:auto;">
+      <table>
+        <thead><tr><th>SKU variante</th><th>SKU original</th><th style="text-align:right;">Acción</th></tr></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  {% else %}
+  <div class="card"><div class="no-accounts">No tenés cuentas de Mercado Libre conectadas.</div></div>
+  {% endif %}
+</main>
+
+<script>
+let ITEMS = [];
+function accId() { return document.getElementById('account-select').value; }
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+async function loadList() {
+  try {
+    const r = await fetch(`/api/base-sku/${accId()}`);
+    ITEMS = (await r.json()).items || [];
+  } catch (e) { ITEMS = []; }
+  document.getElementById('count-label').textContent = `${ITEMS.length} variantes mapeadas`;
+  renderList();
+}
+
+function renderList() {
+  const q = (document.getElementById('search').value || '').trim().toLowerCase();
+  let rows = ITEMS;
+  if (q) rows = rows.filter(r => (r.variant + ' ' + r.original).toLowerCase().includes(q));
+  const tb = document.getElementById('tbody');
+  tb.innerHTML = rows.length ? rows.map(r => `<tr>
+    <td>${esc(r.variant)}</td>
+    <td><b>${esc(r.original)}</b></td>
+    <td style="text-align:right;"><button class="btn-delete" onclick="delOne('${esc(r.variant)}')">Eliminar</button></td>
+  </tr>`).join('') : '<tr><td colspan="3" class="empty">Sin variantes cargadas.</td></tr>';
+}
+
+function downloadExport(e) { if (e) e.preventDefault(); window.location = `/api/base-sku/${accId()}/export`; }
+
+async function uploadFile() {
+  const f = document.getElementById('file').files[0];
+  const msg = document.getElementById('msg');
+  if (!f) { msg.textContent = 'Elegí un archivo.'; return; }
+  const btn = document.getElementById('btn-upload'); btn.disabled = true;
+  const fd = new FormData(); fd.append('file', f);
+  try {
+    const r = await fetch(`/api/base-sku/${accId()}/upload`, { method: 'POST', body: fd });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.detail || 'error');
+    msg.textContent = `Listo: ${j.saved} variantes cargadas.`;
+    loadList();
+  } catch (e) { msg.textContent = 'Error: ' + e.message; }
+  finally { btn.disabled = false; }
+}
+
+async function addOne() {
+  const variant = (document.getElementById('m-variant').value || '').trim();
+  const original = (document.getElementById('m-original').value || '').trim();
+  const msg = document.getElementById('msg');
+  if (!variant || !original) { msg.textContent = 'Completá variante y original.'; return; }
+  try {
+    const r = await fetch(`/api/base-sku/${accId()}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ variant, original }) });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.detail || 'error');
+    msg.textContent = 'Guardado.';
+    document.getElementById('m-variant').value = ''; document.getElementById('m-original').value = '';
+    loadList();
+  } catch (e) { msg.textContent = 'Error: ' + e.message; }
+}
+
+async function delOne(variant) {
+  if (!confirm('¿Eliminar el mapeo de ' + variant + '?')) return;
+  try {
+    await fetch(`/api/base-sku/${accId()}/${encodeURIComponent(variant)}`, { method: 'DELETE' });
+    loadList();
+  } catch (e) {}
+}
+
+loadList();
+</script>
+</body>
+</html>

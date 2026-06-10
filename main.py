@@ -322,6 +322,16 @@ def init_db():
             )
         """))
         conn.execute(text("ALTER TABLE product_sale_prices ADD COLUMN IF NOT EXISTS stock_fisico NUMERIC(14,2)"))
+        # Mapeo manual de variantes → SKU original (para Stock valorizado).
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS sku_variants (
+                account_id INTEGER NOT NULL REFERENCES ml_accounts(id) ON DELETE CASCADE,
+                variant_sku TEXT NOT NULL,
+                original_sku TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT NOW(),
+                PRIMARY KEY (account_id, variant_sku)
+            )
+        """))
         # Migrar iva_included → iva_rate UNA VEZ (controlado por app_meta).
         iva_migrated = conn.execute(text(
             "SELECT 1 FROM app_meta WHERE key='iva_rate_migrated'"
@@ -1020,6 +1030,7 @@ PAGE_ROUTES = {
     "ranking": "/ranking",
     "etiquetas": "/etiquetas",
     "stock": "/stock",
+    "base_sku": "/base-sku",
 }
 
 
@@ -1947,9 +1958,10 @@ async def _fetch_stock_by_sku(account_id, acc, token) -> dict:
                 return []
 
         results = await asyncio.gather(*[_get_chunk(c) for c in chunks])
-    # NO sumar entre publicaciones: muchas publicaciones comparten el mismo SKU
-    # (distintas cuotas/precios) y reflejan el MISMO stock físico. Tomamos UNA
-    # sola por SKU base = el mayor available_quantity (evita publicaciones en 0).
+    # Stock por SKU EXACTO (sin colapsar): muchas publicaciones comparten el
+    # mismo SKU (distintas cuotas) y reflejan el MISMO stock físico, así que NO
+    # sumamos entre publicaciones — tomamos el mayor available_quantity (evita
+    # publicaciones en 0). El agrupado de variantes lo hace la tabla manual luego.
     # Separamos stock propio (depósito) del stock en Full (fulfillment).
     propio: dict = {}
     full: dict = {}
@@ -1965,11 +1977,10 @@ async def _fetch_stock_by_sku(account_id, acc, token) -> dict:
             for sku, qty in _stock_sku_qty(body):
                 if not sku:
                     continue
-                base = _base_sku(sku)
-                if qty > tgt.get(base, -1):
-                    tgt[base] = qty
-    for base in set(propio) | set(full):
-        stock[base] = {"propio": int(propio.get(base, 0)), "full": int(full.get(base, 0))}
+                if qty > tgt.get(sku, -1):
+                    tgt[sku] = qty
+    for sku in set(propio) | set(full):
+        stock[sku] = {"propio": int(propio.get(sku, 0)), "full": int(full.get(sku, 0))}
     STOCK_CACHE[account_id] = {"at": datetime.utcnow(), "stock": dict(stock)}
     return stock
 
@@ -1986,7 +1997,7 @@ def _avg_sales_7d_by_sku(account_id) -> dict:
         if o.get("estado") != "paid":
             continue
         for it in (o.get("items") or []):
-            sku = _base_sku((it.get("sku") or "").strip())
+            sku = (it.get("sku") or "").strip()
             if not sku:
                 continue
             units[sku] = units.get(sku, 0) + int(it.get("cantidad", 0) or 0)
@@ -2001,11 +2012,8 @@ def _last_purchase_by_sku(cost_aid) -> dict:
     )
     out = {}
     for r in rows:
-        base = _base_sku(r["sku"])
         last = r.get("last")
-        last_s = last.isoformat() if hasattr(last, "isoformat") else (str(last) if last else "")
-        if not out.get(base) or (last_s and last_s > out[base]):
-            out[base] = last_s
+        out[r["sku"]] = last.isoformat() if hasattr(last, "isoformat") else (str(last) if last else "")
     return out
 
 
@@ -2071,6 +2079,209 @@ def db_save_sale_prices(account_id, items) -> int:
     return saved
 
 
+# ── Base SKU: mapeo manual de variantes → SKU original ────────────────────────
+def _get_variant_map(account_id) -> dict:
+    """{variant_sku: original_sku} para la cuenta."""
+    try:
+        rows = db_fetchall(
+            "SELECT variant_sku, original_sku FROM sku_variants WHERE account_id=:a",
+            {"a": account_id})
+        return {r["variant_sku"]: r["original_sku"] for r in rows}
+    except Exception:
+        return {}
+
+
+def _parse_variants(content: bytes, filename: str) -> list:
+    import io
+    filename = (filename or "").lower()
+    if filename.endswith(".xlsx") or filename.endswith(".xlsm"):
+        from openpyxl import load_workbook
+        wb = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+        rows = list(wb.worksheets[0].iter_rows(values_only=True))
+    else:
+        import csv
+        rows = list(csv.reader(io.StringIO(content.decode("utf-8-sig", errors="replace"))))
+    out = []
+    for i, row in enumerate(rows):
+        if not row:
+            continue
+        variant = str(row[0] or "").strip()
+        original = str(row[1] or "").strip() if len(row) > 1 else ""
+        if i == 0 and "original" in original.lower():
+            continue  # header
+        if not variant or not original or variant == original:
+            continue
+        out.append({"variant": variant, "original": original})
+    return out
+
+
+def db_save_variants(account_id, items) -> int:
+    saved = 0
+    for it in items:
+        v = str(it.get("variant") or "").strip()
+        o = str(it.get("original") or "").strip()
+        if not v or not o or v == o:
+            continue
+        db_execute(
+            "INSERT INTO sku_variants (account_id, variant_sku, original_sku, updated_at)"
+            " VALUES (:a, :v, :o, NOW()) ON CONFLICT (account_id, variant_sku)"
+            " DO UPDATE SET original_sku=EXCLUDED.original_sku, updated_at=NOW()",
+            {"a": account_id, "v": v, "o": o})
+        saved += 1
+    return saved
+
+
+@app.get("/base-sku", response_class=HTMLResponse)
+async def base_sku_page(request: Request):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse("/")
+    user = get_user(user_id)
+    _r = _page_redirect(user, "base_sku")
+    if _r:
+        return _r
+    accounts = get_visible_accounts(user_id, user)
+    accounts = await refresh_visible_account_nicknames(accounts)
+    return templates.TemplateResponse("base_sku.html", {
+        "request": request, "user": user, "accounts": accounts,
+        "perms": user_permissions(user),
+    })
+
+
+@app.get("/api/base-sku/template")
+async def api_base_sku_template(request: Request):
+    if not get_session_user_id(request):
+        raise HTTPException(401)
+    import io
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from fastapi.responses import StreamingResponse
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Variantes"
+    ws.append(["SKU variante", "SKU original"])
+    fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
+    for col in (1, 2):
+        c = ws.cell(row=1, column=col)
+        c.fill = fill
+        c.font = Font(bold=True)
+        c.alignment = Alignment(horizontal="center")
+    for ex in [["LE-05LTC", "LE-05LT"], ["SOP68-443-3C-CE", "SOP68-443"]]:
+        ws.append(ex)
+    ws.column_dimensions["A"].width = 24
+    ws.column_dimensions["B"].width = 24
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return StreamingResponse(
+        buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="plantilla_base_sku.xlsx"'})
+
+
+@app.get("/api/base-sku/{account_id:int}")
+async def api_base_sku_list(request: Request, account_id: int):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    if not _account_for_user(account_id, user_id):
+        raise HTTPException(404)
+    rows = db_fetchall(
+        "SELECT variant_sku, original_sku, updated_at FROM sku_variants"
+        " WHERE account_id=:a ORDER BY original_sku, variant_sku", {"a": account_id})
+    return {"items": [
+        {"variant": r["variant_sku"], "original": r["original_sku"],
+         "updated_at": r["updated_at"].isoformat() if r.get("updated_at") else None}
+        for r in rows]}
+
+
+@app.post("/api/base-sku/{account_id:int}")
+async def api_base_sku_add(request: Request, account_id: int):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    if not _account_for_user(account_id, user_id):
+        raise HTTPException(404)
+    body = await request.json()
+    variant = str(body.get("variant") or "").strip()
+    original = str(body.get("original") or "").strip()
+    if not variant or not original:
+        raise HTTPException(400, "SKU variante y SKU original son obligatorios.")
+    if variant == original:
+        raise HTTPException(400, "El variante no puede ser igual al original.")
+    db_save_variants(account_id, [{"variant": variant, "original": original}])
+    return {"ok": True}
+
+
+@app.delete("/api/base-sku/{account_id:int}/{variant}")
+async def api_base_sku_delete(request: Request, account_id: int, variant: str):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    if not _account_for_user(account_id, user_id):
+        raise HTTPException(404)
+    db_execute("DELETE FROM sku_variants WHERE account_id=:a AND variant_sku=:v",
+               {"a": account_id, "v": variant})
+    return {"ok": True}
+
+
+@app.post("/api/base-sku/{account_id:int}/upload")
+async def api_base_sku_upload(request: Request, account_id: int):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    if not _account_for_user(account_id, user_id):
+        raise HTTPException(404)
+    form = await request.form()
+    upload = form.get("file")
+    if upload is None or not hasattr(upload, "read"):
+        raise HTTPException(400, "Falta el archivo")
+    content = await upload.read()
+    try:
+        items = _parse_variants(content, getattr(upload, "filename", "") or "")
+    except Exception as e:
+        raise HTTPException(400, f"No pude leer el archivo: {e}")
+    saved = db_save_variants(account_id, items)
+    return {"ok": True, "saved": saved, "rows_parsed": len(items)}
+
+
+@app.get("/api/base-sku/{account_id:int}/export")
+async def api_base_sku_export(request: Request, account_id: int):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    rows = db_fetchall(
+        "SELECT variant_sku, original_sku FROM sku_variants WHERE account_id=:a"
+        " ORDER BY original_sku, variant_sku", {"a": account_id})
+    import io
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from fastapi.responses import StreamingResponse
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Variantes"
+    ws.append(["SKU variante", "SKU original"])
+    fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
+    for col in (1, 2):
+        c = ws.cell(row=1, column=col)
+        c.fill = fill
+        c.font = Font(bold=True)
+        c.alignment = Alignment(horizontal="center")
+    for r in rows:
+        ws.append([r.get("variant_sku") or "", r.get("original_sku") or ""])
+    ws.column_dimensions["A"].width = 24
+    ws.column_dimensions["B"].width = 24
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    nick = (acc.get("nickname") or acc.get("ml_user_id") or "cuenta").replace(" ", "_")
+    return StreamingResponse(
+        buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="base_sku_{nick}.xlsx"'})
+
+
 @app.get("/stock", response_class=HTMLResponse)
 async def stock_page(request: Request):
     user_id = get_session_user_id(request)
@@ -2113,40 +2324,55 @@ async def api_stock(request: Request, account_id: int, target_days: int = 15):
     last_buy = _last_purchase_by_sku(cost_aid)
     price_rows = db_fetchall(
         "SELECT sku, price FROM product_sale_prices WHERE account_id=:a", {"a": account_id})
-    prices = {}
-    for r in price_rows:
-        prices[_base_sku(r["sku"])] = float(r["price"])
+    prices = {r["sku"]: float(r["price"]) for r in price_rows}
+    variant_map = _get_variant_map(account_id)  # {variante: original}
+
+    def grp(s):
+        return variant_map.get(s, s)
 
     today_ar = (datetime.utcnow() - timedelta(hours=3)).date()
-    skus = set(stock) | set(sales7) | set(prices)
+    # Universo de SKUs y a qué grupo (original) pertenece cada uno.
+    all_skus = set(stock) | set(sales7) | set(prices) | set(variant_map) | set(variant_map.values())
+    members: dict = {}
+    for s in all_skus:
+        members.setdefault(grp(s), []).append(s)
+
+    def _stock_total(s):
+        si = stock.get(s) or {}
+        return int(si.get("propio", 0)) + int(si.get("full", 0))
+
     items = []
     total_valor = 0.0
     sin_precio = 0
-    for sku in skus:
-        sinfo = stock.get(sku) or {}
-        st_propio = int(sinfo.get("propio", 0))
+    for original, mem in members.items():
+        sinfo = stock.get(original) or {}
+        st_propio = int(sinfo.get("propio", 0))   # SOLO el stock del original
         st_full = int(sinfo.get("full", 0))
         st_total = st_propio + st_full
-        price = prices.get(sku)
+        price = prices.get(original)
         valor = round(st_total * price, 2) if price is not None else None
         if valor is not None:
             total_valor += valor
         elif st_total > 0:
             sin_precio += 1
-        # Aging = días desde la última compra (antigüedad del stock).
-        ultima = last_buy.get(sku, "")
+        ultima = last_buy.get(original, "")
         aging = None
         if ultima:
             try:
                 aging = (today_ar - datetime.strptime(ultima[:10], "%Y-%m-%d").date()).days
             except Exception:
                 aging = None
-        u7 = int(sales7.get(sku, 0))
+        # Ventas 7d = original + TODAS sus variantes (sumadas).
+        u7 = sum(int(sales7.get(m, 0)) for m in mem)
         avg_daily = u7 / 7.0
         cobertura = round(st_total / avg_daily, 1) if avg_daily > 0 else None
         sugerido = max(0, round(avg_daily * td - st_total)) if avg_daily > 0 else 0
+        variantes = [
+            {"sku": m, "stock_total": _stock_total(m), "ventas_7d": int(sales7.get(m, 0))}
+            for m in sorted(mem) if m != original
+        ]
         items.append({
-            "sku": sku,
+            "sku": original,
             "stock": st_propio,
             "stock_full": st_full,
             "stock_total": st_total,
@@ -2158,8 +2384,9 @@ async def api_stock(request: Request, account_id: int, target_days: int = 15):
             "venta_prom_diaria": round(avg_daily, 2),
             "dias_cobertura": cobertura,
             "reposicion_sugerida": sugerido,
+            "variantes": variantes,
         })
-    items.sort(key=lambda x: (-(x["reposicion_sugerida"] or 0), x["sku"]))
+    items.sort(key=lambda x: ((x["valor_venta"] is None), -(x["valor_venta"] or 0), x["sku"]))
     return {
         "items": items,
         "target_days": td,
@@ -6647,6 +6874,7 @@ PAGES = [
     ("ranking",     "Ranking por SKU"),
     ("etiquetas",   "Etiquetas"),
     ("stock",       "Stock valorizado"),
+    ("base_sku",    "Base SKU"),
 ]
 PAGE_KEYS = {k for k, _ in PAGES}
 
