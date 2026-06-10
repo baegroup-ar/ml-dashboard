@@ -321,6 +321,7 @@ def init_db():
                 PRIMARY KEY (account_id, sku)
             )
         """))
+        conn.execute(text("ALTER TABLE product_sale_prices ADD COLUMN IF NOT EXISTS stock_fisico NUMERIC(14,2)"))
         # Migrar iva_included → iva_rate UNA VEZ (controlado por app_meta).
         iva_migrated = conn.execute(text(
             "SELECT 1 FROM app_meta WHERE key='iva_rate_migrated'"
@@ -1877,6 +1878,18 @@ STOCK_CACHE: dict = {}            # account_id -> {"at": dt, "stock": {sku: qty}
 STOCK_CACHE_TTL_SECONDS = 300
 
 
+import re as _re_stock
+# Sufijos de cuotas: son la MISMA publicación física en distintos planes de pago.
+# Se colapsan al SKU base (sin sufijo) y se toma el stock de UNA sola, no la suma.
+_CUOTA_SUFFIX_RE = _re_stock.compile(r"[-_ ](3C|6C|9C|12C|SE|SAR)$", _re_stock.IGNORECASE)
+
+
+def _base_sku(sku: str) -> str:
+    s = (sku or "").strip()
+    base = _CUOTA_SUFFIX_RE.sub("", s).strip()
+    return base or s
+
+
 def _stock_sku_from_obj(obj: dict) -> str:
     sku = (obj.get("seller_sku") or "").strip()
     if sku:
@@ -1933,6 +1946,8 @@ async def _fetch_stock_by_sku(account_id, acc, token) -> dict:
                 return []
 
         results = await asyncio.gather(*[_get_chunk(c) for c in chunks])
+    # Stock por SKU EXACTO (sumando variaciones de un mismo item).
+    raw: dict = {}
     for res in results:
         if not isinstance(res, list):
             continue
@@ -1942,7 +1957,15 @@ async def _fetch_stock_by_sku(account_id, acc, token) -> dict:
                 continue
             for sku, qty in _stock_sku_qty(body):
                 if sku:
-                    stock[sku] = stock.get(sku, 0) + qty
+                    raw[sku] = raw.get(sku, 0) + qty
+    # Colapsar variantes de cuotas al SKU base: una sola publicación, no la suma.
+    groups: dict = {}
+    for sku, qty in raw.items():
+        groups.setdefault(_base_sku(sku), {})[sku] = qty
+    for base, members in groups.items():
+        # Si existe la publicación con el SKU base (sin cuotas), usamos esa;
+        # si no, tomamos el mayor del grupo (todas reflejan el mismo stock).
+        stock[base] = members[base] if base in members else max(members.values())
     STOCK_CACHE[account_id] = {"at": datetime.utcnow(), "stock": dict(stock)}
     return stock
 
@@ -1959,7 +1982,7 @@ def _avg_sales_7d_by_sku(account_id) -> dict:
         if o.get("estado") != "paid":
             continue
         for it in (o.get("items") or []):
-            sku = (it.get("sku") or "").strip()
+            sku = _base_sku((it.get("sku") or "").strip())
             if not sku:
                 continue
             units[sku] = units.get(sku, 0) + int(it.get("cantidad", 0) or 0)
@@ -1974,8 +1997,11 @@ def _last_purchase_by_sku(cost_aid) -> dict:
     )
     out = {}
     for r in rows:
+        base = _base_sku(r["sku"])
         last = r.get("last")
-        out[r["sku"]] = last.isoformat() if hasattr(last, "isoformat") else (str(last) if last else "")
+        last_s = last.isoformat() if hasattr(last, "isoformat") else (str(last) if last else "")
+        if not out.get(base) or (last_s and last_s > out[base]):
+            out[base] = last_s
     return out
 
 
@@ -2020,7 +2046,8 @@ def _parse_sale_prices(content: bytes, filename: str) -> list:
         price = _coerce_price(row[1] if len(row) > 1 else None)
         if price is None:
             continue
-        out.append({"sku": sku, "price": price})
+        stock_fis = _coerce_price(row[2] if len(row) > 2 else None)
+        out.append({"sku": sku, "price": price, "stock_fisico": stock_fis})
     return out
 
 
@@ -2032,10 +2059,12 @@ def db_save_sale_prices(account_id, items) -> int:
         if not sku or price is None:
             continue
         db_execute(
-            "INSERT INTO product_sale_prices (account_id, sku, price, updated_at)"
-            " VALUES (:a, :s, :p, NOW()) ON CONFLICT (account_id, sku)"
-            " DO UPDATE SET price=EXCLUDED.price, updated_at=NOW()",
-            {"a": account_id, "s": sku, "p": price},
+            "INSERT INTO product_sale_prices (account_id, sku, price, stock_fisico, updated_at)"
+            " VALUES (:a, :s, :p, :sf, NOW()) ON CONFLICT (account_id, sku)"
+            " DO UPDATE SET price=EXCLUDED.price,"
+            " stock_fisico=COALESCE(EXCLUDED.stock_fisico, product_sale_prices.stock_fisico),"
+            " updated_at=NOW()",
+            {"a": account_id, "s": sku, "p": price, "sf": it.get("stock_fisico")},
         )
         saved += 1
     return saved
@@ -2078,16 +2107,25 @@ async def api_stock(request: Request, account_id: int, target_days: int = 15):
     cost_aid = _cost_account_id_for(user, account_id)
     last_buy = _last_purchase_by_sku(cost_aid)
     price_rows = db_fetchall(
-        "SELECT sku, price FROM product_sale_prices WHERE account_id=:a", {"a": account_id})
-    prices = {r["sku"]: float(r["price"]) for r in price_rows}
+        "SELECT sku, price, stock_fisico FROM product_sale_prices WHERE account_id=:a", {"a": account_id})
+    prices = {}
+    for r in price_rows:
+        base = _base_sku(r["sku"])
+        prices[base] = {
+            "price": float(r["price"]),
+            "stock_fisico": (float(r["stock_fisico"]) if r.get("stock_fisico") is not None else None),
+        }
 
-    skus = set(stock) | set(sales7)
+    skus = set(stock) | set(sales7) | set(prices)
     items = []
     total_valor = 0.0
     sin_precio = 0
     for sku in skus:
         st = int(stock.get(sku, 0))
-        price = prices.get(sku)
+        pinfo = prices.get(sku) or {}
+        price = pinfo.get("price")
+        stock_fisico = pinfo.get("stock_fisico")
+        diferencia = (st - stock_fisico) if stock_fisico is not None else None
         valor = round(st * price, 2) if price is not None else None
         if valor is not None:
             total_valor += valor
@@ -2100,6 +2138,8 @@ async def api_stock(request: Request, account_id: int, target_days: int = 15):
         items.append({
             "sku": sku,
             "stock": st,
+            "stock_fisico": stock_fisico,
+            "diferencia": diferencia,
             "price": price,
             "valor_venta": valor,
             "ultima_compra": last_buy.get(sku, ""),
@@ -2132,17 +2172,18 @@ async def api_stock_prices_template(request: Request):
     wb = Workbook()
     ws = wb.active
     ws.title = "Precios"
-    ws.append(["SKU", "Precio de venta"])
+    ws.append(["SKU", "Precio de venta", "Stock físico"])
     fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
-    for col in (1, 2):
+    for col in (1, 2, 3):
         c = ws.cell(row=1, column=col)
         c.fill = fill
         c.font = Font(bold=True)
         c.alignment = Alignment(horizontal="center")
-    for ex in [["SOP68-443", 21000], ["SOP78-446", 49500]]:
+    for ex in [["SOP68-443", 21000, 12], ["SOP78-446", 49500, 5]]:
         ws.append(ex)
     ws.column_dimensions["A"].width = 20
     ws.column_dimensions["B"].width = 16
+    ws.column_dimensions["C"].width = 14
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
@@ -2159,10 +2200,11 @@ async def api_stock_prices_list(request: Request, account_id: int):
     if not _account_for_user(account_id, user_id):
         raise HTTPException(404)
     rows = db_fetchall(
-        "SELECT sku, price, updated_at FROM product_sale_prices"
+        "SELECT sku, price, stock_fisico, updated_at FROM product_sale_prices"
         " WHERE account_id=:a ORDER BY sku", {"a": account_id})
     return {"items": [
         {"sku": r["sku"], "price": float(r["price"]),
+         "stock_fisico": (float(r["stock_fisico"]) if r.get("stock_fisico") is not None else None),
          "updated_at": r["updated_at"].isoformat() if r.get("updated_at") else None}
         for r in rows]}
 
@@ -2179,7 +2221,10 @@ async def api_stock_prices_add(request: Request, account_id: int):
     price = _coerce_price(body.get("price"))
     if not sku or price is None:
         raise HTTPException(400, "SKU y precio son obligatorios.")
-    db_save_sale_prices(account_id, [{"sku": sku, "price": price}])
+    db_save_sale_prices(account_id, [{
+        "sku": sku, "price": price,
+        "stock_fisico": _coerce_price(body.get("stock_fisico")),
+    }])
     return {"ok": True}
 
 
@@ -2224,7 +2269,7 @@ async def api_stock_prices_export(request: Request, account_id: int):
     if not acc:
         raise HTTPException(404)
     rows = db_fetchall(
-        "SELECT sku, price FROM product_sale_prices WHERE account_id=:a ORDER BY sku",
+        "SELECT sku, price, stock_fisico FROM product_sale_prices WHERE account_id=:a ORDER BY sku",
         {"a": account_id})
     import io
     from openpyxl import Workbook
@@ -2233,17 +2278,20 @@ async def api_stock_prices_export(request: Request, account_id: int):
     wb = Workbook()
     ws = wb.active
     ws.title = "Precios"
-    ws.append(["SKU", "Precio de venta"])
+    ws.append(["SKU", "Precio de venta", "Stock físico"])
     fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
-    for col in (1, 2):
+    for col in (1, 2, 3):
         c = ws.cell(row=1, column=col)
         c.fill = fill
         c.font = Font(bold=True)
         c.alignment = Alignment(horizontal="center")
     for r in rows:
-        ws.append([r.get("sku") or "", float(r.get("price") or 0)])
+        sf = r.get("stock_fisico")
+        ws.append([r.get("sku") or "", float(r.get("price") or 0),
+                   (float(sf) if sf is not None else None)])
     ws.column_dimensions["A"].width = 20
     ws.column_dimensions["B"].width = 16
+    ws.column_dimensions["C"].width = 14
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
