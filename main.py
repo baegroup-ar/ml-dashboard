@@ -1937,7 +1937,7 @@ async def _fetch_stock_by_sku(account_id, acc, token) -> dict:
                         f"{ML_API_URL}/items",
                         headers=headers,
                         params={"ids": ",".join(chunk),
-                                "attributes": "id,seller_sku,available_quantity,attributes,variations,status"},
+                                "attributes": "id,seller_sku,available_quantity,attributes,variations,status,shipping"},
                     )
                     if r.status_code == 200:
                         return r.json()
@@ -1946,8 +1946,12 @@ async def _fetch_stock_by_sku(account_id, acc, token) -> dict:
                 return []
 
         results = await asyncio.gather(*[_get_chunk(c) for c in chunks])
-    # Stock por SKU EXACTO (sumando variaciones de un mismo item).
-    raw: dict = {}
+    # NO sumar entre publicaciones: muchas publicaciones comparten el mismo SKU
+    # (distintas cuotas/precios) y reflejan el MISMO stock físico. Tomamos UNA
+    # sola por SKU base = el mayor available_quantity (evita publicaciones en 0).
+    # Separamos stock propio (depósito) del stock en Full (fulfillment).
+    propio: dict = {}
+    full: dict = {}
     for res in results:
         if not isinstance(res, list):
             continue
@@ -1955,17 +1959,16 @@ async def _fetch_stock_by_sku(account_id, acc, token) -> dict:
             body = entry.get("body") if isinstance(entry, dict) else None
             if not isinstance(body, dict):
                 continue
+            is_full = ((body.get("shipping") or {}).get("logistic_type") == "fulfillment")
+            tgt = full if is_full else propio
             for sku, qty in _stock_sku_qty(body):
-                if sku:
-                    raw[sku] = raw.get(sku, 0) + qty
-    # Colapsar variantes de cuotas al SKU base: una sola publicación, no la suma.
-    groups: dict = {}
-    for sku, qty in raw.items():
-        groups.setdefault(_base_sku(sku), {})[sku] = qty
-    for base, members in groups.items():
-        # Si existe la publicación con el SKU base (sin cuotas), usamos esa;
-        # si no, tomamos el mayor del grupo (todas reflejan el mismo stock).
-        stock[base] = members[base] if base in members else max(members.values())
+                if not sku:
+                    continue
+                base = _base_sku(sku)
+                if qty > tgt.get(base, -1):
+                    tgt[base] = qty
+    for base in set(propio) | set(full):
+        stock[base] = {"propio": int(propio.get(base, 0)), "full": int(full.get(base, 0))}
     STOCK_CACHE[account_id] = {"at": datetime.utcnow(), "stock": dict(stock)}
     return stock
 
@@ -2121,23 +2124,30 @@ async def api_stock(request: Request, account_id: int, target_days: int = 15):
     total_valor = 0.0
     sin_precio = 0
     for sku in skus:
-        st = int(stock.get(sku, 0))
+        sinfo = stock.get(sku) or {}
+        st_propio = int(sinfo.get("propio", 0))
+        st_full = int(sinfo.get("full", 0))
+        st_total = st_propio + st_full
         pinfo = prices.get(sku) or {}
         price = pinfo.get("price")
         stock_fisico = pinfo.get("stock_fisico")
-        diferencia = (st - stock_fisico) if stock_fisico is not None else None
-        valor = round(st * price, 2) if price is not None else None
+        # La diferencia se compara contra el stock PROPIO (lo que contás en tu
+        # depósito); Full está en el depósito de ML.
+        diferencia = (st_propio - stock_fisico) if stock_fisico is not None else None
+        valor = round(st_total * price, 2) if price is not None else None
         if valor is not None:
             total_valor += valor
-        elif st > 0:
+        elif st_total > 0:
             sin_precio += 1
         u7 = int(sales7.get(sku, 0))
         avg_daily = u7 / 7.0
-        cobertura = round(st / avg_daily, 1) if avg_daily > 0 else None
-        sugerido = max(0, round(avg_daily * td - st)) if avg_daily > 0 else 0
+        cobertura = round(st_total / avg_daily, 1) if avg_daily > 0 else None
+        sugerido = max(0, round(avg_daily * td - st_total)) if avg_daily > 0 else 0
         items.append({
             "sku": sku,
-            "stock": st,
+            "stock": st_propio,
+            "stock_full": st_full,
+            "stock_total": st_total,
             "stock_fisico": stock_fisico,
             "diferencia": diferencia,
             "price": price,
@@ -2153,7 +2163,7 @@ async def api_stock(request: Request, account_id: int, target_days: int = 15):
         "items": items,
         "target_days": td,
         "total_skus": len(items),
-        "total_stock_units": sum(i["stock"] for i in items),
+        "total_stock_units": sum(i["stock_total"] for i in items),
         "total_valor_venta": round(total_valor, 2),
         "skus_sin_precio": sin_precio,
         "sales_cache_empty": not bool(sales7),

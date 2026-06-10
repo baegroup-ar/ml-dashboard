@@ -132,7 +132,8 @@
     <div style="overflow-x:auto;">
       <table>
         <thead><tr>
-          <th>SKU</th><th class="num">Stock ML</th><th class="num">Stock físico</th><th class="num">Dif.</th>
+          <th>SKU</th><th class="num">Stock propio</th><th class="num">Stock Full</th>
+          <th class="num">Stock físico</th><th class="num">Dif.</th>
           <th class="num">Precio venta</th><th class="num">Valor a venta</th><th>Última compra</th>
           <th class="num">Ventas 7d</th><th class="num">Prom/día</th>
           <th class="num">Días cob.</th><th class="num">Reposición sug.</th>
@@ -186,10 +187,11 @@ function renderTable() {
   const q = (document.getElementById('search').value || '').trim().toLowerCase();
   const onlyRep = document.getElementById('only-rep').checked;
   let rows = (DATA.items || []).map(it => {
+    const total = (it.stock_total != null) ? it.stock_total : (it.stock || 0);
     const avg = (it.ventas_7d || 0) / 7;
-    const sugerido = avg > 0 ? Math.max(0, Math.round(avg * td - it.stock)) : 0;
-    const cobertura = avg > 0 ? Math.round((it.stock / avg) * 10) / 10 : null;
-    return Object.assign({}, it, { _sug: sugerido, _cob: cobertura, _avg: avg });
+    const sugerido = avg > 0 ? Math.max(0, Math.round(avg * td - total)) : 0;
+    const cobertura = avg > 0 ? Math.round((total / avg) * 10) / 10 : null;
+    return Object.assign({}, it, { _sug: sugerido, _cob: cobertura, _avg: avg, _total: total });
   });
   if (q) rows = rows.filter(r => (r.sku || '').toLowerCase().includes(q));
   if (onlyRep) rows = rows.filter(r => r._sug > 0);
@@ -197,9 +199,9 @@ function renderTable() {
 
   let totalValor = 0, totalUnits = 0, sinPrecio = 0;
   for (const r of (DATA.items || [])) {
-    totalUnits += r.stock;
+    totalUnits += (r.stock_total != null ? r.stock_total : r.stock);
     if (r.price != null) totalValor += (r.valor_venta || 0);
-    else if (r.stock > 0) sinPrecio += 1;
+    else if ((r.stock_total || 0) > 0) sinPrecio += 1;
   }
   document.getElementById('sum-skus').textContent = (DATA.items || []).length;
   document.getElementById('sum-units').textContent = totalUnits;
@@ -211,13 +213,14 @@ function renderTable() {
     : '';
 
   const body = document.getElementById('stock-body');
-  if (!rows.length) { body.innerHTML = '<tr><td colspan="11" class="empty">Sin datos.</td></tr>'; return; }
+  if (!rows.length) { body.innerHTML = '<tr><td colspan="12" class="empty">Sin datos.</td></tr>'; return; }
   body.innerHTML = rows.map(r => {
     const cob = r._cob == null ? '—' : (r._cob + ' d');
     const repBadge = r._sug > 0
       ? `<span class="badge rep">${r._sug}</span>`
-      : (r.stock > 0 ? '<span class="badge ok">OK</span>' : '<span class="badge warn">0</span>');
+      : (r._total > 0 ? '<span class="badge ok">OK</span>' : '<span class="badge warn">0</span>');
     const sf = r.stock_fisico != null ? r.stock_fisico : '—';
+    const full = (r.stock_full != null) ? r.stock_full : 0;
     let dif = '—';
     if (r.diferencia != null) {
       const color = r.diferencia === 0 ? '#1a8a5a' : '#c0392b';
@@ -226,6 +229,7 @@ function renderTable() {
     return `<tr>
       <td><b>${esc(r.sku)}</b></td>
       <td class="num">${r.stock}</td>
+      <td class="num">${full > 0 ? full : '—'}</td>
       <td class="num">${sf}</td>
       <td class="num">${dif}</td>
       <td class="num">${r.price != null ? fmt(r.price) : '—'}</td>
