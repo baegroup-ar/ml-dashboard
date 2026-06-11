@@ -2185,9 +2185,10 @@ async def api_base_sku_list(request: Request, account_id: int):
         raise HTTPException(401)
     if not _account_for_user(account_id, user_id):
         raise HTTPException(404)
+    aid = _cost_account_id_for(get_user(user_id), account_id)  # compartida por usuario
     rows = db_fetchall(
         "SELECT variant_sku, original_sku, updated_at FROM sku_variants"
-        " WHERE account_id=:a ORDER BY original_sku, variant_sku", {"a": account_id})
+        " WHERE account_id=:a ORDER BY original_sku, variant_sku", {"a": aid})
     return {"items": [
         {"variant": r["variant_sku"], "original": r["original_sku"],
          "updated_at": r["updated_at"].isoformat() if r.get("updated_at") else None}
@@ -2208,7 +2209,8 @@ async def api_base_sku_add(request: Request, account_id: int):
         raise HTTPException(400, "SKU variante y SKU original son obligatorios.")
     if variant == original:
         raise HTTPException(400, "El variante no puede ser igual al original.")
-    db_save_variants(account_id, [{"variant": variant, "original": original}])
+    aid = _cost_account_id_for(get_user(user_id), account_id)
+    db_save_variants(aid, [{"variant": variant, "original": original}])
     return {"ok": True}
 
 
@@ -2219,8 +2221,9 @@ async def api_base_sku_delete(request: Request, account_id: int, variant: str):
         raise HTTPException(401)
     if not _account_for_user(account_id, user_id):
         raise HTTPException(404)
+    aid = _cost_account_id_for(get_user(user_id), account_id)
     db_execute("DELETE FROM sku_variants WHERE account_id=:a AND variant_sku=:v",
-               {"a": account_id, "v": variant})
+               {"a": aid, "v": variant})
     return {"ok": True}
 
 
@@ -2240,7 +2243,8 @@ async def api_base_sku_upload(request: Request, account_id: int):
         items = _parse_variants(content, getattr(upload, "filename", "") or "")
     except Exception as e:
         raise HTTPException(400, f"No pude leer el archivo: {e}")
-    saved = db_save_variants(account_id, items)
+    aid = _cost_account_id_for(get_user(user_id), account_id)
+    saved = db_save_variants(aid, items)
     return {"ok": True, "saved": saved, "rows_parsed": len(items)}
 
 
@@ -2252,9 +2256,10 @@ async def api_base_sku_export(request: Request, account_id: int):
     acc = _account_for_user(account_id, user_id)
     if not acc:
         raise HTTPException(404)
+    aid = _cost_account_id_for(get_user(user_id), account_id)
     rows = db_fetchall(
         "SELECT variant_sku, original_sku FROM sku_variants WHERE account_id=:a"
-        " ORDER BY original_sku, variant_sku", {"a": account_id})
+        " ORDER BY original_sku, variant_sku", {"a": aid})
     import io
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment
@@ -2325,7 +2330,7 @@ async def api_stock(request: Request, account_id: int, target_days: int = 15):
     price_rows = db_fetchall(
         "SELECT sku, price FROM product_sale_prices WHERE account_id=:a", {"a": account_id})
     prices = {r["sku"]: float(r["price"]) for r in price_rows}
-    variant_map = _get_variant_map(account_id)  # {variante: original}
+    variant_map = _get_variant_map(cost_aid)  # {variante: original}, compartida por usuario
 
     def grp(s):
         return variant_map.get(s, s)
