@@ -4955,19 +4955,19 @@ async def api_promociones_items(
         direct_error = None
 
         # ML ignora el `offset` en este endpoint (devuelve siempre la 1ra página).
-        # Usamos paginación por CURSOR (search_type=scan + scroll_id), igual que
-        # users/{id}/items/search. Si ML la soporta acá, trae los 608 directo y
-        # rápido; si no, el bucle corta y queda el escaneo de catálogo como red
-        # de seguridad (incomplete → scan), trayendo igual TODO bien.
+        # Pagina por CURSOR: la respuesta trae paging.searchAfter y hay que
+        # mandarlo de vuelta como `search_after`. Así trae los ~615 directo y
+        # rápido, validando cada uno como participante de ESTA promo. Si fallara,
+        # queda el escaneo de catálogo como red de seguridad (incomplete → scan).
         offset = 0
-        scroll_id = None
+        search_after = None
         duplicate_streak = 0
         max_iterations = 300
         paging_debug = None
         for _ in range(max_iterations):
             page_params = {**params, "search_type": "scan"}
-            if scroll_id:
-                page_params["scroll_id"] = scroll_id
+            if search_after:
+                page_params["search_after"] = search_after
             else:
                 page_params["offset"] = offset
             try:
@@ -5003,12 +5003,13 @@ async def api_promociones_items(
                     all_results.append(it)
                     new_in_batch += 1
             offset += len(results)
-            next_scroll = data.get("scroll_id") or paging.get("scroll_id")
+            next_cursor = (paging.get("searchAfter") or paging.get("search_after")
+                           or data.get("searchAfter") or data.get("search_after"))
             if expected_total > 0 and len(seen_ids) >= expected_total:
                 break
-            if next_scroll and next_scroll != scroll_id:
-                # ML soporta cursor: seguimos por scroll_id (offset se ignora).
-                scroll_id = next_scroll
+            if next_cursor and next_cursor != search_after:
+                # ML soporta cursor: seguimos por searchAfter (offset se ignora).
+                search_after = next_cursor
                 duplicate_streak = 0
                 continue
             if len(results) < promo_page_limit:
@@ -5709,7 +5710,7 @@ async def api_promociones_items(
         return h
 
     raw_sample = {
-        "code_version": "fast-cursor-v10",
+        "code_version": "cursor-searchafter-v11",
         "paging_debug": paging_debug,
         "promo_global_keys": sorted(list(promo_global.keys())) if isinstance(promo_global, dict) and promo_global else None,
         "promo_global_sample": ({k: promo_global[k] for k in list(promo_global.keys())[:30]}
