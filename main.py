@@ -4954,16 +4954,27 @@ async def api_promociones_items(
         source = "promotion_items"
         direct_error = None
 
+        # ML ignora el `offset` en este endpoint (devuelve siempre la 1ra página).
+        # Usamos paginación por CURSOR (search_type=scan + scroll_id), igual que
+        # users/{id}/items/search. Si ML la soporta acá, trae los 608 directo y
+        # rápido; si no, el bucle corta y queda el escaneo de catálogo como red
+        # de seguridad (incomplete → scan), trayendo igual TODO bien.
         offset = 0
+        scroll_id = None
         duplicate_streak = 0
         max_iterations = 300
         paging_debug = None
         for _ in range(max_iterations):
+            page_params = {**params, "search_type": "scan"}
+            if scroll_id:
+                page_params["scroll_id"] = scroll_id
+            else:
+                page_params["offset"] = offset
             try:
                 r = await client.get(
                     f"{ML_API_URL}/seller-promotions/promotions/{promotion_id}/items",
                     headers=headers,
-                    params={**params, "offset": offset},
+                    params=page_params,
                 )
             except Exception as e:
                 direct_error = f"ML error: {str(e)[:200]}"
@@ -4992,9 +5003,15 @@ async def api_promociones_items(
                     all_results.append(it)
                     new_in_batch += 1
             offset += len(results)
-            if len(results) < promo_page_limit:
-                break
+            next_scroll = data.get("scroll_id") or paging.get("scroll_id")
             if expected_total > 0 and len(seen_ids) >= expected_total:
+                break
+            if next_scroll and next_scroll != scroll_id:
+                # ML soporta cursor: seguimos por scroll_id (offset se ignora).
+                scroll_id = next_scroll
+                duplicate_streak = 0
+                continue
+            if len(results) < promo_page_limit:
                 break
             duplicate_streak = duplicate_streak + 1 if new_in_batch == 0 else 0
             if duplicate_streak >= 5:
@@ -5142,12 +5159,29 @@ async def api_promociones_items(
 
                 variants: list[dict] = []
                 for params in query_variants:
-                    ri = await client.get(
-                        f"{ML_API_URL}/seller-promotions/items/{item_id}",
-                        headers=headers,
-                        params=params,
-                    )
-                    if ri.status_code != 200:
+                    # Reintentos ante 429/5xx: si no, bajo concurrencia ML rate-
+                    # limitea y el item quedaría sin detalle (dato incompleto).
+                    ri = None
+                    for attempt in range(3):
+                        try:
+                            ri = await client.get(
+                                f"{ML_API_URL}/seller-promotions/items/{item_id}",
+                                headers=headers,
+                                params=params,
+                            )
+                        except Exception:
+                            if attempt < 2:
+                                await asyncio.sleep(0.4 * (2 ** attempt))
+                                continue
+                            ri = None
+                            break
+                        if ri.status_code == 200:
+                            break
+                        if ri.status_code in (429, 500, 502, 503, 504) and attempt < 2:
+                            await asyncio.sleep(0.4 * (2 ** attempt))
+                            continue
+                        break
+                    if ri is None or ri.status_code != 200:
                         continue
                     match = matching_promo_offer(ri.json())
                     if isinstance(match, dict):
@@ -5675,7 +5709,7 @@ async def api_promociones_items(
         return h
 
     raw_sample = {
-        "code_version": "scan-complete-v9",
+        "code_version": "fast-cursor-v10",
         "paging_debug": paging_debug,
         "promo_global_keys": sorted(list(promo_global.keys())) if isinstance(promo_global, dict) and promo_global else None,
         "promo_global_sample": ({k: promo_global[k] for k in list(promo_global.keys())[:30]}
