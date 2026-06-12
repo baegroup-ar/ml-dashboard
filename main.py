@@ -4964,11 +4964,6 @@ async def api_promociones_items(
         duplicate_streak = 0
         max_iterations = 300
         paging_debug = None
-        # `ended_naturally`: el stream del cursor se agotó (página vacía o
-        # incompleta). En ese caso lo que trajimos ES todo, AUNQUE paging.total
-        # diga un número mayor (para status=candidate ML infla el total al total
-        # de aplicables de la campaña). Sirve para NO disparar el escaneo lento.
-        ended_naturally = False
         for _ in range(max_iterations):
             page_params = {**params, "search_type": "scan"}
             if search_after:
@@ -4998,7 +4993,6 @@ async def api_promociones_items(
                 except (TypeError, ValueError):
                     pass
             if not results:
-                ended_naturally = True
                 break
             total_raw += len(results)
             new_in_batch = 0
@@ -5011,25 +5005,18 @@ async def api_promociones_items(
             offset += len(results)
             next_cursor = (paging.get("searchAfter") or paging.get("search_after")
                            or data.get("searchAfter") or data.get("search_after"))
-            duplicate_streak = duplicate_streak + 1 if new_in_batch == 0 else 0
             if expected_total > 0 and len(seen_ids) >= expected_total:
-                break
-            # Página incompleta = fin natural del stream (no hay más), aunque ML
-            # diga que el total es mayor. Confiamos en lo traído.
-            if len(results) < promo_page_limit:
-                ended_naturally = True
-                break
-            if duplicate_streak >= 5:
-                # El cursor no avanza de verdad (devuelve siempre lo mismo):
-                # NO es fin natural → dejamos que el escaneo lo complete.
                 break
             if next_cursor and next_cursor != search_after:
                 # ML soporta cursor: seguimos por searchAfter (offset se ignora).
                 search_after = next_cursor
+                duplicate_streak = 0
                 continue
-            # Página llena pero sin cursor nuevo: no podemos avanzar por cursor y
-            # el offset lo ignora ML → cortamos (incompleto → red de seguridad).
-            break
+            if len(results) < promo_page_limit:
+                break
+            duplicate_streak = duplicate_streak + 1 if new_in_batch == 0 else 0
+            if duplicate_streak >= 5:
+                break
 
         # CONVERGENCIA RÁPIDA: el endpoint LISTA es eventualmente consistente —
         # para un mismo item devuelve a veces el mínimo genérico (10%) y a veces
@@ -5225,8 +5212,7 @@ async def api_promociones_items(
         # hay más items que una página. En ese caso escaneamos TODAS las
         # publicaciones del vendedor y filtramos por promo + estado, para traer
         # el set completo (ej: 608 participando en vez de solo 49).
-        incomplete = (bool(expected_total) and len(seen_ids) < expected_total
-                      and not ended_naturally)
+        incomplete = bool(expected_total) and len(seen_ids) < expected_total
         if not all_results or incomplete:
             source = "seller_items_scan" if not all_results else "seller_items_scan_completion"
             seller_item_ids = await fetch_all_seller_item_ids(client, headers, acc["ml_user_id"])
@@ -5745,7 +5731,7 @@ async def api_promociones_items(
         return h
 
     raw_sample = {
-        "code_version": "cursor-natural-end-v12",
+        "code_version": "revert-scan-v13",
         "paging_debug": paging_debug,
         "promo_global_keys": sorted(list(promo_global.keys())) if isinstance(promo_global, dict) and promo_global else None,
         "promo_global_sample": ({k: promo_global[k] for k in list(promo_global.keys())[:30]}
