@@ -5690,6 +5690,25 @@ async def api_promociones_items(
                 final_price = round(float(original_price) * (1 - final_pct / 100.0), 2)
             except Exception:
                 final_price = None
+        # Descuento REAL con el que la publicación participa en ML: sale del
+        # precio que devuelve ML (price vs original_price). Es EXACTAMENTE lo que
+        # muestra el panel de ML. Solo aplica a los que ya participan (started),
+        # donde ML manda el precio con descuento; en candidatos price=0 → null.
+        # NO toca "Tu desc." (tu base local), es un dato aparte.
+        ml_applied_pct = None
+        ml_applied_price = None
+        try:
+            _mp = float(merged.get("price"))
+        except (TypeError, ValueError):
+            _mp = None
+        if _mp and original_price:
+            try:
+                _op = float(original_price)
+                if 0 < _mp < _op:
+                    ml_applied_pct = round((1 - _mp / _op) * 100, 1)
+                    ml_applied_price = round(_mp, 2)
+            except (TypeError, ValueError):
+                pass
         items_out.append({
             "item_id": item_id,
             "mla": item_id,
@@ -5707,6 +5726,8 @@ async def api_promociones_items(
             "final_price": final_price,
             "below_min": below_min,
             "ml_contribution": ml_contribution_pct,
+            "ml_applied_pct": ml_applied_pct,
+            "ml_applied_price": ml_applied_price,
             "status": merged.get("status"),
             "promotion_type": merged.get("promotion_type") or merged.get("type"),
             # Para el apply: ML pide offer_id en SMART y top_deal_price
