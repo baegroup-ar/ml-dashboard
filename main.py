@@ -4957,6 +4957,7 @@ async def api_promociones_items(
         offset = 0
         duplicate_streak = 0
         max_iterations = 300
+        paging_debug = None
         for _ in range(max_iterations):
             try:
                 r = await client.get(
@@ -4973,6 +4974,8 @@ async def api_promociones_items(
             data = r.json()
             results = data.get("results", []) if isinstance(data, dict) else []
             paging = data.get("paging") or {}
+            if paging_debug is None:
+                paging_debug = paging
             if paging.get("total"):
                 try:
                     expected_total = int(paging["total"])
@@ -5169,23 +5172,15 @@ async def api_promociones_items(
         promo_details_override = []
         detail_sem = asyncio.Semaphore(40)
 
-        if all_results:
-            async def fetch_existing_detail(iid):
-                async with detail_sem:
-                    return await fetch_item_promo_detail(iid)
-
-            direct_ids = [it.get("id") for it in all_results if isinstance(it, dict) and it.get("id")]
-            promo_details_override = await asyncio.gather(
-                *[fetch_existing_detail(i) for i in direct_ids]
-            )
-            promo_details_override = [
-                detail if isinstance(detail, dict) else {}
-                for detail in promo_details_override
-            ]
-        else:
-            source = "seller_items_scan"
+        # ML ignora el `offset` en este endpoint (devuelve siempre la misma
+        # primera página), así que la paginación directa queda INCOMPLETA cuando
+        # hay más items que una página. En ese caso escaneamos TODAS las
+        # publicaciones del vendedor y filtramos por promo + estado, para traer
+        # el set completo (ej: 608 participando en vez de solo 49).
+        incomplete = bool(expected_total) and len(seen_ids) < expected_total
+        if not all_results or incomplete:
+            source = "seller_items_scan" if not all_results else "seller_items_scan_completion"
             seller_item_ids = await fetch_all_seller_item_ids(client, headers, acc["ml_user_id"])
-        if not all_results and seller_item_ids:
             scan_item_count = len(seller_item_ids)
 
             async def fetch_matching_detail(iid):
@@ -5205,6 +5200,19 @@ async def api_promociones_items(
             all_results = [base for base, _ in matched]
             promo_details_override = [detail for _, detail in matched]
             scan_matched_count = len(matched)
+        else:
+            async def fetch_existing_detail(iid):
+                async with detail_sem:
+                    return await fetch_item_promo_detail(iid)
+
+            direct_ids = [it.get("id") for it in all_results if isinstance(it, dict) and it.get("id")]
+            promo_details_override = await asyncio.gather(
+                *[fetch_existing_detail(i) for i in direct_ids]
+            )
+            promo_details_override = [
+                detail if isinstance(detail, dict) else {}
+                for detail in promo_details_override
+            ]
 
         ids = [it.get("id") for it in all_results if it.get("id")]
         # Multiget en lotes de 20 — MUCHO mas rapido que 1 request por item
@@ -5667,7 +5675,8 @@ async def api_promociones_items(
         return h
 
     raw_sample = {
-        "code_version": "status-diag-v8",
+        "code_version": "scan-complete-v9",
+        "paging_debug": paging_debug,
         "promo_global_keys": sorted(list(promo_global.keys())) if isinstance(promo_global, dict) and promo_global else None,
         "promo_global_sample": ({k: promo_global[k] for k in list(promo_global.keys())[:30]}
                                 if isinstance(promo_global, dict) and promo_global else None),
