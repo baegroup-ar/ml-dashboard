@@ -49,6 +49,7 @@
     .preview-table .num { text-align: right; }
     .preview-table tr.row-warn { background: #fffaf2; }
     .preview-table tr.row-gray { background: #fafafa; color: #888; }
+    .preview-table.hide-ml-col .col-ml-applied { display: none; }
     .summary { display: flex; gap: 16px; font-size: 13px; padding: 12px 0; flex-wrap: wrap; }
     .summary span b { color: #111; }
     .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: none; align-items: center; justify-content: center; z-index: 50; }
@@ -193,6 +194,7 @@
       <label style="font-size:13px;color:#666;">Filtrar Diferencia:</label>
       <select id="preview-filter" onchange="onPreviewFilterChange()" style="padding:6px 10px;border:1px solid #ddd;border-radius:8px;font-size:13px;">
         <option value="all">Todas</option>
+        <option value="nodisc">Sin descuento cargado (no están en tu base)</option>
         <option value="ok">Solo OK (sin diferencia)</option>
         <option value="below">Solo con diferencia (debajo del mínimo)</option>
         <option value="lt1">Diferencia ≤ 1%</option>
@@ -220,7 +222,7 @@
           <th>SKU</th>
           <th class="num">Precio actual</th>
           <th class="num" title="Lo que vos ponés (de tu base de descuentos cargada). Si no está en tu base, muestra 0%.">Tu desc.</th>
-          <th class="num" title="Descuento con el que la publicación participa AHORA en ML (sale del precio real de ML). Solo para los que ya están participando.">Particip. ML</th>
+          <th class="num col-ml-applied" title="Descuento con el que la publicación participa AHORA en ML (sale del precio real de ML). Solo para los que ya están participando.">Particip. ML</th>
           <th class="num" title="Mínimo de descuento que exige MercadoLibre para poder participar en la promoción. No usa el sugerido/óptimo de ML.">Descuento ML</th>
           <th class="num" title="Cuánto te falta agregar a tu descuento para llegar al mínimo que pide ML (sin contar el aporte de ML)">Diferencia</th>
           <th class="num">Precio final</th>
@@ -730,6 +732,7 @@
       }
       const gap = computeItemGap(it);
       switch(previewFilter) {
+        case 'nodisc': return it.loaded_discount_pct == null;
         case 'ok': return gap === 0;
         case 'below': return gap != null && gap > 0;
         case 'lt1': return gap != null && gap <= 1;
@@ -741,6 +744,12 @@
         default: return true;
       }
     });
+  }
+
+  function filterNoDisc() {
+    const sel = document.getElementById('preview-filter');
+    sel.value = 'nodisc';
+    onPreviewFilterChange();
   }
 
   function onPreviewFilterChange() {
@@ -820,6 +829,9 @@
   function renderPreview() {
     const tbody = document.getElementById('preview-tbody');
     const pager = document.getElementById('preview-pager');
+    // "Particip. ML" solo tiene sentido en la pestaña Participando (started).
+    const _pt = document.querySelector('.preview-table');
+    if(_pt) _pt.classList.toggle('hide-ml-col', currentStatus !== 'started');
     if(!currentItems.length) {
       tbody.innerHTML = `<tr><td colspan="10" class="empty">No hay items en este estado.</td></tr>`;
       document.getElementById('preview-summary').innerHTML = '';
@@ -900,7 +912,7 @@
             <td><b>${it.sku || '—'}</b></td>
             <td class="num">${fmt(it.original_price)}</td>
             <td class="num">${it.loaded_discount_pct != null ? it.loaded_discount_pct + '%' : '0%'}</td>
-            <td class="num">${it.ml_applied_pct != null ? '<b style="color:#3483FA;">' + it.ml_applied_pct + '%</b>' : '<span style="color:#bbb;">—</span>'}</td>
+            <td class="num col-ml-applied">${it.ml_applied_pct != null ? '<b style="color:#3483FA;">' + it.ml_applied_pct + '%</b>' : '<span style="color:#bbb;">—</span>'}</td>
             <td class="num">${descMlCell}</td>
             <td class="num">${diffCell}</td>
             <td class="num" style="color:#1a8a5a;">${fmt(finalShown)}</td>
@@ -930,7 +942,7 @@
     document.getElementById('preview-summary').innerHTML = `
       <span><b>${currentItems.length}</b> items totales</span>
       <span style="color:#1a8a5a;"><b>${cargados}</b> con descuento cargado</span>
-      <span style="color:#888;"><b>${sinDesc}</b> sin descuento</span>
+      <span style="color:#888;cursor:pointer;text-decoration:underline dotted;" title="Filtrar solo los que no están en tu base" onclick="filterNoDisc()"><b>${sinDesc}</b> sin descuento</span>
       <span style="color:#c47a1e;"><b>${debajoMin}</b> debajo del mínimo</span>
     `;
     updateSelectedCount();
