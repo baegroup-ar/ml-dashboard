@@ -86,6 +86,7 @@
       <select id="account-select" onchange="onAccountChange()">
         {% set default_nick = 'TIENDA BAE' %}
         {% set has_default = accounts | selectattr('nickname', 'equalto', default_nick) | list | length > 0 %}
+        {% if accounts | length > 1 %}<option value="all">★ TODAS las cuentas</option>{% endif %}
         {% for acc in accounts %}
         <option value="{{ acc.id }}" {% if acc.nickname == default_nick or (not has_default and loop.first) %}selected{% endif %}>{{ acc.nickname }}</option>
         {% endfor %}
@@ -153,6 +154,7 @@
   const fmt = n => '$' + Number(n).toLocaleString('es-AR', {minimumFractionDigits:2, maximumFractionDigits:2});
   const fmtInt = n => Number(n).toLocaleString('es-AR');
   let currentAccountId = document.getElementById('account-select')?.value;
+  const ALL_ACCOUNT_IDS = {{ accounts | map(attribute='id') | list | tojson }};
   let rankingCache = [];
 
   function todayStr() { return new Intl.DateTimeFormat('sv', {timeZone:'America/Argentina/Buenos_Aires'}).format(new Date()); }
@@ -185,7 +187,10 @@
     const params = new URLSearchParams();
     if(df) params.set('date_from', df);
     if(dt) params.set('date_to', dt);
-    const r = await fetch(`/api/ranking/${currentAccountId}?${params}`);
+    const url = currentAccountId === 'all'
+      ? `/api/ranking/all?${params}`
+      : `/api/ranking/${currentAccountId}?${params}`;
+    const r = await fetch(url);
     if(!r.ok) throw new Error('Error al cargar el ranking');
     return await r.json();
   }
@@ -210,7 +215,11 @@
         if(df) op.set('date_from', df);
         if(dt) op.set('date_to', dt);
         if(force) op.set('refresh', '1');  // fuerza re-bajar todo el rango
-        await fetch(`/api/orders/${currentAccountId}?${op}`);
+        if(currentAccountId === 'all') {
+          await Promise.all(ALL_ACCOUNT_IDS.map(aid => fetch(`/api/orders/${aid}?${op}`).catch(()=>{})));
+        } else {
+          await fetch(`/api/orders/${currentAccountId}?${op}`);
+        }
       } catch(e) {}
 
       let data = await fetchRanking(df, dt);
@@ -221,8 +230,12 @@
         if(df) orderParams.set('date_from', df);
         if(dt) orderParams.set('date_to', dt);
         orderParams.set('refresh', '1');
-        const ordersResp = await fetch(`/api/orders/${currentAccountId}?${orderParams}`);
-        if(!ordersResp.ok) throw new Error('No pude traer las ventas de esta cuenta');
+        if(currentAccountId === 'all') {
+          await Promise.all(ALL_ACCOUNT_IDS.map(aid => fetch(`/api/orders/${aid}?${orderParams}`).catch(()=>{})));
+        } else {
+          const ordersResp = await fetch(`/api/orders/${currentAccountId}?${orderParams}`);
+          if(!ordersResp.ok) throw new Error('No pude traer las ventas de esta cuenta');
+        }
         data = await fetchRanking(df, dt);
       }
 

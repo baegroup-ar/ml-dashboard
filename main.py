@@ -3176,7 +3176,7 @@ async def ranking_page(request: Request):
     })
 
 
-@app.get("/api/ranking/{account_id}")
+@app.get("/api/ranking/{account_id:int}")
 async def api_ranking(request: Request, account_id: int,
                       date_from: Optional[str] = None,
                       date_to: Optional[str] = None):
@@ -3220,7 +3220,55 @@ async def api_ranking(request: Request, account_id: int,
 
     # Sólo ventas pagadas cuentan para ranking
     paid = [o for o in cached_orders if o.get("estado") == "paid"]
+    out = _rank_from_paid(paid)
+    return {"items": out, "period": {"from": df, "to": dt}, "cache_info": cache_info}
 
+
+@app.get("/api/ranking/all")
+async def api_ranking_all(request: Request,
+                          date_from: Optional[str] = None,
+                          date_to: Optional[str] = None):
+    """Ranking COMBINADO de todas las cuentas de ML del usuario (mismo cálculo,
+    sumando las ventas de todas)."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    user = get_user(user_id)
+    require_page(user, "ranking")
+    today = datetime.utcnow().date()
+    df = date_from or str(today - timedelta(days=365))
+    dt = date_to or str(today)
+    if (datetime.strptime(dt, "%Y-%m-%d") - datetime.strptime(df, "%Y-%m-%d")).days > 365:
+        df = str(datetime.strptime(dt, "%Y-%m-%d").date() - timedelta(days=365))
+    accounts = get_visible_accounts(user_id, user)
+    paid = []
+    total_count = 0
+    mins, maxs = [], []
+    for a in accounts:
+        aid = a["id"]
+        orders = db_fetch_order_snapshots(aid, df, dt)
+        paid.extend([o for o in orders if o.get("estado") == "paid"])
+        cstats = db_fetchone(
+            "SELECT MIN(paid_date) AS mn, MAX(paid_date) AS mx, COUNT(*) AS c"
+            " FROM order_snapshot_cache WHERE account_id=:a", {"a": aid})
+        if cstats:
+            total_count += int(cstats.get("c") or 0)
+            if cstats.get("mn"):
+                mins.append(str(cstats["mn"]))
+            if cstats.get("mx"):
+                maxs.append(str(cstats["mx"]))
+    cache_info = {"min": min(mins) if mins else None,
+                  "max": max(maxs) if maxs else None, "count": total_count}
+    if not paid:
+        return {"items": [], "period": {"from": df, "to": dt}, "cache_info": cache_info,
+                "info": "No hay datos cacheados. Cargá el Dashboard de cada cuenta para generar el caché."}
+    out = _rank_from_paid(paid)
+    return {"items": out, "period": {"from": df, "to": dt}, "cache_info": cache_info}
+
+
+def _rank_from_paid(paid):
+    """Agrupa órdenes pagadas por SKU y calcula facturación, costos, ganancia y
+    margen ponderado. Sirve para una cuenta o para todas combinadas."""
     rank: dict = {}
     for order in paid:
         items = order.get("items") or []
@@ -3238,8 +3286,6 @@ async def api_ranking(request: Request, account_id: int,
             item_monto = float(item.get("monto", 0) or 0)
             item_com = float(item.get("comision", 0) or 0)
             item_cmv = float(item.get("cmv", 0) or 0)
-            # Prorratear envío, ingreso envío y bonif del pedido en base
-            # al peso del item dentro del monto total del pedido.
             share = (item_monto / order_monto) if order_monto > 0 else (1.0 / len(items))
             item_envio = order_envio * share
             item_ing = order_ing * share
@@ -3263,10 +3309,8 @@ async def api_ranking(request: Request, account_id: int,
                 item_monto + item_ing + item_bonif
                 - item_com - item_envio - item_cmv
             )
-
     out = []
     for r in rank.values():
-        # Redondeos
         r["facturacion"] = round(r["facturacion"], 2)
         r["comision"] = round(r["comision"], 2)
         r["ingreso_envio"] = round(r["ingreso_envio"], 2)
@@ -3277,7 +3321,7 @@ async def api_ranking(request: Request, account_id: int,
         r["margen_pct"] = round((r["ganancia"] / r["facturacion"]) * 100, 2) if r["facturacion"] > 0 else 0
         out.append(r)
     out.sort(key=lambda x: x["facturacion"], reverse=True)
-    return {"items": out, "period": {"from": df, "to": dt}, "cache_info": cache_info}
+    return out
 
 
 # ════════════════════════ ETIQUETAS (envíos a despachar) ════════════════════════
