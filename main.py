@@ -2335,7 +2335,8 @@ async def _build_stock_payload(account_id, acc, token, user, target_days,
         sales_aids = [account_id]
     if account_id not in sales_aids:
         sales_aids.append(account_id)
-    sales7 = _sales_by_sku_multi(sales_aids, sd)
+    sales7 = _sales_by_sku_multi(sales_aids, sd)        # números: TODAS las cuentas
+    sales_own = _sales_by_sku(account_id, sd)           # universo: solo la cuenta del stock
     cost_aid = _cost_account_id_for(user, account_id)
     last_buy = _last_purchase_by_sku(cost_aid)
     price_rows = db_fetchall(
@@ -2347,8 +2348,12 @@ async def _build_stock_payload(account_id, acc, token, user, target_days,
         return variant_map.get(s, s)
 
     today_ar = (datetime.utcnow() - timedelta(hours=3)).date()
-    # Universo de SKUs y a qué grupo (original) pertenece cada uno.
-    all_skus = set(stock) | set(sales7) | set(prices) | set(variant_map) | set(variant_map.values())
+    # Universo de SKUs = catálogo de ESTA cuenta (stock + base de precios + base
+    # de variantes + lo que ESTA cuenta vendió). NO usamos las ventas de las
+    # otras cuentas para el universo (si no, se cuelan SKU que no son de acá),
+    # pero sí para los NÚMEROS de venta (sales7).
+    all_skus = (set(stock) | set(prices) | set(variant_map)
+                | set(variant_map.values()) | set(sales_own))
     members: dict = {}
     for s in all_skus:
         members.setdefault(grp(s), []).append(s)
