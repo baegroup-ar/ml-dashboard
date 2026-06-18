@@ -2308,20 +2308,9 @@ async def stock_page(request: Request):
     })
 
 
-@app.get("/api/stock/{account_id:int}")
-async def api_stock(request: Request, account_id: int, target_days: int = 15):
-    """Stock por SKU + precio de venta + última compra + venta prom 7d +
-    reposición sugerida (días de cobertura objetivo)."""
-    user_id = get_session_user_id(request)
-    if not user_id:
-        raise HTTPException(401)
-    acc = _account_for_user(account_id, user_id)
-    if not acc:
-        raise HTTPException(404)
-    user = get_user(user_id)
-    token = await refresh_ml_token(account_id)
-    if not token:
-        raise HTTPException(502)
+async def _build_stock_payload(account_id, acc, token, user, target_days):
+    """Calcula el listado de stock valorizado (compartido por el endpoint JSON y
+    el de exportación a Excel)."""
     td = max(1, min(int(target_days or 15), 365))
     stock = await _fetch_stock_by_sku(account_id, acc, token)
     sales7 = _avg_sales_7d_by_sku(account_id)
@@ -2401,6 +2390,87 @@ async def api_stock(request: Request, account_id: int, target_days: int = 15):
         "skus_sin_precio": sin_precio,
         "sales_cache_empty": not bool(sales7),
     }
+
+
+@app.get("/api/stock/{account_id:int}")
+async def api_stock(request: Request, account_id: int, target_days: int = 15):
+    """Stock por SKU + precio de venta + última compra + venta prom 7d +
+    reposición sugerida (días de cobertura objetivo)."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    user = get_user(user_id)
+    token = await refresh_ml_token(account_id)
+    if not token:
+        raise HTTPException(502)
+    return await _build_stock_payload(account_id, acc, token, user, target_days)
+
+
+@app.get("/api/stock/{account_id:int}/export")
+async def api_stock_export(request: Request, account_id: int, target_days: int = 15):
+    """Descarga el listado de stock valorizado en Excel (mismas columnas que la
+    tabla). Cada variante agrupada va en su propia fila debajo del original."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    user = get_user(user_id)
+    token = await refresh_ml_token(account_id)
+    if not token:
+        raise HTTPException(502)
+    payload = await _build_stock_payload(account_id, acc, token, user, target_days)
+    items = payload["items"]
+    import io
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from fastapi.responses import StreamingResponse
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Stock valorizado"
+    headers = ["SKU", "Stock ML", "Stock Full", "Stock total", "Precio venta",
+               "Valorizado", "Última compra", "Aging (días)", "Ventas 7d",
+               "Prom/día", "Días cobertura", "Reposición sug."]
+    ws.append(headers)
+    fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
+    for col in range(1, len(headers) + 1):
+        c = ws.cell(row=1, column=col)
+        c.fill = fill
+        c.font = Font(bold=True)
+        c.alignment = Alignment(horizontal="center")
+    for it in items:
+        ws.append([
+            it["sku"],
+            it["stock"],
+            it["stock_full"] if it.get("stock_full") else 0,
+            it["stock_total"],
+            it["price"] if it.get("price") is not None else "",
+            it["valor_venta"] if it.get("valor_venta") is not None else "",
+            it.get("ultima_compra") or "",
+            it["aging"] if it.get("aging") is not None else "",
+            it["ventas_7d"],
+            it["venta_prom_diaria"],
+            it["dias_cobertura"] if it.get("dias_cobertura") is not None else "",
+            it["reposicion_sugerida"],
+        ])
+        # Variantes agrupadas: una fila por variante (solo SKU, stock y ventas).
+        for v in (it.get("variantes") or []):
+            ws.append([f"   ↳ {v['sku']}", "", "", v.get("stock_total", ""), "",
+                       "", "", "", v.get("ventas_7d", ""), "", "", ""])
+    widths = [28, 10, 10, 11, 14, 16, 14, 12, 10, 10, 14, 14]
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = w
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    nick = (acc.get("nickname") or acc.get("ml_user_id") or "cuenta").replace(" ", "_")
+    return StreamingResponse(
+        buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="stock_valorizado_{nick}.xlsx"'})
 
 
 @app.get("/api/stock/prices/template")

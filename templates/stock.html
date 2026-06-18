@@ -123,6 +123,7 @@
         <label style="font-size:12px;"><input type="checkbox" id="f-sinstock" onchange="renderTable()" style="vertical-align:-2px;"> Sin stock</label>
         <label style="font-size:12px;"><input type="checkbox" id="only-rep" onchange="renderTable()" style="vertical-align:-2px;"> Con reposición</label>
       </div>
+      <button class="green" onclick="downloadStockExcel()" title="Descarga el listado completo en Excel">⬇ Descargar Excel</button>
     </div>
     <div class="summary" style="margin-top:12px;">
       <span><span class="lbl">SKUs</span><b id="sum-skus">0</b></span>
@@ -286,6 +287,12 @@ function toggleExp(sku) {
 
 // ── Base de precios ──
 function downloadPrices(e) { if (e) e.preventDefault(); window.location = `/api/stock/${accId()}/prices/export`; }
+
+function downloadStockExcel() {
+  if (!DATA) { alert('Primero cargá el stock.'); return; }
+  const td = document.getElementById('target-days').value || 15;
+  window.location = `/api/stock/${accId()}/export?target_days=${encodeURIComponent(td)}`;
+}
 
 async function uploadPrices() {
   const f = document.getElementById('price-file').files[0];
