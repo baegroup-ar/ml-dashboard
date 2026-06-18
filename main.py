@@ -3822,6 +3822,43 @@ THERMAL_X_OFFSET_PT = 0       # corrimiento horizontal del recorte
 THERMAL_Y_OFFSET_PT = 0       # corrimiento desde el borde superior
 
 
+async def _ml_labels_pdf(client, token, ids):
+    """Pide el PDF de etiquetas a ML. Si ML rechaza algunos envíos (ej. ya
+    despachados / picked_up / estado inválido), los SACA y reintenta con el
+    resto — ML falla todo el lote si uno está mal. Devuelve
+    (content|None, skipped_ids, error_text|None)."""
+    remaining = [str(x) for x in ids]
+    skipped = []
+    for _ in range(8):
+        if not remaining:
+            return None, skipped, None
+        try:
+            r = await client.get(
+                f"{ML_API_URL}/shipment_labels",
+                headers={"Authorization": f"Bearer {token}"},
+                params={"shipment_ids": ",".join(remaining), "response_type": "pdf"},
+            )
+        except Exception as e:
+            return None, skipped, f"ML error: {str(e)[:150]}"
+        if r.status_code == 200 and r.content:
+            return r.content, skipped, None
+        # Buscar los envíos que ML rechazó para excluirlos y reintentar.
+        bad = set()
+        try:
+            data = r.json()
+            for f in (data.get("failed_shipments") or []):
+                sid = str(f.get("shipment_id") or "")
+                if sid:
+                    bad.add(sid)
+        except Exception:
+            pass
+        if not bad:
+            return None, skipped, f"ML no devolvió las etiquetas (HTTP {r.status_code}): {r.text[:200]}"
+        skipped.extend([s for s in remaining if s in bad])
+        remaining = [s for s in remaining if s not in bad]
+    return None, skipped, None
+
+
 def _pdf_to_thermal_10x15(pdf_bytes: bytes) -> bytes:
     """Recorta cada página a una etiqueta de 10x15 cm anclada arriba-izquierda,
     para imprimir en impresora térmica de rollo 10x15. Si la página de ML ya es
@@ -3958,30 +3995,30 @@ async def api_etiquetas_all_labels(request: Request):
             "missing_count": len(unknown), "missing": unknown[:50]})
     pdfs = []
     failures = []
+    skipped_total = 0
     async with httpx.AsyncClient(timeout=180) as client:
         for acc_id, acc_ids in by_acc.items():
             token = await refresh_ml_token(acc_id)
             if not token:
                 failures.append({"account_id": acc_id, "count": len(acc_ids), "reason": "sin token"})
                 continue
-            try:
-                r = await client.get(
-                    f"{ML_API_URL}/shipment_labels",
-                    headers={"Authorization": f"Bearer {token}"},
-                    params={"shipment_ids": ",".join(acc_ids), "response_type": "pdf"},
-                )
-            except Exception as e:
-                failures.append({"account_id": acc_id, "count": len(acc_ids), "reason": str(e)[:120]})
+            content, skipped, err = await _ml_labels_pdf(client, token, acc_ids)
+            skipped_total += len(skipped)
+            if err:
+                failures.append({"account_id": acc_id, "count": len(acc_ids), "reason": err[:120]})
                 continue
-            if r.status_code != 200 or not r.content:
-                failures.append({"account_id": acc_id, "count": len(acc_ids),
-                                 "reason": f"HTTP {r.status_code}: {r.text[:120]}"})
-                continue
-            pdfs.append(r.content)
+            if content:
+                pdfs.append(content)
+            # Si no hay content pero tampoco error, fue porque ML rechazó TODOS
+            # los de esa cuenta (ya despachados): no es una falla, se omiten.
     if failures:
         return JSONResponse(status_code=502, content={
             "error": "Faltaron etiquetas de algunas cuentas. NO se generó el PDF para que no imprimas incompleto. Reintentá.",
             "failed": failures})
+    if not pdfs:
+        return JSONResponse(status_code=400, content={
+            "error": "Ninguno de los envíos seleccionados se puede imprimir (ya despachados o "
+                     "en un estado que ML no permite etiquetar)."})
     try:
         merged = _merge_pdfs(pdfs)
     except Exception as e:
@@ -3993,8 +4030,10 @@ async def api_etiquetas_all_labels(request: Request):
             fname = "etiquetas_todas_termica.pdf"
         except Exception:
             pass
-    return Response(content=merged, media_type="application/pdf",
-                    headers={"Content-Disposition": f"inline; filename={fname}"})
+    resp_headers = {"Content-Disposition": f"inline; filename={fname}"}
+    if skipped_total:
+        resp_headers["X-Skipped-Count"] = str(skipped_total)
+    return Response(content=merged, media_type="application/pdf", headers=resp_headers)
 
 
 @app.post("/api/etiquetas/all/resumen.pdf")
@@ -4124,16 +4163,13 @@ async def api_etiquetas_labels(request: Request, account_id: int, ids: str = "",
     token = await refresh_ml_token(account_id)
     if not token:
         raise HTTPException(502)
-    headers = {"Authorization": f"Bearer {token}"}
     async with httpx.AsyncClient(timeout=120) as client:
-        r = await client.get(
-            f"{ML_API_URL}/shipment_labels",
-            headers=headers,
-            params={"shipment_ids": ",".join(id_list), "response_type": "pdf"},
-        )
-    if r.status_code != 200:
-        raise HTTPException(502, f"ML no devolvió las etiquetas (HTTP {r.status_code}): {r.text[:200]}")
-    content = r.content
+        content, skipped, err = await _ml_labels_pdf(client, token, id_list)
+    if not content:
+        if err:
+            raise HTTPException(502, err)
+        raise HTTPException(400, "Ninguno de los envíos seleccionados se puede imprimir "
+                                 "(ya despachados o en un estado que ML no permite etiquetar).")
     fname = "etiquetas.pdf"
     if fmt == "termica":
         try:
@@ -4141,10 +4177,10 @@ async def api_etiquetas_labels(request: Request, account_id: int, ids: str = "",
             fname = "etiquetas_termica.pdf"
         except Exception:
             pass
-    return Response(
-        content=content, media_type="application/pdf",
-        headers={"Content-Disposition": f"inline; filename={fname}"},
-    )
+    resp_headers = {"Content-Disposition": f"inline; filename={fname}"}
+    if skipped:
+        resp_headers["X-Skipped-Count"] = str(len(skipped))
+    return Response(content=content, media_type="application/pdf", headers=resp_headers)
 
 
 @app.get("/api/etiquetas/{account_id:int}/resumen.pdf")
