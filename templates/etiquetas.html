@@ -114,6 +114,7 @@
       </div>
       <div class="row">
         <button class="primary" id="btn-print" onclick="printLabels()">🖨 Imprimir etiquetas (PDF)</button>
+        <button class="primary" id="btn-print-term" style="background:#6b4fbb;" title="Recorta cada etiqueta a 10x15 cm para impresora térmica de rollo" onclick="printLabels('termica')">🖨 Térmica 10x15</button>
         <button class="green" id="btn-resumen" onclick="downloadResumen()">⬇ Resumen por SKU (PDF)</button>
       </div>
     </div>
@@ -616,6 +617,7 @@ function updateSummary() {
   document.getElementById('sum-skus').textContent = skus.size;
   const none = rows.length === 0;
   document.getElementById('btn-print').disabled = none;
+  document.getElementById('btn-print-term').disabled = none;
   document.getElementById('btn-resumen').disabled = none;
 }
 
@@ -656,13 +658,17 @@ async function postPdf(url, ids, filename, openInline, btn) {
   }
 }
 
-function printLabels() {
+function printLabels(fmt) {
   const ids = selectedVisibleIds();
   if (!ids.length) return;
+  const term = fmt === 'termica';
+  const btn = document.getElementById(term ? 'btn-print-term' : 'btn-print');
   if (isAll()) {
-    postPdf(`/api/etiquetas/all/labels.pdf`, ids, 'etiquetas_todas.pdf', true, document.getElementById('btn-print'));
+    const url = `/api/etiquetas/all/labels.pdf${term ? '?fmt=termica' : ''}`;
+    postPdf(url, ids, term ? 'etiquetas_todas_termica.pdf' : 'etiquetas_todas.pdf', true, btn);
   } else {
-    window.open(`/api/etiquetas/${accId()}/labels.pdf?ids=${encodeURIComponent(ids.join(','))}`, '_blank');
+    const extra = term ? '&fmt=termica' : '';
+    window.open(`/api/etiquetas/${accId()}/labels.pdf?ids=${encodeURIComponent(ids.join(','))}${extra}`, '_blank');
   }
 }
 

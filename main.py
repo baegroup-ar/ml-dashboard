@@ -3811,6 +3811,46 @@ def _merge_pdfs(pdf_list) -> bytes:
     return out.getvalue()
 
 
+# ── Etiquetas térmicas 10x15 ──────────────────────────────────────────────────
+# 1 cm = 28.3465 pt. ML entrega el PDF en A4 con la etiqueta arriba-izquierda;
+# para imprimir en térmica (rollo 10x15) recortamos esa zona y dejamos cada
+# etiqueta en una página de 10x15. Si el encuadre no queda fino, se ajustan
+# estos offsets (en pt) — es lo único a calibrar según cómo arme ML la etiqueta.
+THERMAL_W_PT = 10 * 28.3465   # 283.465
+THERMAL_H_PT = 15 * 28.3465   # 425.197
+THERMAL_X_OFFSET_PT = 0       # corrimiento horizontal del recorte
+THERMAL_Y_OFFSET_PT = 0       # corrimiento desde el borde superior
+
+
+def _pdf_to_thermal_10x15(pdf_bytes: bytes) -> bytes:
+    """Recorta cada página a una etiqueta de 10x15 cm anclada arriba-izquierda,
+    para imprimir en impresora térmica de rollo 10x15. Si la página de ML ya es
+    ~10x15, el recorte coincide con la página entera (no la rompe)."""
+    import io
+    from pypdf import PdfReader, PdfWriter
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    writer = PdfWriter()
+    for page in reader.pages:
+        try:
+            mb = page.mediabox
+            left, bottom = float(mb.left), float(mb.bottom)
+            right, top = float(mb.right), float(mb.top)
+            x0 = left + THERMAL_X_OFFSET_PT
+            y1 = top - THERMAL_Y_OFFSET_PT          # arriba
+            x1 = min(x0 + THERMAL_W_PT, right)
+            y0 = max(y1 - THERMAL_H_PT, bottom)     # 15 cm hacia abajo
+            page.mediabox.lower_left = (x0, y0)
+            page.mediabox.upper_right = (x1, y1)
+            page.cropbox.lower_left = (x0, y0)
+            page.cropbox.upper_right = (x1, y1)
+        except Exception:
+            pass
+        writer.add_page(page)
+    out = io.BytesIO()
+    writer.write(out)
+    return out.getvalue()
+
+
 def _etiquetas_parts(rows: dict):
     """Arma (shipments ordenados, resumen por SKU, counts, sub_debug) desde un
     dict de filas. Compartido entre una cuenta y TODAS."""
@@ -3946,8 +3986,15 @@ async def api_etiquetas_all_labels(request: Request):
         merged = _merge_pdfs(pdfs)
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"No se pudieron combinar los PDF: {str(e)[:120]}"})
+    fname = "etiquetas_todas.pdf"
+    if request.query_params.get("fmt") == "termica":
+        try:
+            merged = _pdf_to_thermal_10x15(merged)
+            fname = "etiquetas_todas_termica.pdf"
+        except Exception:
+            pass
     return Response(content=merged, media_type="application/pdf",
-                    headers={"Content-Disposition": "inline; filename=etiquetas_todas.pdf"})
+                    headers={"Content-Disposition": f"inline; filename={fname}"})
 
 
 @app.post("/api/etiquetas/all/resumen.pdf")
@@ -4060,8 +4107,9 @@ async def api_etiquetas_probe(request: Request, account_id: int, path: str = "")
 
 
 @app.get("/api/etiquetas/{account_id:int}/labels.pdf")
-async def api_etiquetas_labels(request: Request, account_id: int, ids: str = ""):
-    """Devuelve el PDF combinado de etiquetas (lo genera ML), en el orden de ids."""
+async def api_etiquetas_labels(request: Request, account_id: int, ids: str = "", fmt: str = ""):
+    """Devuelve el PDF combinado de etiquetas (lo genera ML), en el orden de ids.
+    fmt=termica → recorta a 10x15 cm para impresora térmica."""
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
@@ -4085,9 +4133,17 @@ async def api_etiquetas_labels(request: Request, account_id: int, ids: str = "")
         )
     if r.status_code != 200:
         raise HTTPException(502, f"ML no devolvió las etiquetas (HTTP {r.status_code}): {r.text[:200]}")
+    content = r.content
+    fname = "etiquetas.pdf"
+    if fmt == "termica":
+        try:
+            content = _pdf_to_thermal_10x15(content)
+            fname = "etiquetas_termica.pdf"
+        except Exception:
+            pass
     return Response(
-        content=r.content, media_type="application/pdf",
-        headers={"Content-Disposition": "inline; filename=etiquetas.pdf"},
+        content=content, media_type="application/pdf",
+        headers={"Content-Disposition": f"inline; filename={fname}"},
     )
 
 
