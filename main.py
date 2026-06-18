@@ -3271,6 +3271,13 @@ def _classify_shipment_bucket(status, substatus):
         return ("canceladas", "Canceladas. No despachar")
     if st in ("shipped", "delivered", "not_delivered"):
         return ("en_camino", "En camino")
+    # YA DESPACHADO (el correo lo retiró / está en tránsito): aunque el status
+    # del pedido siga diciendo ready_to_ship, el substatus real ya avanzó. ML NO
+    # deja imprimir su etiqueta → va a "En camino", no a "Listas para despachar".
+    if sub in ("picked_up", "in_hub", "in_transit", "on_route", "out_for_delivery",
+               "soon_deliver", "in_warehouse", "dropped_off", "shipped",
+               "delivered", "receiver_absent", "waiting_for_withdrawal"):
+        return ("en_camino", "En camino")
     if sub in ("reprogrammed", "rescheduled", "delayed_reprogrammed",
                "waiting_for_carrier_authorization", "buyer_rescheduled"):
         return ("reprogramadas", "Reprogramadas")
@@ -3279,7 +3286,7 @@ def _classify_shipment_bucket(status, substatus):
     if sub in ("ready_to_print", "invoice_pending", "regrouping",
                "printing", "ready_to_print_pending"):
         return ("etiquetas", "Etiquetas por imprimir")
-    # printed, ready_to_ship, picked_up, in_packing_list, etc.
+    # printed, ready_to_ship, in_packing_list, etc. (todavía no despachados)
     return ("listas", "Listas para despachar")
 
 
