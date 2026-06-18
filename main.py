@@ -1985,11 +1985,11 @@ async def _fetch_stock_by_sku(account_id, acc, token) -> dict:
     return stock
 
 
-def _avg_sales_7d_by_sku(account_id) -> dict:
-    """Unidades vendidas (pagadas) por SKU en los últimos 7 días, desde el caché
-    de órdenes (el mismo que usa Ranking)."""
+def _sales_by_sku(account_id, days: int = 7) -> dict:
+    """Unidades vendidas (pagadas) por SKU en los últimos `days` días, desde el
+    caché de órdenes (el mismo que usa Ranking)."""
     today = datetime.utcnow().date()
-    df = str(today - timedelta(days=6))
+    df = str(today - timedelta(days=max(1, int(days)) - 1))
     dt = str(today)
     orders = db_fetch_order_snapshots(account_id, df, dt)
     units: dict = {}
@@ -2002,6 +2002,16 @@ def _avg_sales_7d_by_sku(account_id) -> dict:
                 continue
             units[sku] = units.get(sku, 0) + int(it.get("cantidad", 0) or 0)
     return units
+
+
+def _sales_by_sku_multi(account_ids, days: int = 7) -> dict:
+    """Suma las ventas por SKU de VARIAS cuentas de ML (el stock es de una sola
+    cuenta, pero la venta se mira sobre todas)."""
+    total: dict = {}
+    for aid in account_ids:
+        for sku, qty in _sales_by_sku(aid, days).items():
+            total[sku] = total.get(sku, 0) + qty
+    return total
 
 
 def _last_purchase_by_sku(cost_aid) -> dict:
@@ -2298,22 +2308,34 @@ async def stock_page(request: Request):
         return _r
     accounts = get_visible_accounts(user_id, user)
     accounts = await refresh_visible_account_nicknames(accounts)
-    # Stock valorizado: por ahora solo TIENDA BAE (si existe). Si no, todas.
+    # La venta se mira sobre TODAS las cuentas → ids para precargar sus órdenes.
+    sales_account_ids = [a["id"] for a in accounts]
+    # Stock valorizado: el selector muestra solo TIENDA BAE (si existe).
     only_bae = [a for a in accounts if (a.get("nickname") or "").strip().upper() == "TIENDA BAE"]
-    if only_bae:
-        accounts = only_bae
+    selector_accounts = only_bae or accounts
     return templates.TemplateResponse("stock.html", {
-        "request": request, "user": user, "accounts": accounts,
+        "request": request, "user": user, "accounts": selector_accounts,
+        "sales_account_ids": sales_account_ids,
         "perms": user_permissions(user),
     })
 
 
-async def _build_stock_payload(account_id, acc, token, user, target_days):
+async def _build_stock_payload(account_id, acc, token, user, target_days,
+                               sales_days=7, user_id=None):
     """Calcula el listado de stock valorizado (compartido por el endpoint JSON y
-    el de exportación a Excel)."""
+    el de exportación a Excel). El STOCK es de `account_id`; la VENTA se suma
+    sobre TODAS las cuentas de ML del usuario."""
     td = max(1, min(int(target_days or 15), 365))
+    sd = max(1, min(int(sales_days or 7), 90))
     stock = await _fetch_stock_by_sku(account_id, acc, token)
-    sales7 = _avg_sales_7d_by_sku(account_id)
+    # Ventas: sumadas sobre todas las cuentas del usuario.
+    if user_id is not None:
+        sales_aids = [a["id"] for a in get_visible_accounts(user_id, user)]
+    else:
+        sales_aids = [account_id]
+    if account_id not in sales_aids:
+        sales_aids.append(account_id)
+    sales7 = _sales_by_sku_multi(sales_aids, sd)
     cost_aid = _cost_account_id_for(user, account_id)
     last_buy = _last_purchase_by_sku(cost_aid)
     price_rows = db_fetchall(
@@ -2356,13 +2378,16 @@ async def _build_stock_payload(account_id, acc, token, user, target_days):
                 aging = (today_ar - datetime.strptime(ultima[:10], "%Y-%m-%d").date()).days
             except Exception:
                 aging = None
-        # Ventas 7d = original + TODAS sus variantes (sumadas).
-        u7 = sum(int(sales7.get(m, 0)) for m in mem)
-        avg_daily = u7 / 7.0
+        # Venta del grupo = original + TODAS sus variantes (sumadas). Venta
+        # propia = SOLO el SKU original (lo que se muestra al desplegar).
+        u_total = sum(int(sales7.get(m, 0)) for m in mem)
+        u_own = int(sales7.get(original, 0))
+        avg_daily = u_total / sd
+        avg_own = u_own / sd
         cobertura = round(st_total / avg_daily, 1) if avg_daily > 0 else None
         sugerido = max(0, round(avg_daily * td - st_total)) if avg_daily > 0 else 0
         variantes = [
-            {"sku": m, "stock_total": _stock_total(m), "ventas_7d": int(sales7.get(m, 0))}
+            {"sku": m, "stock_total": _stock_total(m), "ventas": int(sales7.get(m, 0))}
             for m in sorted(mem) if m != original
         ]
         items.append({
@@ -2374,8 +2399,10 @@ async def _build_stock_payload(account_id, acc, token, user, target_days):
             "valor_venta": valor,
             "ultima_compra": ultima,
             "aging": aging,
-            "ventas_7d": u7,
+            "ventas_7d": u_total,           # total del grupo (colapsado)
+            "ventas_own": u_own,            # solo el SKU original (desplegado)
             "venta_prom_diaria": round(avg_daily, 2),
+            "venta_prom_own": round(avg_own, 2),
             "dias_cobertura": cobertura,
             "reposicion_sugerida": sugerido,
             "variantes": variantes,
@@ -2384,6 +2411,7 @@ async def _build_stock_payload(account_id, acc, token, user, target_days):
     return {
         "items": items,
         "target_days": td,
+        "sales_days": sd,
         "total_skus": len(items),
         "total_stock_units": sum(i["stock_total"] for i in items),
         "total_valor_venta": round(total_valor, 2),
@@ -2393,9 +2421,10 @@ async def _build_stock_payload(account_id, acc, token, user, target_days):
 
 
 @app.get("/api/stock/{account_id:int}")
-async def api_stock(request: Request, account_id: int, target_days: int = 15):
-    """Stock por SKU + precio de venta + última compra + venta prom 7d +
-    reposición sugerida (días de cobertura objetivo)."""
+async def api_stock(request: Request, account_id: int, target_days: int = 15,
+                    sales_days: int = 7):
+    """Stock por SKU + precio de venta + última compra + venta promedio del
+    período elegido (7/15/30) + reposición sugerida."""
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
@@ -2406,11 +2435,13 @@ async def api_stock(request: Request, account_id: int, target_days: int = 15):
     token = await refresh_ml_token(account_id)
     if not token:
         raise HTTPException(502)
-    return await _build_stock_payload(account_id, acc, token, user, target_days)
+    return await _build_stock_payload(account_id, acc, token, user, target_days,
+                                      sales_days=sales_days, user_id=user_id)
 
 
 @app.get("/api/stock/{account_id:int}/export")
-async def api_stock_export(request: Request, account_id: int, target_days: int = 15):
+async def api_stock_export(request: Request, account_id: int, target_days: int = 15,
+                           sales_days: int = 7):
     """Descarga el listado de stock valorizado en Excel (mismas columnas que la
     tabla). Cada variante agrupada va en su propia fila debajo del original."""
     user_id = get_session_user_id(request)
@@ -2423,8 +2454,10 @@ async def api_stock_export(request: Request, account_id: int, target_days: int =
     token = await refresh_ml_token(account_id)
     if not token:
         raise HTTPException(502)
-    payload = await _build_stock_payload(account_id, acc, token, user, target_days)
+    payload = await _build_stock_payload(account_id, acc, token, user, target_days,
+                                         sales_days=sales_days, user_id=user_id)
     items = payload["items"]
+    sd = payload["sales_days"]
     import io
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment
@@ -2433,7 +2466,7 @@ async def api_stock_export(request: Request, account_id: int, target_days: int =
     ws = wb.active
     ws.title = "Stock valorizado"
     headers = ["SKU", "Stock ML", "Stock Full", "Stock total", "Precio venta",
-               "Valorizado", "Última compra", "Aging (días)", "Ventas 7d",
+               "Valorizado", "Última compra", "Aging (días)", f"Ventas {sd}d",
                "Prom/día", "Días cobertura", "Reposición sug."]
     ws.append(headers)
     fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
@@ -2460,7 +2493,7 @@ async def api_stock_export(request: Request, account_id: int, target_days: int =
         # Variantes agrupadas: una fila por variante (solo SKU, stock y ventas).
         for v in (it.get("variantes") or []):
             ws.append([f"   ↳ {v['sku']}", "", "", v.get("stock_total", ""), "",
-                       "", "", "", v.get("ventas_7d", ""), "", "", ""])
+                       "", "", "", v.get("ventas", ""), "", "", ""])
     widths = [28, 10, 10, 11, 14, 16, 14, 12, 10, 10, 14, 14]
     for i, w in enumerate(widths, start=1):
         ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = w
