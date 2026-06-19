@@ -2344,19 +2344,22 @@ async def _build_stock_payload(account_id, acc, token, user, target_days,
     prices = {r["sku"]: float(r["price"]) for r in price_rows}
     variant_map = _get_variant_map(cost_aid)  # {variante: original}, compartida por usuario
 
-    def grp(s):
-        return variant_map.get(s, s)
-
     today_ar = (datetime.utcnow() - timedelta(hours=3)).date()
-    # Universo de SKUs = catálogo de ESTA cuenta (stock + base de precios + base
-    # de variantes + lo que ESTA cuenta vendió). NO usamos las ventas de las
-    # otras cuentas para el universo (si no, se cuelan SKU que no son de acá),
-    # pero sí para los NÚMEROS de venta (sales7).
-    all_skus = (set(stock) | set(prices) | set(variant_map)
-                | set(variant_map.values()) | set(sales_own))
+    # UNIVERSO = SOLO los SKU cargados en la base de precios. El stock se busca en
+    # ML por ese SKU y la venta sale del ranking (todas las cuentas), sumando las
+    # variantes (Base SKU) bajo su original. SKUs que ML/ventas traen pero NO
+    # están en la base, NO se muestran.
+    price_skus = set(prices)
+    variants_of: dict = {}            # original -> [variantes] (desde Base SKU)
+    for v, o in variant_map.items():
+        variants_of.setdefault(o, []).append(v)
     members: dict = {}
-    for s in all_skus:
-        members.setdefault(grp(s), []).append(s)
+    for original in price_skus:
+        # Si este SKU de la base es a su vez variante de OTRO SKU de la base, no
+        # es fila propia: rolea al original (su venta se suma allá).
+        if original in variant_map and variant_map[original] in price_skus:
+            continue
+        members[original] = [original] + variants_of.get(original, [])
 
     def _stock_total(s):
         si = stock.get(s) or {}
