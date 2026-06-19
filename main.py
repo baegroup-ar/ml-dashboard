@@ -322,7 +322,9 @@ def init_db():
             )
         """))
         conn.execute(text("ALTER TABLE product_sale_prices ADD COLUMN IF NOT EXISTS stock_fisico NUMERIC(14,2)"))
-        # Mapeo manual de variantes → SKU original (para Stock valorizado).
+        # Mapeo manual: SKU componente (lo que se vende) → SKU original (el que
+        # tiene stock) × cantidad. Sirve para variantes (cantidad 1) y combos
+        # (cantidad N, o varias filas con el mismo componente para multi-producto).
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS sku_variants (
                 account_id INTEGER NOT NULL REFERENCES ml_accounts(id) ON DELETE CASCADE,
@@ -332,6 +334,18 @@ def init_db():
                 PRIMARY KEY (account_id, variant_sku)
             )
         """))
+        # Migración a combos: cantidad + PK compuesta (un componente puede mapear
+        # a varios originales). El cambio de PK se hace UNA sola vez.
+        conn.execute(text("ALTER TABLE sku_variants ADD COLUMN IF NOT EXISTS qty NUMERIC(10,2) DEFAULT 1"))
+        _pk_done = conn.execute(text(
+            "SELECT 1 FROM app_meta WHERE key='sku_variants_combo_pk'")).fetchone()
+        if not _pk_done:
+            conn.execute(text("ALTER TABLE sku_variants DROP CONSTRAINT IF EXISTS sku_variants_pkey"))
+            conn.execute(text(
+                "ALTER TABLE sku_variants ADD PRIMARY KEY (account_id, variant_sku, original_sku)"))
+            conn.execute(text(
+                "INSERT INTO app_meta (key, value) VALUES ('sku_variants_combo_pk','1')"
+                " ON CONFLICT (key) DO NOTHING"))
         # Migrar iva_included → iva_rate UNA VEZ (controlado por app_meta).
         iva_migrated = conn.execute(text(
             "SELECT 1 FROM app_meta WHERE key='iva_rate_migrated'"
@@ -2089,16 +2103,29 @@ def db_save_sale_prices(account_id, items) -> int:
     return saved
 
 
-# ── Base SKU: mapeo manual de variantes → SKU original ────────────────────────
+# ── Base SKU: componente → original × cantidad (variantes y combos) ───────────
+def _coerce_qty(v) -> float:
+    try:
+        q = float(str(v).replace(",", ".")) if v not in (None, "") else 1.0
+    except (TypeError, ValueError):
+        return 1.0
+    return q if q > 0 else 1.0
+
+
 def _get_variant_map(account_id) -> dict:
-    """{variant_sku: original_sku} para la cuenta."""
+    """{componente: [(original, qty), ...]} para la cuenta. Un componente puede
+    mapear a varios originales (combo de varios productos)."""
     try:
         rows = db_fetchall(
-            "SELECT variant_sku, original_sku FROM sku_variants WHERE account_id=:a",
+            "SELECT variant_sku, original_sku, qty FROM sku_variants WHERE account_id=:a",
             {"a": account_id})
-        return {r["variant_sku"]: r["original_sku"] for r in rows}
     except Exception:
         return {}
+    out: dict = {}
+    for r in rows:
+        out.setdefault(r["variant_sku"], []).append(
+            (r["original_sku"], _coerce_qty(r.get("qty"))))
+    return out
 
 
 def _parse_variants(content: bytes, filename: str) -> list:
@@ -2115,13 +2142,15 @@ def _parse_variants(content: bytes, filename: str) -> list:
     for i, row in enumerate(rows):
         if not row:
             continue
-        variant = str(row[0] or "").strip()
+        comp = str(row[0] or "").strip()
         original = str(row[1] or "").strip() if len(row) > 1 else ""
-        if i == 0 and "original" in original.lower():
+        qty_raw = row[2] if len(row) > 2 else None
+        if i == 0 and ("original" in original.lower()
+                       or "componente" in comp.lower() or "variante" in comp.lower()):
             continue  # header
-        if not variant or not original or variant == original:
+        if not comp or not original or comp == original:
             continue
-        out.append({"variant": variant, "original": original})
+        out.append({"variant": comp, "original": original, "qty": _coerce_qty(qty_raw)})
     return out
 
 
@@ -2132,11 +2161,12 @@ def db_save_variants(account_id, items) -> int:
         o = str(it.get("original") or "").strip()
         if not v or not o or v == o:
             continue
+        q = _coerce_qty(it.get("qty"))
         db_execute(
-            "INSERT INTO sku_variants (account_id, variant_sku, original_sku, updated_at)"
-            " VALUES (:a, :v, :o, NOW()) ON CONFLICT (account_id, variant_sku)"
-            " DO UPDATE SET original_sku=EXCLUDED.original_sku, updated_at=NOW()",
-            {"a": account_id, "v": v, "o": o})
+            "INSERT INTO sku_variants (account_id, variant_sku, original_sku, qty, updated_at)"
+            " VALUES (:a, :v, :o, :q, NOW()) ON CONFLICT (account_id, variant_sku, original_sku)"
+            " DO UPDATE SET qty=EXCLUDED.qty, updated_at=NOW()",
+            {"a": account_id, "v": v, "o": o, "q": q})
         saved += 1
     return saved
 
@@ -2168,18 +2198,21 @@ async def api_base_sku_template(request: Request):
     from fastapi.responses import StreamingResponse
     wb = Workbook()
     ws = wb.active
-    ws.title = "Variantes"
-    ws.append(["SKU variante", "SKU original"])
+    ws.title = "Base SKU"
+    ws.append(["SKU componente", "SKU original", "Cantidad"])
     fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
-    for col in (1, 2):
+    for col in (1, 2, 3):
         c = ws.cell(row=1, column=col)
         c.fill = fill
         c.font = Font(bold=True)
         c.alignment = Alignment(horizontal="center")
-    for ex in [["LE-05LTC", "LE-05LT"], ["SOP68-443-3C-CE", "SOP68-443"]]:
+    for ex in [["LE-05LTC", "LE-05LT", 1], ["SOP68-443-3C-CE", "SOP68-443", 1],
+               ["BA-USB-50CMX2", "BA-USB-50CM", 2], ["BA-USB-50CMX4", "BA-USB-50CM", 4],
+               ["COMBO-AB", "PROD-A", 1], ["COMBO-AB", "PROD-B", 1]]:
         ws.append(ex)
     ws.column_dimensions["A"].width = 24
     ws.column_dimensions["B"].width = 24
+    ws.column_dimensions["C"].width = 12
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
@@ -2197,10 +2230,11 @@ async def api_base_sku_list(request: Request, account_id: int):
         raise HTTPException(404)
     aid = _cost_account_id_for(get_user(user_id), account_id)  # compartida por usuario
     rows = db_fetchall(
-        "SELECT variant_sku, original_sku, updated_at FROM sku_variants"
-        " WHERE account_id=:a ORDER BY original_sku, variant_sku", {"a": aid})
+        "SELECT variant_sku, original_sku, qty, updated_at FROM sku_variants"
+        " WHERE account_id=:a ORDER BY variant_sku, original_sku", {"a": aid})
     return {"items": [
         {"variant": r["variant_sku"], "original": r["original_sku"],
+         "qty": _coerce_qty(r.get("qty")),
          "updated_at": r["updated_at"].isoformat() if r.get("updated_at") else None}
         for r in rows]}
 
@@ -2216,24 +2250,28 @@ async def api_base_sku_add(request: Request, account_id: int):
     variant = str(body.get("variant") or "").strip()
     original = str(body.get("original") or "").strip()
     if not variant or not original:
-        raise HTTPException(400, "SKU variante y SKU original son obligatorios.")
+        raise HTTPException(400, "SKU componente y SKU original son obligatorios.")
     if variant == original:
-        raise HTTPException(400, "El variante no puede ser igual al original.")
+        raise HTTPException(400, "El componente no puede ser igual al original.")
     aid = _cost_account_id_for(get_user(user_id), account_id)
-    db_save_variants(aid, [{"variant": variant, "original": original}])
+    db_save_variants(aid, [{"variant": variant, "original": original, "qty": body.get("qty")}])
     return {"ok": True}
 
 
 @app.delete("/api/base-sku/{account_id:int}/{variant}")
-async def api_base_sku_delete(request: Request, account_id: int, variant: str):
+async def api_base_sku_delete(request: Request, account_id: int, variant: str, original: str = ""):
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
     if not _account_for_user(account_id, user_id):
         raise HTTPException(404)
     aid = _cost_account_id_for(get_user(user_id), account_id)
-    db_execute("DELETE FROM sku_variants WHERE account_id=:a AND variant_sku=:v",
-               {"a": aid, "v": variant})
+    if original:
+        db_execute("DELETE FROM sku_variants WHERE account_id=:a AND variant_sku=:v AND original_sku=:o",
+                   {"a": aid, "v": variant, "o": original})
+    else:
+        db_execute("DELETE FROM sku_variants WHERE account_id=:a AND variant_sku=:v",
+                   {"a": aid, "v": variant})
     return {"ok": True}
 
 
@@ -2248,16 +2286,29 @@ async def api_base_sku_delete_bulk(request: Request, account_id: int):
     aid = _cost_account_id_for(get_user(user_id), account_id)
     body = await request.json()
     if body.get("all"):
-        n = db_execute("DELETE FROM sku_variants WHERE account_id=:a", {"a": aid})
+        db_execute("DELETE FROM sku_variants WHERE account_id=:a", {"a": aid})
         return {"ok": True, "deleted": "all"}
-    variants = [str(v).strip() for v in (body.get("variants") or []) if str(v).strip()]
-    if not variants:
-        raise HTTPException(400, "No se indicaron variantes para borrar.")
+    # Pares (componente, original) — cada fila es un mapeo puntual.
+    pairs = body.get("pairs") or []
     deleted = 0
-    for v in variants:
-        db_execute("DELETE FROM sku_variants WHERE account_id=:a AND variant_sku=:v",
-                   {"a": aid, "v": v})
+    for p in pairs:
+        v = str((p or {}).get("variant") or "").strip()
+        o = str((p or {}).get("original") or "").strip()
+        if not v:
+            continue
+        if o:
+            db_execute("DELETE FROM sku_variants WHERE account_id=:a AND variant_sku=:v AND original_sku=:o",
+                       {"a": aid, "v": v, "o": o})
+        else:
+            db_execute("DELETE FROM sku_variants WHERE account_id=:a AND variant_sku=:v",
+                       {"a": aid, "v": v})
         deleted += 1
+    # Compat: también acepta una lista simple de componentes.
+    for v in [str(x).strip() for x in (body.get("variants") or []) if str(x).strip()]:
+        db_execute("DELETE FROM sku_variants WHERE account_id=:a AND variant_sku=:v", {"a": aid, "v": v})
+        deleted += 1
+    if not deleted:
+        raise HTTPException(400, "No se indicaron filas para borrar.")
     return {"ok": True, "deleted": deleted}
 
 
@@ -2292,24 +2343,26 @@ async def api_base_sku_export(request: Request, account_id: int):
         raise HTTPException(404)
     aid = _cost_account_id_for(get_user(user_id), account_id)
     rows = db_fetchall(
-        "SELECT variant_sku, original_sku FROM sku_variants WHERE account_id=:a"
-        " ORDER BY original_sku, variant_sku", {"a": aid})
+        "SELECT variant_sku, original_sku, qty FROM sku_variants WHERE account_id=:a"
+        " ORDER BY variant_sku, original_sku", {"a": aid})
     import io
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment
     from fastapi.responses import StreamingResponse
     wb = Workbook()
     ws = wb.active
-    ws.title = "Variantes"
-    ws.append(["SKU variante", "SKU original"])
+    ws.title = "Base SKU"
+    ws.append(["SKU componente", "SKU original", "Cantidad"])
     fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
-    for col in (1, 2):
+    for col in (1, 2, 3):
         c = ws.cell(row=1, column=col)
         c.fill = fill
         c.font = Font(bold=True)
         c.alignment = Alignment(horizontal="center")
     for r in rows:
-        ws.append([r.get("variant_sku") or "", r.get("original_sku") or ""])
+        ws.append([r.get("variant_sku") or "", r.get("original_sku") or "",
+                   _coerce_qty(r.get("qty"))])
+    ws.column_dimensions["C"].width = 12
     ws.column_dimensions["A"].width = 24
     ws.column_dimensions["B"].width = 24
     buf = io.BytesIO()
@@ -2359,31 +2412,27 @@ async def _build_stock_payload(account_id, acc, token, user, target_days,
         sales_aids = [account_id]
     if account_id not in sales_aids:
         sales_aids.append(account_id)
-    sales7 = _sales_by_sku_multi(sales_aids, sd)        # números: TODAS las cuentas
-    sales_own = _sales_by_sku(account_id, sd)           # universo: solo la cuenta del stock
+    sales7 = _sales_by_sku_multi(sales_aids, sd)        # venta: TODAS las cuentas
     cost_aid = _cost_account_id_for(user, account_id)
     last_buy = _last_purchase_by_sku(cost_aid)
     price_rows = db_fetchall(
         "SELECT sku, price FROM product_sale_prices WHERE account_id=:a", {"a": account_id})
     prices = {r["sku"]: float(r["price"]) for r in price_rows}
-    variant_map = _get_variant_map(cost_aid)  # {variante: original}, compartida por usuario
+    # {componente: [(original, qty), ...]} — variantes (qty 1) y combos (qty N o
+    # varios originales). Compartida por usuario.
+    variant_map = _get_variant_map(cost_aid)
 
     today_ar = (datetime.utcnow() - timedelta(hours=3)).date()
-    # UNIVERSO = SOLO los SKU cargados en la base de precios. El stock se busca en
-    # ML por ese SKU y la venta sale del ranking (todas las cuentas), sumando las
-    # variantes (Base SKU) bajo su original. SKUs que ML/ventas traen pero NO
-    # están en la base, NO se muestran.
+    # UNIVERSO = SOLO los SKU cargados en la base de precios (= los que tienen
+    # stock real). Cuando se vende un COMPONENTE (variante/combo), su venta se
+    # explota sobre el/los ORIGINAL(es) × cantidad. Lo que no está en la base no
+    # se muestra.
     price_skus = set(prices)
-    variants_of: dict = {}            # original -> [variantes] (desde Base SKU)
-    for v, o in variant_map.items():
-        variants_of.setdefault(o, []).append(v)
-    members: dict = {}
-    for original in price_skus:
-        # Si este SKU de la base es a su vez variante de OTRO SKU de la base, no
-        # es fila propia: rolea al original (su venta se suma allá).
-        if original in variant_map and variant_map[original] in price_skus:
-            continue
-        members[original] = [original] + variants_of.get(original, [])
+    # original -> [(componente, qty)] que le aportan venta.
+    contrib_to: dict = {}
+    for comp, lst in variant_map.items():
+        for (orig, qty) in lst:
+            contrib_to.setdefault(orig, []).append((comp, qty))
 
     def _stock_total(s):
         si = stock.get(s) or {}
@@ -2392,7 +2441,11 @@ async def _build_stock_payload(account_id, acc, token, user, target_days,
     items = []
     total_valor = 0.0
     sin_precio = 0
-    for original, mem in members.items():
+    for original in price_skus:
+        # Si este SKU de la base es a su vez un COMPONENTE que mapea a otro SKU de
+        # la base, no es fila propia: rolea allá (su venta se suma en el original).
+        if original in variant_map and any(o in price_skus for (o, _q) in variant_map[original]):
+            continue
         sinfo = stock.get(original) or {}
         st_propio = int(sinfo.get("propio", 0))   # SOLO el stock del original
         st_full = int(sinfo.get("full", 0))
@@ -2410,31 +2463,22 @@ async def _build_stock_payload(account_id, acc, token, user, target_days,
                 aging = (today_ar - datetime.strptime(ultima[:10], "%Y-%m-%d").date()).days
             except Exception:
                 aging = None
-        # Venta del grupo = original + TODAS sus variantes (sumadas). Venta
-        # propia = SOLO el SKU original (lo que se muestra al desplegar).
-        u_total = sum(int(sales7.get(m, 0)) for m in mem)
+        # Venta propia = venta directa del SKU original. Venta total = propia +
+        # (cada componente/combo × su cantidad).
         u_own = int(sales7.get(original, 0))
+        comps = contrib_to.get(original, [])
+        u_total = u_own + sum(int(sales7.get(c, 0)) * q for (c, q) in comps)
         avg_daily = u_total / sd
         avg_own = u_own / sd
         cobertura = round(st_total / avg_daily, 1) if avg_daily > 0 else None
         sugerido = max(0, round(avg_daily * td - st_total)) if avg_daily > 0 else 0
         variantes = [
-            {"sku": m, "stock_total": _stock_total(m), "ventas": int(sales7.get(m, 0))}
-            for m in sorted(mem) if m != original
+            {"sku": c, "qty": q, "ventas_raw": int(sales7.get(c, 0)),
+             "ventas": int(round(int(sales7.get(c, 0)) * q))}
+            for (c, q) in sorted(comps)
         ]
-        # Origen del SKU (de qué fuente entró al listado), para diagnóstico.
-        origen = []
-        if any(m in stock for m in mem):
-            origen.append("publicación ML")
-        if any(m in prices for m in mem):
-            origen.append("base de precios")
-        if any(m in variant_map or m in set(variant_map.values()) for m in mem):
-            origen.append("Base SKU")
-        if any(int(sales_own.get(m, 0)) > 0 for m in mem):
-            origen.append("venta propia")
         items.append({
             "sku": original,
-            "origen": ", ".join(origen) or "—",
             "stock": st_propio,
             "stock_full": st_full,
             "stock_total": st_total,

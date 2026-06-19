@@ -59,9 +59,9 @@
 <main>
   <h1>Base SKU</h1>
   <p class="lead">
-    Indicá qué SKU son <b>variantes</b> y cuál es su <b>SKU original</b>. Otras pestañas (ej. Stock valorizado)
-    levantan este mapeo: agrupan las variantes bajo el original, toman el stock del original y suman las ventas de todas.
-    Los SKU que no estén acá se usan tal cual.
+    Asociá cada <b>SKU componente</b> (lo que se vende) con su <b>SKU original</b> (el que tiene stock) y una <b>cantidad</b>.
+    Variante → cantidad 1. Combo x2/x3 → cantidad N. Combo de varios productos → varias filas con el mismo componente.
+    En Stock valorizado, cuando se vende un componente, su venta se suma al original × la cantidad.
   </p>
 
   {% if accounts %}
@@ -80,18 +80,20 @@
   </div>
 
   <div class="card">
-    <h3>Cargar mapeo de variantes</h3>
+    <h3>Cargar mapeo (variantes y combos)</h3>
     <div class="row" style="flex-wrap:wrap;">
       <input type="file" id="file" accept=".xlsx,.xlsm,.csv" />
       <button class="green" onclick="uploadFile()" id="btn-upload">Subir archivo</button>
       <a href="#" onclick="downloadExport(event)" style="padding:8px 14px;border:1px solid #1a8a5a;border-radius:8px;background:#fff;color:#1a8a5a;font-size:13px;text-decoration:none;">⬇ Descargar cargados</a>
       <a href="/api/base-sku/template" download="plantilla_base_sku.xlsx" style="padding:8px 14px;border:1px solid #3483FA;border-radius:8px;background:#fff;color:#3483FA;font-size:13px;text-decoration:none;">Descargar plantilla</a>
     </div>
-    <div class="help-box">Columnas esperadas: <code>SKU variante</code> y <code>SKU original</code>. Cada fila dice que ese variante pertenece a ese original. Subir actualiza los existentes y agrega los nuevos.</div>
+    <div class="help-box">Columnas: <code>SKU componente</code>, <code>SKU original</code>, <code>Cantidad</code>. Cuando se vende el <b>componente</b>, suma <b>cantidad × unidades</b> al <b>original</b>. Variante → cantidad <b>1</b>. Combo x2/x3 → cantidad <b>N</b>. Combo de varios productos → varias filas con el mismo componente. Subir actualiza/agrega.</div>
     <div class="row" style="margin-top:12px;">
-      <input type="text" id="m-variant" placeholder="SKU variante" style="width:220px;text-transform:uppercase;" />
+      <input type="text" id="m-variant" placeholder="SKU componente" style="width:200px;text-transform:uppercase;" />
       <span style="color:#888;">→</span>
-      <input type="text" id="m-original" placeholder="SKU original" style="width:220px;text-transform:uppercase;" />
+      <input type="text" id="m-original" placeholder="SKU original" style="width:200px;text-transform:uppercase;" />
+      <span style="color:#888;">×</span>
+      <input type="number" id="m-qty" placeholder="Cant." value="1" min="0.01" step="0.01" style="width:80px;" />
       <button class="primary" onclick="addOne()">Agregar / actualizar</button>
       <span id="msg" style="font-size:12px;color:#888;"></span>
     </div>
@@ -109,7 +111,7 @@
       <table>
         <thead><tr>
           <th style="width:30px;"><input type="checkbox" id="check-all" onchange="toggleAll(this)" /></th>
-          <th>SKU variante</th><th>SKU original</th><th style="text-align:right;">Acción</th>
+          <th>SKU componente</th><th>SKU original</th><th class="num">Cantidad</th><th style="text-align:right;">Acción</th>
         </tr></thead>
         <tbody id="tbody"></tbody>
       </table>
@@ -133,9 +135,12 @@ async function loadList() {
     ITEMS = (await r.json()).items || [];
   } catch (e) { ITEMS = []; }
   SELECTED.clear();
-  document.getElementById('count-label').textContent = `${ITEMS.length} variantes mapeadas`;
+  document.getElementById('count-label').textContent = `${ITEMS.length} filas mapeadas`;
   renderList();
 }
+
+// Clave única por fila = componente + original.
+function rowKey(r) { return (r.variant || '') + '' + (r.original || ''); }
 
 function filteredRows() {
   const q = (document.getElementById('search').value || '').trim().toLowerCase();
@@ -146,24 +151,29 @@ function filteredRows() {
 function renderList() {
   const rows = filteredRows();
   const tb = document.getElementById('tbody');
-  tb.innerHTML = rows.length ? rows.map(r => `<tr>
-    <td><input type="checkbox" class="row-check" data-v="${esc(r.variant)}" ${SELECTED.has(r.variant) ? 'checked' : ''} onchange="onRowCheck(this)" /></td>
-    <td>${esc(r.variant)}</td>
-    <td><b>${esc(r.original)}</b></td>
-    <td style="text-align:right;"><button class="btn-delete" onclick="delOne('${esc(r.variant)}')">Eliminar</button></td>
-  </tr>`).join('') : '<tr><td colspan="4" class="empty">Sin variantes cargadas.</td></tr>';
+  tb.innerHTML = rows.length ? rows.map(r => {
+    const k = rowKey(r);
+    const qty = (r.qty != null) ? r.qty : 1;
+    return `<tr>
+      <td><input type="checkbox" class="row-check" data-k="${esc(k)}" ${SELECTED.has(k) ? 'checked' : ''} onchange="onRowCheck(this)" /></td>
+      <td>${esc(r.variant)}</td>
+      <td><b>${esc(r.original)}</b></td>
+      <td class="num">${Number(qty) === 1 ? '1' : qty}</td>
+      <td style="text-align:right;"><button class="btn-delete" onclick="delOne('${esc(r.variant)}','${esc(r.original)}')">Eliminar</button></td>
+    </tr>`;
+  }).join('') : '<tr><td colspan="5" class="empty">Sin filas cargadas.</td></tr>';
   updateBulkUI();
 }
 
 function onRowCheck(cb) {
-  const v = cb.getAttribute('data-v');
-  if (cb.checked) SELECTED.add(v); else SELECTED.delete(v);
+  const k = cb.getAttribute('data-k');
+  if (cb.checked) SELECTED.add(k); else SELECTED.delete(k);
   updateBulkUI();
 }
 
 function toggleAll(cb) {
   // Selecciona/deselecciona TODAS las filas que coinciden con el filtro actual.
-  for (const r of filteredRows()) { if (cb.checked) SELECTED.add(r.variant); else SELECTED.delete(r.variant); }
+  for (const r of filteredRows()) { if (cb.checked) SELECTED.add(rowKey(r)); else SELECTED.delete(rowKey(r)); }
   document.querySelectorAll('.row-check').forEach(c => { c.checked = cb.checked; });
   updateBulkUI();
 }
@@ -175,19 +185,20 @@ function updateBulkUI() {
   btn.disabled = n === 0;
   const allCb = document.getElementById('check-all');
   const rows = filteredRows();
-  if (allCb) allCb.checked = rows.length > 0 && rows.every(r => SELECTED.has(r.variant));
+  if (allCb) allCb.checked = rows.length > 0 && rows.every(r => SELECTED.has(rowKey(r)));
 }
 
 async function deleteSelected() {
-  const variants = [...SELECTED];
-  if (!variants.length) return;
-  if (!confirm(`¿Eliminar ${variants.length} variante(s) seleccionada(s)?`)) return;
+  const keys = [...SELECTED];
+  if (!keys.length) return;
+  if (!confirm(`¿Eliminar ${keys.length} fila(s) seleccionada(s)?`)) return;
+  const pairs = keys.map(k => { const [variant, original] = k.split(''); return { variant, original }; });
   const msg = document.getElementById('bulk-msg');
   msg.textContent = 'Eliminando...';
   try {
     const r = await fetch(`/api/base-sku/${accId()}/delete-bulk`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ variants }) });
+      body: JSON.stringify({ pairs }) });
     const j = await r.json();
     if (!r.ok) throw new Error(j.detail || 'error');
     msg.textContent = `Listo: ${j.deleted} eliminadas.`;
@@ -197,7 +208,7 @@ async function deleteSelected() {
 
 async function deleteAll() {
   if (!ITEMS.length) return;
-  if (!confirm(`¿Eliminar TODAS las ${ITEMS.length} variantes de esta cuenta? Esta acción no se puede deshacer.`)) return;
+  if (!confirm(`¿Eliminar TODAS las ${ITEMS.length} filas de esta cuenta? Esta acción no se puede deshacer.`)) return;
   const msg = document.getElementById('bulk-msg');
   msg.textContent = 'Eliminando todo...';
   try {
@@ -223,7 +234,7 @@ async function uploadFile() {
     const r = await fetch(`/api/base-sku/${accId()}/upload`, { method: 'POST', body: fd });
     const j = await r.json();
     if (!r.ok) throw new Error(j.detail || 'error');
-    msg.textContent = `Listo: ${j.saved} variantes cargadas.`;
+    msg.textContent = `Listo: ${j.saved} filas cargadas.`;
     loadList();
   } catch (e) { msg.textContent = 'Error: ' + e.message; }
   finally { btn.disabled = false; }
@@ -232,24 +243,27 @@ async function uploadFile() {
 async function addOne() {
   const variant = (document.getElementById('m-variant').value || '').trim();
   const original = (document.getElementById('m-original').value || '').trim();
+  const qty = parseFloat(document.getElementById('m-qty').value) || 1;
   const msg = document.getElementById('msg');
-  if (!variant || !original) { msg.textContent = 'Completá variante y original.'; return; }
+  if (!variant || !original) { msg.textContent = 'Completá componente y original.'; return; }
   try {
     const r = await fetch(`/api/base-sku/${accId()}`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ variant, original }) });
+      body: JSON.stringify({ variant, original, qty }) });
     const j = await r.json();
     if (!r.ok) throw new Error(j.detail || 'error');
     msg.textContent = 'Guardado.';
     document.getElementById('m-variant').value = ''; document.getElementById('m-original').value = '';
+    document.getElementById('m-qty').value = '1';
     loadList();
   } catch (e) { msg.textContent = 'Error: ' + e.message; }
 }
 
-async function delOne(variant) {
-  if (!confirm('¿Eliminar el mapeo de ' + variant + '?')) return;
+async function delOne(variant, original) {
+  if (!confirm('¿Eliminar la fila ' + variant + ' → ' + original + '?')) return;
   try {
-    await fetch(`/api/base-sku/${accId()}/${encodeURIComponent(variant)}`, { method: 'DELETE' });
+    const q = original ? `?original=${encodeURIComponent(original)}` : '';
+    await fetch(`/api/base-sku/${accId()}/${encodeURIComponent(variant)}${q}`, { method: 'DELETE' });
     loadList();
   } catch (e) {}
 }
