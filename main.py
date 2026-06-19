@@ -1045,6 +1045,7 @@ PAGE_ROUTES = {
     "etiquetas": "/etiquetas",
     "stock": "/stock",
     "base_sku": "/base-sku",
+    "pvp": "/pvp",
 }
 
 
@@ -1972,11 +1973,10 @@ async def _fetch_stock_by_sku(account_id, acc, token) -> dict:
                 return []
 
         results = await asyncio.gather(*[_get_chunk(c) for c in chunks])
-    # Stock por SKU EXACTO (sin colapsar): muchas publicaciones comparten el
-    # mismo SKU (distintas cuotas) y reflejan el MISMO stock físico, así que NO
-    # sumamos entre publicaciones — tomamos el mayor available_quantity (evita
-    # publicaciones en 0). El agrupado de variantes lo hace la tabla manual luego.
-    # Separamos stock propio (depósito) del stock en Full (fulfillment).
+    # STOCK ML (depósito): muchas publicaciones comparten el mismo SKU (cuotas) y
+    # reflejan el MISMO stock físico → tomamos el MÁXIMO (no sumar).
+    # FULL (fulfillment): cada publicación tiene su PROPIO stock en el depósito de
+    # ML → se SUMAN todas las publicaciones del mismo SKU.
     propio: dict = {}
     full: dict = {}
     for res in results:
@@ -1987,12 +1987,13 @@ async def _fetch_stock_by_sku(account_id, acc, token) -> dict:
             if not isinstance(body, dict):
                 continue
             is_full = ((body.get("shipping") or {}).get("logistic_type") == "fulfillment")
-            tgt = full if is_full else propio
             for sku, qty in _stock_sku_qty(body):
                 if not sku:
                     continue
-                if qty > tgt.get(sku, -1):
-                    tgt[sku] = qty
+                if is_full:
+                    full[sku] = full.get(sku, 0) + qty       # Full: suma
+                elif qty > propio.get(sku, -1):
+                    propio[sku] = qty                         # Depósito: máximo
     for sku in set(propio) | set(full):
         stock[sku] = {"propio": int(propio.get(sku, 0)), "full": int(full.get(sku, 0))}
     STOCK_CACHE[account_id] = {"at": datetime.utcnow(), "stock": dict(stock)}
@@ -2374,6 +2375,26 @@ async def api_base_sku_export(request: Request, account_id: int):
         headers={"Content-Disposition": f'attachment; filename="base_sku_{nick}.xlsx"'})
 
 
+@app.get("/pvp", response_class=HTMLResponse)
+async def pvp_page(request: Request):
+    """Base de precios de venta (PVP) como pestaña propia, editable por SKU."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse("/")
+    user = get_user(user_id)
+    _r = _page_redirect(user, "pvp")
+    if _r:
+        return _r
+    accounts = get_visible_accounts(user_id, user)
+    accounts = await refresh_visible_account_nicknames(accounts)
+    only_bae = [a for a in accounts if (a.get("nickname") or "").strip().upper() == "TIENDA BAE"]
+    selector_accounts = only_bae or accounts
+    return templates.TemplateResponse("pvp.html", {
+        "request": request, "user": user, "accounts": selector_accounts,
+        "perms": user_permissions(user),
+    })
+
+
 @app.get("/stock", response_class=HTMLResponse)
 async def stock_page(request: Request):
     user_id = get_session_user_id(request)
@@ -2666,6 +2687,29 @@ async def api_stock_prices_delete(request: Request, account_id: int, sku: str):
     db_execute("DELETE FROM product_sale_prices WHERE account_id=:a AND sku=:s",
                {"a": account_id, "s": sku})
     return {"ok": True}
+
+
+@app.post("/api/stock/{account_id:int}/prices/delete-bulk")
+async def api_stock_prices_delete_bulk(request: Request, account_id: int):
+    """Borra varios precios (o todos) de un saque."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    if not _account_for_user(account_id, user_id):
+        raise HTTPException(404)
+    body = await request.json()
+    if body.get("all"):
+        db_execute("DELETE FROM product_sale_prices WHERE account_id=:a", {"a": account_id})
+        return {"ok": True, "deleted": "all"}
+    skus = [str(s).strip() for s in (body.get("skus") or []) if str(s).strip()]
+    if not skus:
+        raise HTTPException(400, "No se indicaron SKU para borrar.")
+    deleted = 0
+    for s in skus:
+        db_execute("DELETE FROM product_sale_prices WHERE account_id=:a AND sku=:s",
+                   {"a": account_id, "s": s})
+        deleted += 1
+    return {"ok": True, "deleted": deleted}
 
 
 @app.post("/api/stock/{account_id:int}/prices/upload")
@@ -7289,6 +7333,7 @@ PAGES = [
     ("etiquetas",   "Etiquetas"),
     ("stock",       "Stock valorizado"),
     ("base_sku",    "Base SKU"),
+    ("pvp",         "PVP"),
 ]
 PAGE_KEYS = {k for k, _ in PAGES}
 

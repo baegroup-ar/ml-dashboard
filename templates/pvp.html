@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Base SKU · Panel ML</title>
+  <title>PVP · Panel ML</title>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -26,12 +26,14 @@
     button.green { padding: 8px 16px; border: none; border-radius: 8px; background: #1a8a5a; color: #fff; font-size: 13px; cursor: pointer; }
     table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 12px; }
     th { padding: 9px 12px; text-align: left; color: #888; font-weight: 500; border-bottom: 1px solid #eee; font-size: 12px; }
+    th.num, td.num { text-align: right; }
     td { padding: 8px 12px; border-bottom: 1px solid #f0f0ee; color: #333; }
     tbody tr:hover { background: #fafaf8; }
     .empty { padding: 2rem; text-align: center; color: #aaa; font-size: 13px; }
     .help-box { background: #f5f5f3; border-left: 3px solid #3483FA; padding: 10px 14px; font-size: 12px; color: #666; margin-top: 10px; }
     .help-box code { background: #fff; padding: 1px 6px; border-radius: 4px; border: 1px solid #e5e5e3; font-family: monospace; }
     .btn-delete { color: #c0392b; background: none; border: none; cursor: pointer; font-size: 12px; }
+    .price-input { width: 120px; text-align: right; }
     .no-accounts { text-align: center; padding: 4rem; color: #888; font-size: 14px; }
   </style>
 </head>
@@ -49,8 +51,8 @@
     {% if 'ranking' in perms %}<a href="/ranking" class="btn-nav">Ranking</a>{% endif %}
     {% if 'etiquetas' in perms %}<a href="/etiquetas" class="btn-nav">Etiquetas</a>{% endif %}
     {% if 'stock' in perms %}<a href="/stock" class="btn-nav">Stock valorizado</a>{% endif %}
-    <span style="color:#3483FA;font-weight:500;">Base SKU</span>
-    {% if 'pvp' in perms %}<a href="/pvp" class="btn-nav">PVP</a>{% endif %}
+    {% if 'base_sku' in perms %}<a href="/base-sku" class="btn-nav">Base SKU</a>{% endif %}
+    <span style="color:#3483FA;font-weight:500;">PVP</span>
     <span style="color:#888;">{{ user.name }}</span>
     {% if user.is_admin %}<a href="/admin" style="font-size:12px;color:#3483FA;text-decoration:none;">Admin</a>{% endif %}
     <a href="/logout" class="btn-nav">Salir</a>
@@ -58,11 +60,10 @@
 </nav>
 
 <main>
-  <h1>Base SKU</h1>
+  <h1>PVP — Precios de venta</h1>
   <p class="lead">
-    Asociá cada <b>SKU componente</b> (lo que se vende) con su <b>SKU original</b> (el que tiene stock) y una <b>cantidad</b>.
-    Variante → cantidad 1. Combo x2/x3 → cantidad N. Combo de varios productos → varias filas con el mismo componente.
-    En Stock valorizado, cuando se vende un componente, su venta se suma al original × la cantidad.
+    Tu base de <b>precios de venta por SKU</b>. Cargá por Excel o a mano, modificá el precio de cada SKU y eliminá los que no quieras.
+    El <b>Stock valorizado</b> arma su listado en base a esta base (solo aparece lo que esté cargado acá).
   </p>
 
   {% if accounts %}
@@ -81,27 +82,24 @@
   </div>
 
   <div class="card">
-    <h3>Cargar mapeo (variantes y combos)</h3>
+    <h3>Cargar precios</h3>
     <div class="row" style="flex-wrap:wrap;">
       <input type="file" id="file" accept=".xlsx,.xlsm,.csv" />
       <button class="green" onclick="uploadFile()" id="btn-upload">Subir archivo</button>
       <a href="#" onclick="downloadExport(event)" style="padding:8px 14px;border:1px solid #1a8a5a;border-radius:8px;background:#fff;color:#1a8a5a;font-size:13px;text-decoration:none;">⬇ Descargar cargados</a>
-      <a href="/api/base-sku/template" download="plantilla_base_sku.xlsx" style="padding:8px 14px;border:1px solid #3483FA;border-radius:8px;background:#fff;color:#3483FA;font-size:13px;text-decoration:none;">Descargar plantilla</a>
+      <a href="/api/stock/prices/template" download="plantilla_precios_venta.xlsx" style="padding:8px 14px;border:1px solid #3483FA;border-radius:8px;background:#fff;color:#3483FA;font-size:13px;text-decoration:none;">Descargar plantilla</a>
     </div>
-    <div class="help-box">Columnas: <code>SKU componente</code>, <code>SKU original</code>, <code>Cantidad</code>. Cuando se vende el <b>componente</b>, suma <b>cantidad × unidades</b> al <b>original</b>. Variante → cantidad <b>1</b>. Combo x2/x3 → cantidad <b>N</b>. Combo de varios productos → varias filas con el mismo componente. Subir actualiza/agrega.</div>
+    <div class="help-box">Columnas: <code>SKU</code> y <code>Precio de venta</code>. Usá el <b>SKU base</b> (sin cuotas). Subir actualiza los existentes y agrega los nuevos.</div>
     <div class="row" style="margin-top:12px;">
-      <input type="text" id="m-variant" placeholder="SKU componente" style="width:200px;text-transform:uppercase;" />
-      <span style="color:#888;">→</span>
-      <input type="text" id="m-original" placeholder="SKU original" style="width:200px;text-transform:uppercase;" />
-      <span style="color:#888;">×</span>
-      <input type="number" id="m-qty" placeholder="Cant." value="1" min="0.01" step="0.01" style="width:80px;" />
+      <input type="text" id="m-sku" placeholder="SKU" style="width:220px;text-transform:uppercase;" />
+      <input type="number" id="m-price" placeholder="Precio de venta" step="0.01" min="0" style="width:160px;" />
       <button class="primary" onclick="addOne()">Agregar / actualizar</button>
       <span id="msg" style="font-size:12px;color:#888;"></span>
     </div>
   </div>
 
   <div class="card">
-    <h3>Mapeo cargado</h3>
+    <h3>Precios cargados</h3>
     <div class="row" style="gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:8px;">
       <input type="text" id="search" placeholder="Buscar SKU..." oninput="renderList()" style="padding:6px 10px;border:1px solid #ddd;border-radius:8px;font-size:13px;width:280px;" />
       <button class="btn-delete" style="border:1px solid #c0392b;border-radius:8px;padding:6px 12px;" onclick="deleteSelected()" id="btn-del-sel">Eliminar seleccionados (0)</button>
@@ -112,7 +110,7 @@
       <table>
         <thead><tr>
           <th style="width:30px;"><input type="checkbox" id="check-all" onchange="toggleAll(this)" /></th>
-          <th>SKU componente</th><th>SKU original</th><th class="num">Cantidad</th><th style="text-align:right;">Acción</th>
+          <th>SKU</th><th class="num">Precio de venta</th><th style="text-align:right;">Acción</th>
         </tr></thead>
         <tbody id="tbody"></tbody>
       </table>
@@ -129,56 +127,65 @@ let ITEMS = [];
 let SELECTED = new Set();
 function accId() { return document.getElementById('account-select').value; }
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+const fmt = n => '$' + Number(n || 0).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 async function loadList() {
   try {
-    const r = await fetch(`/api/base-sku/${accId()}`);
+    const r = await fetch(`/api/stock/${accId()}/prices`);
     ITEMS = (await r.json()).items || [];
   } catch (e) { ITEMS = []; }
   SELECTED.clear();
-  document.getElementById('count-label').textContent = `${ITEMS.length} filas mapeadas`;
+  document.getElementById('count-label').textContent = `${ITEMS.length} SKU con precio`;
   renderList();
 }
-
-// Clave única por fila = componente + original.
-function rowKey(r) { return (r.variant || '') + '' + (r.original || ''); }
 
 function filteredRows() {
   const q = (document.getElementById('search').value || '').trim().toLowerCase();
   if (!q) return ITEMS;
-  return ITEMS.filter(r => (r.variant + ' ' + r.original).toLowerCase().includes(q));
+  return ITEMS.filter(r => (r.sku || '').toLowerCase().includes(q));
 }
 
 function renderList() {
   const rows = filteredRows();
   const tb = document.getElementById('tbody');
-  tb.innerHTML = rows.length ? rows.map(r => {
-    const k = rowKey(r);
-    const qty = (r.qty != null) ? r.qty : 1;
-    return `<tr>
-      <td><input type="checkbox" class="row-check" data-k="${esc(k)}" ${SELECTED.has(k) ? 'checked' : ''} onchange="onRowCheck(this)" /></td>
-      <td>${esc(r.variant)}</td>
-      <td><b>${esc(r.original)}</b></td>
-      <td class="num">${Number(qty) === 1 ? '1' : qty}</td>
-      <td style="text-align:right;"><button class="btn-delete" onclick="delOne('${esc(r.variant)}','${esc(r.original)}')">Eliminar</button></td>
-    </tr>`;
-  }).join('') : '<tr><td colspan="5" class="empty">Sin filas cargadas.</td></tr>';
+  tb.innerHTML = rows.length ? rows.map(r => `<tr>
+    <td><input type="checkbox" class="row-check" data-s="${esc(r.sku)}" ${SELECTED.has(r.sku) ? 'checked' : ''} onchange="onRowCheck(this)" /></td>
+    <td><b>${esc(r.sku)}</b></td>
+    <td class="num">
+      <input type="number" class="price-input" value="${r.price}" step="0.01" min="0"
+        onkeydown="if(event.key==='Enter')savePrice('${esc(r.sku)}', this.value, this)"
+        onblur="savePrice('${esc(r.sku)}', this.value, this)" />
+    </td>
+    <td style="text-align:right;"><button class="btn-delete" onclick="delOne('${esc(r.sku)}')">Eliminar</button></td>
+  </tr>`).join('') : '<tr><td colspan="4" class="empty">Sin precios cargados.</td></tr>';
   updateBulkUI();
+}
+
+async function savePrice(sku, value, el) {
+  const price = parseFloat(value);
+  const orig = (ITEMS.find(i => i.sku === sku) || {}).price;
+  if (isNaN(price) || price === orig) return;   // sin cambios
+  try {
+    const r = await fetch(`/api/stock/${accId()}/prices`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sku, price }) });
+    if (r.ok) {
+      const it = ITEMS.find(i => i.sku === sku); if (it) it.price = price;
+      if (el) { el.style.background = '#eafaf0'; setTimeout(() => { el.style.background = ''; }, 800); }
+    }
+  } catch (e) {}
 }
 
 function onRowCheck(cb) {
-  const k = cb.getAttribute('data-k');
-  if (cb.checked) SELECTED.add(k); else SELECTED.delete(k);
+  const s = cb.getAttribute('data-s');
+  if (cb.checked) SELECTED.add(s); else SELECTED.delete(s);
   updateBulkUI();
 }
-
 function toggleAll(cb) {
-  // Selecciona/deselecciona TODAS las filas que coinciden con el filtro actual.
-  for (const r of filteredRows()) { if (cb.checked) SELECTED.add(rowKey(r)); else SELECTED.delete(rowKey(r)); }
+  for (const r of filteredRows()) { if (cb.checked) SELECTED.add(r.sku); else SELECTED.delete(r.sku); }
   document.querySelectorAll('.row-check').forEach(c => { c.checked = cb.checked; });
   updateBulkUI();
 }
-
 function updateBulkUI() {
   const n = SELECTED.size;
   const btn = document.getElementById('btn-del-sel');
@@ -186,34 +193,30 @@ function updateBulkUI() {
   btn.disabled = n === 0;
   const allCb = document.getElementById('check-all');
   const rows = filteredRows();
-  if (allCb) allCb.checked = rows.length > 0 && rows.every(r => SELECTED.has(rowKey(r)));
+  if (allCb) allCb.checked = rows.length > 0 && rows.every(r => SELECTED.has(r.sku));
 }
 
 async function deleteSelected() {
-  const keys = [...SELECTED];
-  if (!keys.length) return;
-  if (!confirm(`¿Eliminar ${keys.length} fila(s) seleccionada(s)?`)) return;
-  const pairs = keys.map(k => { const [variant, original] = k.split(''); return { variant, original }; });
-  const msg = document.getElementById('bulk-msg');
-  msg.textContent = 'Eliminando...';
+  const skus = [...SELECTED];
+  if (!skus.length) return;
+  if (!confirm(`¿Eliminar ${skus.length} SKU seleccionado(s)?`)) return;
+  const msg = document.getElementById('bulk-msg'); msg.textContent = 'Eliminando...';
   try {
-    const r = await fetch(`/api/base-sku/${accId()}/delete-bulk`, {
+    const r = await fetch(`/api/stock/${accId()}/prices/delete-bulk`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pairs }) });
+      body: JSON.stringify({ skus }) });
     const j = await r.json();
     if (!r.ok) throw new Error(j.detail || 'error');
-    msg.textContent = `Listo: ${j.deleted} eliminadas.`;
+    msg.textContent = `Listo: ${j.deleted} eliminados.`;
     loadList();
   } catch (e) { msg.textContent = 'Error: ' + e.message; }
 }
-
 async function deleteAll() {
   if (!ITEMS.length) return;
-  if (!confirm(`¿Eliminar TODAS las ${ITEMS.length} filas de esta cuenta? Esta acción no se puede deshacer.`)) return;
-  const msg = document.getElementById('bulk-msg');
-  msg.textContent = 'Eliminando todo...';
+  if (!confirm(`¿Eliminar TODOS los ${ITEMS.length} precios de esta cuenta? Esta acción no se puede deshacer.`)) return;
+  const msg = document.getElementById('bulk-msg'); msg.textContent = 'Eliminando todo...';
   try {
-    const r = await fetch(`/api/base-sku/${accId()}/delete-bulk`, {
+    const r = await fetch(`/api/stock/${accId()}/prices/delete-bulk`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ all: true }) });
     const j = await r.json();
@@ -223,7 +226,7 @@ async function deleteAll() {
   } catch (e) { msg.textContent = 'Error: ' + e.message; }
 }
 
-function downloadExport(e) { if (e) e.preventDefault(); window.location = `/api/base-sku/${accId()}/export`; }
+function downloadExport(e) { if (e) e.preventDefault(); window.location = `/api/stock/${accId()}/prices/export`; }
 
 async function uploadFile() {
   const f = document.getElementById('file').files[0];
@@ -232,39 +235,36 @@ async function uploadFile() {
   const btn = document.getElementById('btn-upload'); btn.disabled = true;
   const fd = new FormData(); fd.append('file', f);
   try {
-    const r = await fetch(`/api/base-sku/${accId()}/upload`, { method: 'POST', body: fd });
+    const r = await fetch(`/api/stock/${accId()}/prices/upload`, { method: 'POST', body: fd });
     const j = await r.json();
     if (!r.ok) throw new Error(j.detail || 'error');
-    msg.textContent = `Listo: ${j.saved} filas cargadas.`;
+    msg.textContent = `Listo: ${j.saved} precios cargados.`;
     loadList();
   } catch (e) { msg.textContent = 'Error: ' + e.message; }
   finally { btn.disabled = false; }
 }
 
 async function addOne() {
-  const variant = (document.getElementById('m-variant').value || '').trim();
-  const original = (document.getElementById('m-original').value || '').trim();
-  const qty = parseFloat(document.getElementById('m-qty').value) || 1;
+  const sku = (document.getElementById('m-sku').value || '').trim();
+  const price = parseFloat(document.getElementById('m-price').value);
   const msg = document.getElementById('msg');
-  if (!variant || !original) { msg.textContent = 'Completá componente y original.'; return; }
+  if (!sku || isNaN(price)) { msg.textContent = 'Completá SKU y precio.'; return; }
   try {
-    const r = await fetch(`/api/base-sku/${accId()}`, {
+    const r = await fetch(`/api/stock/${accId()}/prices`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ variant, original, qty }) });
+      body: JSON.stringify({ sku, price }) });
     const j = await r.json();
     if (!r.ok) throw new Error(j.detail || 'error');
     msg.textContent = 'Guardado.';
-    document.getElementById('m-variant').value = ''; document.getElementById('m-original').value = '';
-    document.getElementById('m-qty').value = '1';
+    document.getElementById('m-sku').value = ''; document.getElementById('m-price').value = '';
     loadList();
   } catch (e) { msg.textContent = 'Error: ' + e.message; }
 }
 
-async function delOne(variant, original) {
-  if (!confirm('¿Eliminar la fila ' + variant + ' → ' + original + '?')) return;
+async function delOne(sku) {
+  if (!confirm('¿Eliminar el precio de ' + sku + '?')) return;
   try {
-    const q = original ? `?original=${encodeURIComponent(original)}` : '';
-    await fetch(`/api/base-sku/${accId()}/${encodeURIComponent(variant)}${q}`, { method: 'DELETE' });
+    await fetch(`/api/stock/${accId()}/prices/${encodeURIComponent(sku)}`, { method: 'DELETE' });
     loadList();
   } catch (e) {}
 }
