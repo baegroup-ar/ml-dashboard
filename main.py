@@ -2395,8 +2395,19 @@ async def _build_stock_payload(account_id, acc, token, user, target_days,
             {"sku": m, "stock_total": _stock_total(m), "ventas": int(sales7.get(m, 0))}
             for m in sorted(mem) if m != original
         ]
+        # Origen del SKU (de qué fuente entró al listado), para diagnóstico.
+        origen = []
+        if any(m in stock for m in mem):
+            origen.append("publicación ML")
+        if any(m in prices for m in mem):
+            origen.append("base de precios")
+        if any(m in variant_map or m in set(variant_map.values()) for m in mem):
+            origen.append("Base SKU")
+        if any(int(sales_own.get(m, 0)) > 0 for m in mem):
+            origen.append("venta propia")
         items.append({
             "sku": original,
+            "origen": ", ".join(origen) or "—",
             "stock": st_propio,
             "stock_full": st_full,
             "stock_total": st_total,

@@ -270,7 +270,7 @@ function renderTable() {
     const ventasShown = (open && vars.length && r.ventas_own != null) ? r.ventas_own : r.ventas_7d;
     const promShown = (open && vars.length && r.venta_prom_own != null) ? r.venta_prom_own : r._avg;
     let html = `<tr>
-      <td>${caret}<b>${esc(r.sku)}</b>${varTag}</td>
+      <td title="Origen: ${esc(r.origen || '—')}">${caret}<b>${esc(r.sku)}</b>${varTag}</td>
       <td class="num">${r.stock}</td>
       <td class="num">${full > 0 ? full : '—'}</td>
       <td class="num"><b>${r._total}</b></td>
