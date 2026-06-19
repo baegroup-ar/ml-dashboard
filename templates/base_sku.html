@@ -99,10 +99,18 @@
 
   <div class="card">
     <h3>Mapeo cargado</h3>
-    <input type="text" id="search" placeholder="Buscar SKU..." oninput="renderList()" style="padding:6px 10px;border:1px solid #ddd;border-radius:8px;font-size:13px;width:280px;" />
+    <div class="row" style="gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:8px;">
+      <input type="text" id="search" placeholder="Buscar SKU..." oninput="renderList()" style="padding:6px 10px;border:1px solid #ddd;border-radius:8px;font-size:13px;width:280px;" />
+      <button class="btn-delete" style="border:1px solid #c0392b;border-radius:8px;padding:6px 12px;" onclick="deleteSelected()" id="btn-del-sel">Eliminar seleccionados (0)</button>
+      <button class="btn-delete" style="border:1px solid #c0392b;border-radius:8px;padding:6px 12px;" onclick="deleteAll()">Eliminar TODO</button>
+      <span id="bulk-msg" style="font-size:12px;color:#888;"></span>
+    </div>
     <div style="overflow-x:auto;">
       <table>
-        <thead><tr><th>SKU variante</th><th>SKU original</th><th style="text-align:right;">Acción</th></tr></thead>
+        <thead><tr>
+          <th style="width:30px;"><input type="checkbox" id="check-all" onchange="toggleAll(this)" /></th>
+          <th>SKU variante</th><th>SKU original</th><th style="text-align:right;">Acción</th>
+        </tr></thead>
         <tbody id="tbody"></tbody>
       </table>
     </div>
@@ -115,6 +123,7 @@
 
 <script>
 let ITEMS = [];
+let SELECTED = new Set();
 function accId() { return document.getElementById('account-select').value; }
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 
@@ -123,20 +132,83 @@ async function loadList() {
     const r = await fetch(`/api/base-sku/${accId()}`);
     ITEMS = (await r.json()).items || [];
   } catch (e) { ITEMS = []; }
+  SELECTED.clear();
   document.getElementById('count-label').textContent = `${ITEMS.length} variantes mapeadas`;
   renderList();
 }
 
-function renderList() {
+function filteredRows() {
   const q = (document.getElementById('search').value || '').trim().toLowerCase();
-  let rows = ITEMS;
-  if (q) rows = rows.filter(r => (r.variant + ' ' + r.original).toLowerCase().includes(q));
+  if (!q) return ITEMS;
+  return ITEMS.filter(r => (r.variant + ' ' + r.original).toLowerCase().includes(q));
+}
+
+function renderList() {
+  const rows = filteredRows();
   const tb = document.getElementById('tbody');
   tb.innerHTML = rows.length ? rows.map(r => `<tr>
+    <td><input type="checkbox" class="row-check" data-v="${esc(r.variant)}" ${SELECTED.has(r.variant) ? 'checked' : ''} onchange="onRowCheck(this)" /></td>
     <td>${esc(r.variant)}</td>
     <td><b>${esc(r.original)}</b></td>
     <td style="text-align:right;"><button class="btn-delete" onclick="delOne('${esc(r.variant)}')">Eliminar</button></td>
-  </tr>`).join('') : '<tr><td colspan="3" class="empty">Sin variantes cargadas.</td></tr>';
+  </tr>`).join('') : '<tr><td colspan="4" class="empty">Sin variantes cargadas.</td></tr>';
+  updateBulkUI();
+}
+
+function onRowCheck(cb) {
+  const v = cb.getAttribute('data-v');
+  if (cb.checked) SELECTED.add(v); else SELECTED.delete(v);
+  updateBulkUI();
+}
+
+function toggleAll(cb) {
+  // Selecciona/deselecciona TODAS las filas que coinciden con el filtro actual.
+  for (const r of filteredRows()) { if (cb.checked) SELECTED.add(r.variant); else SELECTED.delete(r.variant); }
+  document.querySelectorAll('.row-check').forEach(c => { c.checked = cb.checked; });
+  updateBulkUI();
+}
+
+function updateBulkUI() {
+  const n = SELECTED.size;
+  const btn = document.getElementById('btn-del-sel');
+  btn.textContent = `Eliminar seleccionados (${n})`;
+  btn.disabled = n === 0;
+  const allCb = document.getElementById('check-all');
+  const rows = filteredRows();
+  if (allCb) allCb.checked = rows.length > 0 && rows.every(r => SELECTED.has(r.variant));
+}
+
+async function deleteSelected() {
+  const variants = [...SELECTED];
+  if (!variants.length) return;
+  if (!confirm(`¿Eliminar ${variants.length} variante(s) seleccionada(s)?`)) return;
+  const msg = document.getElementById('bulk-msg');
+  msg.textContent = 'Eliminando...';
+  try {
+    const r = await fetch(`/api/base-sku/${accId()}/delete-bulk`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ variants }) });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.detail || 'error');
+    msg.textContent = `Listo: ${j.deleted} eliminadas.`;
+    loadList();
+  } catch (e) { msg.textContent = 'Error: ' + e.message; }
+}
+
+async function deleteAll() {
+  if (!ITEMS.length) return;
+  if (!confirm(`¿Eliminar TODAS las ${ITEMS.length} variantes de esta cuenta? Esta acción no se puede deshacer.`)) return;
+  const msg = document.getElementById('bulk-msg');
+  msg.textContent = 'Eliminando todo...';
+  try {
+    const r = await fetch(`/api/base-sku/${accId()}/delete-bulk`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ all: true }) });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.detail || 'error');
+    msg.textContent = 'Listo: se eliminó todo.';
+    loadList();
+  } catch (e) { msg.textContent = 'Error: ' + e.message; }
 }
 
 function downloadExport(e) { if (e) e.preventDefault(); window.location = `/api/base-sku/${accId()}/export`; }

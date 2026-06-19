@@ -2237,6 +2237,30 @@ async def api_base_sku_delete(request: Request, account_id: int, variant: str):
     return {"ok": True}
 
 
+@app.post("/api/base-sku/{account_id:int}/delete-bulk")
+async def api_base_sku_delete_bulk(request: Request, account_id: int):
+    """Borra varias variantes (o todas) de un saque."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    if not _account_for_user(account_id, user_id):
+        raise HTTPException(404)
+    aid = _cost_account_id_for(get_user(user_id), account_id)
+    body = await request.json()
+    if body.get("all"):
+        n = db_execute("DELETE FROM sku_variants WHERE account_id=:a", {"a": aid})
+        return {"ok": True, "deleted": "all"}
+    variants = [str(v).strip() for v in (body.get("variants") or []) if str(v).strip()]
+    if not variants:
+        raise HTTPException(400, "No se indicaron variantes para borrar.")
+    deleted = 0
+    for v in variants:
+        db_execute("DELETE FROM sku_variants WHERE account_id=:a AND variant_sku=:v",
+                   {"a": aid, "v": v})
+        deleted += 1
+    return {"ok": True, "deleted": deleted}
+
+
 @app.post("/api/base-sku/{account_id:int}/upload")
 async def api_base_sku_upload(request: Request, account_id: int):
     user_id = get_session_user_id(request)
