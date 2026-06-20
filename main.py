@@ -1930,24 +1930,28 @@ def _stock_sku_from_obj(obj: dict) -> str:
 
 
 def _stock_sku_qty(item: dict):
-    """[(sku, qty)] del item. Si tiene variaciones, una entrada por variación."""
+    """[(sku, qty, inventory_id)] del item. El inventory_id sirve para NO contar
+    dos veces el mismo stock de Full cuando varias publicaciones (cuotas) comparten
+    el mismo inventario."""
     out = []
+    item_inv = item.get("inventory_id") or ""
     variations = item.get("variations") or []
     if variations:
         for var in variations:
             if isinstance(var, dict):
-                out.append((_stock_sku_from_obj(var), int(var.get("available_quantity") or 0)))
+                inv = var.get("inventory_id") or item_inv or ""
+                out.append((_stock_sku_from_obj(var), int(var.get("available_quantity") or 0), inv))
     else:
-        out.append((_stock_sku_from_obj(item), int(item.get("available_quantity") or 0)))
+        out.append((_stock_sku_from_obj(item), int(item.get("available_quantity") or 0), item_inv))
     return out
 
 
-async def _fetch_stock_by_sku(account_id, acc, token) -> dict:
-    """Devuelve {sku: stock_total} sumando available_quantity de todas las
-    publicaciones activas (y sus variaciones)."""
+async def _fetch_stock_by_sku(account_id, acc, token, force=False) -> dict:
+    """Devuelve {sku: {propio, full}}. force=True ignora el caché (para cuando el
+    usuario acaba de cambiar stock en ML)."""
     now = datetime.utcnow()
     cached = STOCK_CACHE.get(account_id)
-    if cached and (now - cached["at"]).total_seconds() < STOCK_CACHE_TTL_SECONDS:
+    if not force and cached and (now - cached["at"]).total_seconds() < STOCK_CACHE_TTL_SECONDS:
         return dict(cached["stock"])
     headers = {"Authorization": f"Bearer {token}"}
     seller_id = acc["ml_user_id"]
@@ -1964,7 +1968,7 @@ async def _fetch_stock_by_sku(account_id, acc, token) -> dict:
                         f"{ML_API_URL}/items",
                         headers=headers,
                         params={"ids": ",".join(chunk),
-                                "attributes": "id,seller_sku,available_quantity,attributes,variations,status,shipping"},
+                                "attributes": "id,seller_sku,available_quantity,inventory_id,attributes,variations,status,shipping"},
                     )
                     if r.status_code == 200:
                         return r.json()
@@ -1974,11 +1978,12 @@ async def _fetch_stock_by_sku(account_id, acc, token) -> dict:
 
         results = await asyncio.gather(*[_get_chunk(c) for c in chunks])
     # STOCK ML (depósito): muchas publicaciones comparten el mismo SKU (cuotas) y
-    # reflejan el MISMO stock físico → tomamos el MÁXIMO (no sumar).
-    # FULL (fulfillment): cada publicación tiene su PROPIO stock en el depósito de
-    # ML → se SUMAN todas las publicaciones del mismo SKU.
+    # reflejan el MISMO stock físico → MÁXIMO (no sumar).
+    # FULL (fulfillment): se suma, pero por INVENTORY_ID distinto — varias
+    # publicaciones (cuotas) del mismo SKU comparten el mismo inventario Full, así
+    # que ese stock se cuenta UNA sola vez (no se multiplica por publicación).
     propio: dict = {}
-    full: dict = {}
+    full_inv: dict = {}    # sku -> {inventory_id: qty}
     for res in results:
         if not isinstance(res, list):
             continue
@@ -1987,13 +1992,17 @@ async def _fetch_stock_by_sku(account_id, acc, token) -> dict:
             if not isinstance(body, dict):
                 continue
             is_full = ((body.get("shipping") or {}).get("logistic_type") == "fulfillment")
-            for sku, qty in _stock_sku_qty(body):
+            for sku, qty, inv in _stock_sku_qty(body):
                 if not sku:
                     continue
                 if is_full:
-                    full[sku] = full.get(sku, 0) + qty       # Full: suma
+                    d = full_inv.setdefault(sku, {})
+                    key = inv or "_noinv"
+                    if qty > d.get(key, -1):
+                        d[key] = qty           # mismo inventario: una sola vez
                 elif qty > propio.get(sku, -1):
-                    propio[sku] = qty                         # Depósito: máximo
+                    propio[sku] = qty           # depósito: máximo
+    full = {sku: sum(d.values()) for sku, d in full_inv.items()}
     for sku in set(propio) | set(full):
         stock[sku] = {"propio": int(propio.get(sku, 0)), "full": int(full.get(sku, 0))}
     STOCK_CACHE[account_id] = {"at": datetime.utcnow(), "stock": dict(stock)}
@@ -2419,13 +2428,13 @@ async def stock_page(request: Request):
 
 
 async def _build_stock_payload(account_id, acc, token, user, target_days,
-                               sales_days=7, user_id=None):
+                               sales_days=7, user_id=None, refresh=False):
     """Calcula el listado de stock valorizado (compartido por el endpoint JSON y
     el de exportación a Excel). El STOCK es de `account_id`; la VENTA se suma
     sobre TODAS las cuentas de ML del usuario."""
     td = max(1, min(int(target_days or 15), 365))
     sd = max(1, min(int(sales_days or 7), 90))
-    stock = await _fetch_stock_by_sku(account_id, acc, token)
+    stock = await _fetch_stock_by_sku(account_id, acc, token, force=bool(refresh))
     # Ventas: sumadas sobre todas las cuentas del usuario.
     if user_id is not None:
         sales_aids = [a["id"] for a in get_visible_accounts(user_id, user)]
@@ -2530,9 +2539,9 @@ async def _build_stock_payload(account_id, acc, token, user, target_days,
 
 @app.get("/api/stock/{account_id:int}")
 async def api_stock(request: Request, account_id: int, target_days: int = 15,
-                    sales_days: int = 7):
+                    sales_days: int = 7, refresh: int = 0):
     """Stock por SKU + precio de venta + última compra + venta promedio del
-    período elegido (7/15/30) + reposición sugerida."""
+    período elegido (7/15/30) + reposición sugerida. refresh=1 ignora el caché."""
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
@@ -2544,7 +2553,8 @@ async def api_stock(request: Request, account_id: int, target_days: int = 15,
     if not token:
         raise HTTPException(502)
     return await _build_stock_payload(account_id, acc, token, user, target_days,
-                                      sales_days=sales_days, user_id=user_id)
+                                      sales_days=sales_days, user_id=user_id,
+                                      refresh=bool(refresh))
 
 
 @app.get("/api/stock/{account_id:int}/export")

@@ -96,23 +96,7 @@
     <div id="load-msg"></div>
   </div>
 
-  <!-- Base de precios de venta -->
-  <div class="card">
-    <h3>Base de precios de venta por SKU</h3>
-    <div class="row" style="flex-wrap:wrap;">
-      <input type="file" id="price-file" accept=".xlsx,.xlsm,.csv" />
-      <button class="green" onclick="uploadPrices()" id="btn-price-upload">Subir archivo</button>
-      <a href="#" onclick="downloadPrices(event)" style="padding:8px 14px;border:1px solid #1a8a5a;border-radius:8px;background:#fff;color:#1a8a5a;font-size:13px;text-decoration:none;">⬇ Descargar cargados</a>
-      <a href="/api/stock/prices/template" download="plantilla_precios_venta.xlsx" style="padding:8px 14px;border:1px solid #3483FA;border-radius:8px;background:#fff;color:#3483FA;font-size:13px;text-decoration:none;">Descargar plantilla</a>
-    </div>
-    <div class="help-box">Columnas esperadas: <code>SKU</code> y <code>Precio de venta</code>. Subir actualiza los SKU existentes y agrega los nuevos. Usá el <b>SKU base</b> (sin cuotas).</div>
-    <div class="row" style="margin-top:12px;">
-      <input type="text" id="price-sku" placeholder="SKU" style="width:200px;text-transform:uppercase;" />
-      <input type="number" id="price-val" placeholder="Precio de venta" step="0.01" style="width:160px;" />
-      <button class="primary" onclick="addPrice()">Agregar / actualizar</button>
-      <span id="price-msg" style="font-size:12px;color:#888;"></span>
-    </div>
-  </div>
+  <p style="font-size:12px;color:#888;margin:-6px 0 12px;">Los precios de venta se cargan y editan en la pestaña <a href="/pvp" style="color:#3483FA;">PVP</a>.</p>
 
   <div class="card" id="result-card" style="display:none;">
     <div class="row" style="justify-content:space-between;">
