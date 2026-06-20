@@ -90,7 +90,7 @@
         <option value="{{ acc.id }}" {% if acc.nickname == default_nick or (not has_default and loop.first) %}selected{% endif %}>{{ acc.nickname }}</option>
         {% endfor %}
       </select>
-      <button class="primary" id="btn-load" onclick="loadStock()">Cargar stock</button>
+      <button class="primary" id="btn-load" onclick="loadStock(true)">Cargar stock</button>
       <span id="status-label" style="font-size:12px;color:#888;"></span>
     </div>
     <div id="load-msg"></div>
@@ -159,7 +159,7 @@ function onAccountChange() {
   document.getElementById('load-msg').innerHTML = '';
 }
 
-async function loadStock() {
+async function loadStock(force) {
   const btn = document.getElementById('btn-load');
   const msg = document.getElementById('load-msg');
   msg.innerHTML = '';
@@ -176,7 +176,7 @@ async function loadStock() {
         fetch(`/api/orders/${aid}?date_from=${iso(from)}&date_to=${iso(today)}`).catch(() => {})
       ));
     } catch (e) {}
-    const r = await fetch(`/api/stock/${accId()}?sales_days=${sd}`);
+    const r = await fetch(`/api/stock/${accId()}?sales_days=${sd}${force ? '&refresh=1' : ''}`);
     if (!r.ok) throw new Error('HTTP ' + r.status + ' — ' + (await r.text()).slice(0, 200));
     DATA = await r.json();
     document.getElementById('result-card').style.display = 'block';
