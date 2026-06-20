@@ -159,7 +159,7 @@ function renderList() {
       <td><input type="checkbox" class="row-check" data-k="${esc(k)}" ${SELECTED.has(k) ? 'checked' : ''} onchange="onRowCheck(this)" /></td>
       <td>${esc(r.variant)}</td>
       <td><b>${esc(r.original)}</b></td>
-      <td class="num">${Number(qty) === 1 ? '1' : qty}</td>
+      <td class="num"><input type="number" min="0.01" step="0.01" value="${Number(qty)}" data-v="${esc(r.variant)}" data-o="${esc(r.original)}" onchange="saveQty(this)" style="width:70px;padding:5px 7px;border:1px solid #ddd;border-radius:6px;font-size:13px;text-align:right;" /></td>
       <td style="text-align:right;"><button class="btn-delete" onclick="delOne('${esc(r.variant)}','${esc(r.original)}')">Eliminar</button></td>
     </tr>`;
   }).join('') : '<tr><td colspan="5" class="empty">Sin filas cargadas.</td></tr>';
@@ -258,6 +258,27 @@ async function addOne() {
     document.getElementById('m-qty').value = '1';
     loadList();
   } catch (e) { msg.textContent = 'Error: ' + e.message; }
+}
+
+async function saveQty(inp) {
+  const variant = inp.getAttribute('data-v');
+  const original = inp.getAttribute('data-o');
+  const qty = parseFloat(inp.value) || 1;
+  if (qty <= 0) { inp.value = 1; return; }
+  inp.disabled = true;
+  try {
+    const r = await fetch(`/api/base-sku/${accId()}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ variant, original, qty }) });
+    if (!r.ok) throw new Error('error');
+    // Actualizamos el item en memoria para no recargar toda la lista.
+    const it = ITEMS.find(x => x.variant === variant && x.original === original);
+    if (it) it.qty = qty;
+    inp.style.borderColor = '#1a8a5a'; inp.style.background = '#eafaf1';
+    setTimeout(() => { inp.style.borderColor = '#ddd'; inp.style.background = '#fff'; }, 900);
+  } catch (e) {
+    inp.style.borderColor = '#c0392b';
+  } finally { inp.disabled = false; }
 }
 
 async function delOne(variant, original) {
