@@ -379,11 +379,68 @@ def init_db():
         conn.commit()
 
 
+# ── Calentador de caché de órdenes ────────────────────────────────────────
+# Pre-carga/refresca order_snapshot_cache de TODAS las cuentas en background, así
+# el dashboard/ranking/stock abren instantáneos y con datos recientes frescos.
+# Cada ciclo refresca los últimos CACHE_WARMER_DAYS días (refresh=True) por cuenta;
+# es barato y mantiene al día los estados que cambian (pending→paid, refund, etc).
+CACHE_WARMER_ENABLED = os.environ.get("CACHE_WARMER_ENABLED", "1") == "1"
+CACHE_WARMER_INTERVAL_SECONDS = int(os.environ.get("CACHE_WARMER_INTERVAL_SECONDS", "1200"))  # 20 min
+CACHE_WARMER_DAYS = int(os.environ.get("CACHE_WARMER_DAYS", "7"))
+
+
+async def _warm_account_orders(acc: dict, days: int) -> int:
+    """Refresca el caché de los últimos `days` días para una cuenta. Devuelve la
+    cantidad de órdenes en caché tras el refresh (o -1 si falló)."""
+    today = datetime.utcnow().date()
+    df = str(today - timedelta(days=max(days - 1, 0)))
+    dt = str(today)
+    try:
+        await _api_orders_impl(None, acc["id"], date_from=df, date_to=dt,
+                               refresh=True, acc=acc)
+        return len(db_fetch_order_snapshots(acc["id"], df, dt))
+    except Exception as e:
+        print(f"[cache-warmer] cuenta {acc.get('id')} error: {str(e)[:160]}", flush=True)
+        return -1
+
+
+async def _orders_cache_warmer():
+    """Loop infinito: cada CACHE_WARMER_INTERVAL_SECONDS recorre todas las cuentas
+    ML con token y refresca su caché de órdenes reciente. Tolerante a fallos: un
+    error en una cuenta no corta el ciclo ni el loop."""
+    # Pequeño delay inicial para no competir con el arranque de la app.
+    await asyncio.sleep(30)
+    while True:
+        try:
+            accs = db_fetchall(
+                "SELECT * FROM ml_accounts WHERE COALESCE(access_token,'') <> '' ORDER BY id"
+            )
+            for acc in accs:
+                n = await _warm_account_orders(acc, CACHE_WARMER_DAYS)
+                if n >= 0:
+                    print(f"[cache-warmer] cuenta {acc['id']} ({acc.get('nickname')}): "
+                          f"{n} órdenes en caché ({CACHE_WARMER_DAYS}d)", flush=True)
+                # Respiro entre cuentas para no saturar la API de ML.
+                await asyncio.sleep(3)
+        except Exception as e:
+            print(f"[cache-warmer] ciclo error: {str(e)[:160]}", flush=True)
+        await asyncio.sleep(CACHE_WARMER_INTERVAL_SECONDS)
+
+
 @asynccontextmanager
 async def lifespan(app):
     init_db()
     _load_promo_floor_from_db()
-    yield
+    warmer_task = None
+    if CACHE_WARMER_ENABLED:
+        warmer_task = asyncio.create_task(_orders_cache_warmer())
+        print(f"[cache-warmer] activado: cada {CACHE_WARMER_INTERVAL_SECONDS}s, "
+              f"últimos {CACHE_WARMER_DAYS} días", flush=True)
+    try:
+        yield
+    finally:
+        if warmer_task:
+            warmer_task.cancel()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -6599,13 +6656,17 @@ async def api_orders(request: Request, account_id: int,
 async def _api_orders_impl(request: Request, account_id: int,
                      date_from: Optional[str] = None, date_to: Optional[str] = None,
                      refresh: bool = False, fast: bool = False,
-                     cache_only: bool = False):
-    user_id = get_session_user_id(request)
-    if not user_id:
-        raise HTTPException(401)
-    acc = _account_for_user(account_id, user_id)
-    if not acc:
-        raise HTTPException(404)
+                     cache_only: bool = False, acc: Optional[dict] = None):
+    # acc pre-resuelta = invocación interna sin request (ej. calentador de caché).
+    if acc is None:
+        user_id = get_session_user_id(request)
+        if not user_id:
+            raise HTTPException(401)
+        acc = _account_for_user(account_id, user_id)
+        if not acc:
+            raise HTTPException(404)
+    else:
+        user_id = acc.get("user_id")
 
     today = datetime.utcnow().date()
     df = date_from or str(today - timedelta(days=365))
