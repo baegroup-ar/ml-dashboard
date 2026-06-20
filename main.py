@@ -1946,6 +1946,40 @@ def _stock_sku_qty(item: dict):
     return out
 
 
+async def _fetch_fulfillment_stock(token, inventory_ids) -> dict:
+    """Devuelve {inventory_id: available_quantity_real_en_Full} consultando el
+    endpoint de fulfillment inventory de ML. Es la fuente de verdad del stock Full;
+    el available_quantity de /items puede reflejar depósito cuando el Full está
+    vacío. Si la consulta falla para un inventory_id, se omite (queda el dato de
+    /items como fallback)."""
+    inventory_ids = [i for i in inventory_ids if i]
+    if not inventory_ids:
+        return {}
+    headers = {"Authorization": f"Bearer {token}"}
+    out: dict = {}
+    async with httpx.AsyncClient(timeout=30) as client:
+        sem = asyncio.Semaphore(8)
+
+        async def _one(inv):
+            async with sem:
+                try:
+                    r = await client.get(
+                        f"{ML_API_URL}/inventories/{inv}/stock/fulfillment",
+                        headers=headers,
+                    )
+                    if r.status_code == 200:
+                        data = r.json()
+                        # available_quantity = lo realmente vendible en Full.
+                        q = data.get("available_quantity")
+                        if q is not None:
+                            out[inv] = int(q)
+                except Exception:
+                    pass
+
+        await asyncio.gather(*[_one(i) for i in inventory_ids])
+    return out
+
+
 async def _fetch_stock_by_sku(account_id, acc, token, force=False) -> dict:
     """Devuelve {sku: {propio, full}}. force=True ignora el caché (para cuando el
     usuario acaba de cambiar stock en ML)."""
@@ -1983,7 +2017,8 @@ async def _fetch_stock_by_sku(account_id, acc, token, force=False) -> dict:
     # publicaciones (cuotas) del mismo SKU comparten el mismo inventario Full, así
     # que ese stock se cuenta UNA sola vez (no se multiplica por publicación).
     propio: dict = {}
-    full_inv: dict = {}    # sku -> {inventory_id: qty}
+    full_inv: dict = {}    # sku -> {inventory_id: qty (reportado por /items)}
+    inv_to_sku: dict = {}  # inventory_id -> sku (para consultar fulfillment real)
     for res in results:
         if not isinstance(res, list):
             continue
@@ -2000,8 +2035,19 @@ async def _fetch_stock_by_sku(account_id, acc, token, force=False) -> dict:
                     key = inv or "_noinv"
                     if qty > d.get(key, -1):
                         d[key] = qty           # mismo inventario: una sola vez
+                    if inv:
+                        inv_to_sku[inv] = sku
                 elif qty > propio.get(sku, -1):
                     propio[sku] = qty           # depósito: máximo
+    # FUENTE DE VERDAD del stock Full: el endpoint de fulfillment inventory.
+    # El available_quantity de /items a veces refleja el stock de depósito cuando
+    # el Full está vacío (caso D-S3FT: aparecía 64 en Full sin stock real). Por eso
+    # consultamos /inventories/{id}/stock/fulfillment por cada inventory_id Full.
+    real_full_qty = await _fetch_fulfillment_stock(token, list(inv_to_sku.keys()))
+    for inv, qty in real_full_qty.items():
+        sku = inv_to_sku.get(inv)
+        if sku and sku in full_inv:
+            full_inv[sku][inv] = qty          # reemplaza el dato dudoso de /items
     full = {sku: sum(d.values()) for sku, d in full_inv.items()}
     for sku in set(propio) | set(full):
         stock[sku] = {"propio": int(propio.get(sku, 0)), "full": int(full.get(sku, 0))}
