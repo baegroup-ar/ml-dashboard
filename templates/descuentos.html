@@ -886,12 +886,19 @@
         const chkTitle = usaMl ? 'title="Al seleccionar, se aplica el descuento de ML (mayor o porque no tenes descuento cargado)."' : '';
         const finalShown = (sinDescuento || debajo) ? applyFinalPrice(it) : it.final_price;
 
-        // Descuento ML: mínimo obligatorio para participar. No mostramos el
-        // descuento sugerido/óptimo de ML porque no es el criterio operativo.
+        // Descuento ML: lo que ML le exige al vendedor (seller_percentage para
+        // promos co-fondeadas). Si hay aporte ML, lo mostramos como "(+X%)".
         const minMl = it.min_discount_pct;
+        const mlAporte = it.ml_contribution_pct;
         let descMlCell;
         if(minMl != null) {
-          descMlCell = `<b>${minMl}%</b>`;
+          if(mlAporte != null && mlAporte > 0) {
+            descMlCell = `<b>${minMl}%</b> <span style="color:#3483FA;font-size:11px;">(+${mlAporte}%)</span>`;
+          } else {
+            descMlCell = `<b>${minMl}%</b>`;
+          }
+        } else if(mlAporte != null && mlAporte > 0) {
+          descMlCell = `<span style="color:#3483FA;font-size:11px;">+${mlAporte}% ML</span>`;
         } else {
           descMlCell = '<span style="color:#bbb;">—</span>';
         }

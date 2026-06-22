@@ -6102,15 +6102,50 @@ async def api_promociones_items(
                 ml_contribution_pct = None
         if ml_contribution_pct is None and default_meli_pct is not None:
             ml_contribution_pct = default_meli_pct
-        min_candidates = []
-        for src in min_sources:
-            if isinstance(src, dict) and src:
-                p = _extract_min_discount_pct(src, original_price)
-                if p is not None:
-                    min_candidates.append(p)
-        min_discount_pct = min(min_candidates) if min_candidates else None
-        if min_discount_pct is None and default_min_pct is not None:
-            min_discount_pct = default_min_pct
+        # Para promos SMART co-fondeadas (ml_contribution_pct > 0):
+        # seller_percentage = lo que ML le exige al VENDEDOR puntualmente.
+        # Tiene prioridad sobre min_discount_percentage (nominal de campaña)
+        # y sobre la extracción por precio (que no descuenta bien el aporte ML).
+        min_discount_pct = None
+        if ml_contribution_pct:
+            _seller_pct_fields = (
+                "seller_percentage", "seller_min_discount_percentage",
+                "min_seller_discount_percentage", "nudge_seller_percentage",
+            )
+            for src in list(min_sources) + ([promo_global] if promo_global else []):
+                if not isinstance(src, dict) or not src:
+                    continue
+                for k in _seller_pct_fields:
+                    v = src.get(k)
+                    if v is not None:
+                        try:
+                            fv = float(v)
+                            if fv > 0:
+                                min_discount_pct = round(fv, 2)
+                                break
+                        except (TypeError, ValueError):
+                            pass
+                if min_discount_pct is not None:
+                    break
+        # Si no hay seller_percentage (o no es SMART), extracción estándar por precio
+        if min_discount_pct is None:
+            min_candidates = []
+            for src in min_sources:
+                if isinstance(src, dict) and src:
+                    p = _extract_min_discount_pct(src, original_price)
+                    if p is not None:
+                        min_candidates.append(p)
+            min_discount_pct = min(min_candidates) if min_candidates else None
+            if min_discount_pct is None and default_min_pct is not None:
+                min_discount_pct = default_min_pct
+            # Último fallback: _extract_seller_suggested_pct (para SMART sin campo directo)
+            if min_discount_pct is None:
+                for src in list(min_sources) + ([promo_global] if promo_global else []):
+                    if isinstance(src, dict) and src:
+                        p = _extract_seller_suggested_pct(src, original_price, ml_contribution_pct)
+                        if p is not None:
+                            min_discount_pct = p
+                            break
         # PISO HISTÓRICO: la API de ML parpadea (mismo item da 10% en una
         # llamada y 5% en la siguiente). El mínimo REAL para participar es el
         # más bajo que ML aceptó alguna vez. Guardamos ese piso por item y lo
@@ -6121,22 +6156,6 @@ async def api_promociones_items(
             min_discount_pct = PROMO_MIN_PCT_SEEN.get(seen_key, min_discount_pct)
         elif PROMO_MIN_PCT_SEEN.get(seen_key) is not None:
             min_discount_pct = PROMO_MIN_PCT_SEEN[seen_key]
-        # Fallback para promos SMART co-fondeadas: ML manda seller_percentage
-        # (lo que exige al vendedor) en lugar de max_discounted_price.
-        # _extract_min_discount_pct omite seller_percentage intencionalmente
-        # para DEAL (donde es un nominal de campaña, no un mínimo real), pero
-        # _extract_seller_suggested_pct sí lo lee y es la fuente correcta para SMART.
-        if min_discount_pct is None:
-            for src in min_sources:
-                if isinstance(src, dict) and src:
-                    p = _extract_seller_suggested_pct(src, original_price, ml_contribution_pct)
-                    if p is not None:
-                        min_discount_pct = p
-                        break
-            if min_discount_pct is None and promo_global:
-                p = _extract_seller_suggested_pct(promo_global, original_price, ml_contribution_pct)
-                if p is not None:
-                    min_discount_pct = p
         title = ""
         sku_from_ml = _extract_sku(info)
         if info:
