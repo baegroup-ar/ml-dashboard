@@ -1174,7 +1174,7 @@
     if(!ids.length) return;
     const sel = currentItems
       .filter(it => previewSelected.has(it.item_id))
-      .map(it => ({ item_id: it.item_id, promotion_type: it.promotion_type || currentPromo.type }));
+      .map(it => ({ item_id: it.item_id, promotion_type: it.promotion_type || currentPromo.type, offer_id: it.offer_id || null }));
     if(!confirm(`Vas a QUITAR ${sel.length} publicaciones de la promoción "${currentPromo.name}". Dejarán de participar. ¿Confirmás?`)) return;
     const btn = document.getElementById('btn-remove');
     btn.disabled = true; btn.textContent = 'Quitando...';

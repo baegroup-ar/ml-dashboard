@@ -6625,6 +6625,8 @@ async def api_promociones_remove(
             ptype = (it.get("promotion_type") or "DEAL").upper()
             params = {"app_version": "v2", "promotion_id": promotion_id,
                       "promotion_type": ptype}
+            if it.get("offer_id"):
+                params["offer_id"] = it["offer_id"]
             async with sem:
                 last_status = 0
                 last_error = None
