@@ -6620,14 +6620,50 @@ async def api_promociones_remove(
     async with httpx.AsyncClient(timeout=60) as client:
         sem = asyncio.Semaphore(3)
 
+        async def _resolve_remove_offer_id(iid, ptype):
+            """Busca el offer_id activo (started) para poder quitar el item."""
+            try:
+                rp = {"app_version": "v2", "promotion_id": promotion_id}
+                if ptype:
+                    rp["promotion_type"] = ptype
+                r = await client.get(
+                    f"{ML_API_URL}/seller-promotions/items/{iid}",
+                    headers=headers, params=rp,
+                )
+                if r.status_code != 200:
+                    return None
+                data = r.json()
+                for off in promo_offers_from_response(data):
+                    if not isinstance(off, dict):
+                        continue
+                    if not promo_id_matches(promo_offer_id(off), promotion_id):
+                        continue
+                    # Oferta activa: offer_id o ref_id
+                    oid = off.get("offer_id") or off.get("ref_id")
+                    if oid:
+                        return oid
+                    # Buscar dentro de offers[]
+                    for sub in (off.get("offers") or []):
+                        if isinstance(sub, dict):
+                            oid = sub.get("offer_id") or sub.get("id")
+                            if oid:
+                                return oid
+            except Exception:
+                pass
+            return None
+
         async def remove_one(it):
             iid = it.get("item_id")
             ptype = (it.get("promotion_type") or "DEAL").upper()
+            offer_id = it.get("offer_id") or None
             params = {"app_version": "v2", "promotion_id": promotion_id,
                       "promotion_type": ptype}
-            if it.get("offer_id"):
-                params["offer_id"] = it["offer_id"]
             async with sem:
+                # Si no tenemos offer_id, lo resolvemos consultando ML
+                if not offer_id:
+                    offer_id = await _resolve_remove_offer_id(iid, ptype)
+                if offer_id:
+                    params["offer_id"] = offer_id
                 last_status = 0
                 last_error = None
                 for attempt in range(5):
