@@ -6085,6 +6085,23 @@ async def api_promociones_items(
                     min_sources.append(variant)
             min_sources.append(detail)
         min_sources.append(merged)
+        # Aporte ML (co-fondeado). Se calcula ANTES de min_discount_pct
+        # porque _extract_seller_suggested_pct lo necesita como parámetro.
+        ml_contribution_pct = None
+        meli_pct = merged.get("meli_percentage")
+        if meli_pct is not None:
+            try:
+                ml_contribution_pct = float(meli_pct)
+            except (TypeError, ValueError):
+                ml_contribution_pct = None
+        elif merged.get("meli_amount") and original_price:
+            try:
+                ml_contribution_pct = round(
+                    float(merged["meli_amount"]) / float(original_price) * 100, 2)
+            except (TypeError, ValueError):
+                ml_contribution_pct = None
+        if ml_contribution_pct is None and default_meli_pct is not None:
+            ml_contribution_pct = default_meli_pct
         min_candidates = []
         for src in min_sources:
             if isinstance(src, dict) and src:
@@ -6104,6 +6121,22 @@ async def api_promociones_items(
             min_discount_pct = PROMO_MIN_PCT_SEEN.get(seen_key, min_discount_pct)
         elif PROMO_MIN_PCT_SEEN.get(seen_key) is not None:
             min_discount_pct = PROMO_MIN_PCT_SEEN[seen_key]
+        # Fallback para promos SMART co-fondeadas: ML manda seller_percentage
+        # (lo que exige al vendedor) en lugar de max_discounted_price.
+        # _extract_min_discount_pct omite seller_percentage intencionalmente
+        # para DEAL (donde es un nominal de campaña, no un mínimo real), pero
+        # _extract_seller_suggested_pct sí lo lee y es la fuente correcta para SMART.
+        if min_discount_pct is None:
+            for src in min_sources:
+                if isinstance(src, dict) and src:
+                    p = _extract_seller_suggested_pct(src, original_price, ml_contribution_pct)
+                    if p is not None:
+                        min_discount_pct = p
+                        break
+            if min_discount_pct is None and promo_global:
+                p = _extract_seller_suggested_pct(promo_global, original_price, ml_contribution_pct)
+                if p is not None:
+                    min_discount_pct = p
         title = ""
         sku_from_ml = _extract_sku(info)
         if info:
@@ -6113,23 +6146,6 @@ async def api_promociones_items(
         loaded_pct = match["pct"] if match else None
         sku_base = match["sku"] if match else ""
         sku = sku_base or sku_from_ml
-        # Aporte ML (co-fondeado). Necesario PRIMERO porque la
-        # sugerencia del vendedor depende de él.
-        ml_contribution_pct = None
-        meli_pct = merged.get("meli_percentage")
-        if meli_pct is not None:
-            try:
-                ml_contribution_pct = float(meli_pct)
-            except (TypeError, ValueError):
-                ml_contribution_pct = None
-        elif merged.get("meli_amount") and original_price:
-            try:
-                ml_contribution_pct = round(
-                    float(merged["meli_amount"]) / float(original_price) * 100, 2)
-            except (TypeError, ValueError):
-                ml_contribution_pct = None
-        if ml_contribution_pct is None and default_meli_pct is not None:
-            ml_contribution_pct = default_meli_pct
         # Compat legacy: estos campos existen en respuestas anteriores, pero
         # no representan el sugerido/optimo de ML. Los espejamos al minimo para
         # que ningun consumidor viejo vuelva a mostrar un recomendado como
