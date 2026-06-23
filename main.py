@@ -2727,14 +2727,24 @@ async def api_stock_debug_fulfillment(request: Request, account_id: int, sku: st
             # Probamos endpoints candidatos para el stock EN CAMINO (inbound)
             probes = {}
             candidates = [
-                ("operations_search",
-                 f"{ML_API_URL}/stock/fulfillment/operations/search",
+                ("inbound_search_seller",
+                 f"{ML_API_URL}/inbound-shipments/search",
+                 {"seller_id": seller_id}),
+                ("inbound_search_inv",
+                 f"{ML_API_URL}/inbound-shipments/search",
                  {"seller_id": seller_id, "inventory_id": inv}),
-                ("inbound_operations",
+                ("inbounds_search",
+                 f"{ML_API_URL}/inbounds/search",
+                 {"seller_id": seller_id, "inventory_id": inv}),
+                ("stock_inbound",
+                 f"{ML_API_URL}/stock/fulfillment/inbound/search",
+                 {"seller_id": seller_id, "inventory_id": inv}),
+                ("fbm_inbound",
+                 f"{ML_API_URL}/users/{seller_id}/items/fbm_inbound", {}),
+                ("ops_inbound_reception",
                  f"{ML_API_URL}/stock/fulfillment/operations/search",
-                 {"seller_id": seller_id, "inventory_id": inv, "type": "inbound"}),
-                ("stock_plain",
-                 f"{ML_API_URL}/inventories/{inv}/stock", {}),
+                 {"seller_id": seller_id, "inventory_id": inv,
+                  "type": "inbound_reception", "date_from": "2026-01-01T00:00:00.000-03:00"}),
             ]
             for name, url, params in candidates:
                 try:
