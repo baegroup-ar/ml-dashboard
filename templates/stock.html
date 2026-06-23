@@ -127,6 +127,7 @@
       <table>
         <thead><tr>
           <th>SKU</th><th class="num">Stock ML</th><th class="num">Stock Full</th>
+          <th class="num" title="Stock en camino a Full. Carga manual: clic para editar.">En camino</th>
           <th class="num">Stock total</th>
           <th class="num">Precio venta</th><th class="num">Valorizado</th>
           <th>Última compra</th><th class="num">Aging</th>
@@ -236,7 +237,7 @@ function renderTable() {
   const thV = document.getElementById('th-ventas');
   if (thV) thV.textContent = 'Ventas ' + sd + 'd';
   const body = document.getElementById('stock-body');
-  if (!rows.length) { body.innerHTML = '<tr><td colspan="12" class="empty">Sin datos.</td></tr>'; return; }
+  if (!rows.length) { body.innerHTML = '<tr><td colspan="13" class="empty">Sin datos.</td></tr>'; return; }
   body.innerHTML = rows.map(r => {
     const cob = r._cob == null ? '—' : (r._cob + ' d');
     const repBadge = r._sug > 0
@@ -258,6 +259,7 @@ function renderTable() {
       <td>${caret}<b>${esc(r.sku)}</b>${varTag}</td>
       <td class="num">${r.stock}</td>
       <td class="num">${full > 0 ? full : '—'}</td>
+      <td class="num"><input type="number" min="0" step="1" value="${r.stock_en_camino || 0}" title="Stock en camino a Full (manual)" style="width:50px;text-align:right;border:1px solid #ddd;border-radius:4px;padding:2px 4px;font-size:12px;" onchange="saveInbound('${esc(r.sku)}', this)"></td>
       <td class="num"><b>${r._total}</b></td>
       <td class="num">${r.price != null ? fmt(r.price) : '—'}</td>
       <td class="num">${r.valor_venta != null ? fmt(r.valor_venta) : '—'}</td>
@@ -274,7 +276,7 @@ function renderTable() {
         const vv = (v.ventas != null ? v.ventas : (v.ventas_7d || 0));
         html += `<tr style="background:#fcfcfb;">
           <td style="padding-left:32px;color:#777;">↳ ${esc(v.sku)}${qtyTag}</td>
-          <td></td><td></td><td></td><td></td><td></td><td></td><td></td>
+          <td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td>
           <td class="num" style="color:#777;" title="${v.ventas_raw != null ? v.ventas_raw + ' vendidos × ' + (v.qty||1) : ''}">${vv}</td>
           <td></td><td></td><td></td>
         </tr>`;
@@ -329,6 +331,30 @@ async function addPrice() {
     document.getElementById('price-sku').value = ''; document.getElementById('price-val').value = '';
     if (DATA) loadStock();
   } catch (e) { msg.textContent = 'Error: ' + e.message; }
+}
+
+// ── Stock en camino (carga manual, edición inline) ──
+async function saveInbound(sku, inputEl) {
+  let qty = parseInt(inputEl.value);
+  if (isNaN(qty) || qty < 0) { qty = 0; inputEl.value = 0; }
+  inputEl.disabled = true;
+  try {
+    const r = await fetch(`/api/stock/${accId()}/inbound`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sku, qty }) });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    // Actualizamos el item localmente: total = ML + Full + en camino, y revalorizamos.
+    const it = (DATA.items || []).find(x => x.sku === sku);
+    if (it) {
+      it.stock_en_camino = qty;
+      it.stock_total = (it.stock || 0) + (it.stock_full || 0) + qty;
+      it.valor_venta = (it.price != null) ? Math.round(it.stock_total * it.price * 100) / 100 : null;
+    }
+    renderTable();   // recalcula total, valorizado, cobertura, reposición y los totales del header
+  } catch (e) {
+    inputEl.disabled = false;
+    alert('No se pudo guardar el en camino: ' + e.message);
+  }
 }
 </script>
 </body>

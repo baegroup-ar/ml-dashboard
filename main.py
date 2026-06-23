@@ -322,6 +322,9 @@ def init_db():
             )
         """))
         conn.execute(text("ALTER TABLE product_sale_prices ADD COLUMN IF NOT EXISTS stock_fisico NUMERIC(14,2)"))
+        # Stock EN CAMINO a Full (carga manual): ML no lo expone vía API, así que
+        # el usuario lo carga a mano por SKU y se suma al stock total/valorizado.
+        conn.execute(text("ALTER TABLE product_sale_prices ADD COLUMN IF NOT EXISTS stock_en_camino NUMERIC(14,2)"))
         # Mapeo manual: SKU componente (lo que se vende) → SKU original (el que
         # tiene stock) × cantidad. Sirve para variantes (cantidad 1) y combos
         # (cantidad N, o varias filas con el mismo componente para multi-producto).
@@ -2554,8 +2557,12 @@ async def _build_stock_payload(account_id, acc, token, user, target_days,
     cost_aid = _cost_account_id_for(user, account_id)
     last_buy = _last_purchase_by_sku(cost_aid)
     price_rows = db_fetchall(
-        "SELECT sku, price FROM product_sale_prices WHERE account_id=:a", {"a": account_id})
+        "SELECT sku, price, stock_en_camino FROM product_sale_prices WHERE account_id=:a",
+        {"a": account_id})
     prices = {r["sku"]: float(r["price"]) for r in price_rows}
+    # Stock EN CAMINO a Full (carga manual por SKU). 0/None = sin en camino.
+    en_camino_map = {r["sku"]: int(float(r["stock_en_camino"]))
+                     for r in price_rows if r.get("stock_en_camino")}
     # {componente: [(original, qty), ...]} — variantes (qty 1) y combos (qty N o
     # varios originales). Compartida por usuario.
     variant_map = _get_variant_map(cost_aid)
@@ -2587,7 +2594,8 @@ async def _build_stock_payload(account_id, acc, token, user, target_days,
         sinfo = stock.get(original) or {}
         st_propio = int(sinfo.get("propio", 0))   # SOLO el stock del original
         st_full = int(sinfo.get("full", 0))
-        st_total = st_propio + st_full
+        st_camino = int(en_camino_map.get(original, 0))   # en camino a Full (manual)
+        st_total = st_propio + st_full + st_camino
         price = prices.get(original)
         valor = round(st_total * price, 2) if price is not None else None
         if valor is not None:
@@ -2619,6 +2627,7 @@ async def _build_stock_payload(account_id, acc, token, user, target_days,
             "sku": original,
             "stock": st_propio,
             "stock_full": st_full,
+            "stock_en_camino": st_camino,
             "stock_total": st_total,
             "price": price,
             "valor_venta": valor,
@@ -2691,7 +2700,7 @@ async def api_stock_export(request: Request, account_id: int, target_days: int =
     wb = Workbook()
     ws = wb.active
     ws.title = "Stock valorizado"
-    headers = ["SKU", "Stock ML", "Stock Full", "Stock total", "Precio venta",
+    headers = ["SKU", "Stock ML", "Stock Full", "En camino", "Stock total", "Precio venta",
                "Valorizado", "Última compra", "Aging (días)", f"Ventas {sd}d",
                "Prom/día", "Días cobertura", "Reposición sug."]
     ws.append(headers)
@@ -2706,6 +2715,7 @@ async def api_stock_export(request: Request, account_id: int, target_days: int =
             it["sku"],
             it["stock"],
             it["stock_full"] if it.get("stock_full") else 0,
+            it.get("stock_en_camino") or 0,
             it["stock_total"],
             it["price"] if it.get("price") is not None else "",
             it["valor_venta"] if it.get("valor_venta") is not None else "",
@@ -2718,9 +2728,9 @@ async def api_stock_export(request: Request, account_id: int, target_days: int =
         ])
         # Variantes agrupadas: una fila por variante (solo SKU, stock y ventas).
         for v in (it.get("variantes") or []):
-            ws.append([f"   ↳ {v['sku']}", "", "", v.get("stock_total", ""), "",
+            ws.append([f"   ↳ {v['sku']}", "", "", "", v.get("stock_total", ""), "",
                        "", "", "", v.get("ventas", ""), "", "", ""])
-    widths = [28, 10, 10, 11, 14, 16, 14, 12, 10, 10, 14, 14]
+    widths = [28, 10, 10, 10, 11, 14, 16, 14, 12, 10, 10, 14, 14]
     for i, w in enumerate(widths, start=1):
         ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = w
     buf = io.BytesIO()
@@ -2792,6 +2802,34 @@ async def api_stock_prices_add(request: Request, account_id: int):
     if not sku or price is None:
         raise HTTPException(400, "SKU y precio son obligatorios.")
     db_save_sale_prices(account_id, [{"sku": sku, "price": price}])
+    return {"ok": True}
+
+
+@app.post("/api/stock/{account_id:int}/inbound")
+async def api_stock_inbound_set(request: Request, account_id: int):
+    """Guarda el stock EN CAMINO a Full (carga manual) para un SKU. Solo aplica
+    a SKUs que ya existen en la base de precios (el universo de Stock valorizado).
+    qty puede ser 0 para limpiar."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    if not _account_for_user(account_id, user_id):
+        raise HTTPException(404)
+    body = await request.json()
+    sku = str(body.get("sku") or "").strip()
+    if not sku:
+        raise HTTPException(400, "SKU es obligatorio.")
+    try:
+        qty = float(str(body.get("qty")).replace(",", ".")) if body.get("qty") not in (None, "") else 0.0
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Cantidad inválida.")
+    qty = max(0.0, qty)
+    # Solo si el SKU ya está en la base de precios (no creamos filas nuevas).
+    db_execute(
+        "UPDATE product_sale_prices SET stock_en_camino=:q, updated_at=NOW()"
+        " WHERE account_id=:a AND sku=:s",
+        {"a": account_id, "s": sku, "q": qty},
+    )
     return {"ok": True}
 
 
