@@ -2004,7 +2004,7 @@ def _stock_sku_qty(item: dict):
 
 
 async def _fetch_fulfillment_stock(token, inventory_ids) -> dict:
-    """Devuelve {inventory_id: available_quantity_real_en_Full} consultando el
+    """Devuelve {inventory_id: {"available": int, "inbound": int}} consultando el
     endpoint de fulfillment inventory de ML. Es la fuente de verdad del stock Full;
     el available_quantity de /items puede reflejar depósito cuando el Full está
     vacío. Si la consulta falla para un inventory_id, se omite (queda el dato de
@@ -2026,10 +2026,25 @@ async def _fetch_fulfillment_stock(token, inventory_ids) -> dict:
                     )
                     if r.status_code == 200:
                         data = r.json()
-                        # available_quantity = lo realmente vendible en Full.
-                        q = data.get("available_quantity")
-                        if q is not None:
-                            out[inv] = int(q)
+                        available = data.get("available_quantity")
+                        if available is None:
+                            return
+                        # Stock en camino: puede venir como inbound.total,
+                        # inbound (int), transfer_quantity, o quantities.inbound
+                        inb = data.get("inbound")
+                        if isinstance(inb, dict):
+                            inbound = int(inb.get("total") or inb.get("ready_for_sale") or 0)
+                        elif inb is not None:
+                            try:
+                                inbound = int(inb)
+                            except (TypeError, ValueError):
+                                inbound = 0
+                        else:
+                            inbound = int(data.get("transfer_quantity") or 0)
+                            if not inbound:
+                                q = data.get("quantities") or {}
+                                inbound = int(q.get("inbound") or q.get("in_transit") or 0)
+                        out[inv] = {"available": int(available), "inbound": inbound}
                 except Exception:
                     pass
 
@@ -2101,10 +2116,11 @@ async def _fetch_stock_by_sku(account_id, acc, token, force=False) -> dict:
     # el Full está vacío (caso D-S3FT: aparecía 64 en Full sin stock real). Por eso
     # consultamos /inventories/{id}/stock/fulfillment por cada inventory_id Full.
     real_full_qty = await _fetch_fulfillment_stock(token, list(inv_to_sku.keys()))
-    for inv, qty in real_full_qty.items():
+    for inv, data in real_full_qty.items():
         sku = inv_to_sku.get(inv)
         if sku and sku in full_inv:
-            full_inv[sku][inv] = qty          # reemplaza el dato dudoso de /items
+            # available + inbound = total Full (disponible + en camino)
+            full_inv[sku][inv] = data["available"] + data["inbound"]
     full = {sku: sum(d.values()) for sku, d in full_inv.items()}
     for sku in set(propio) | set(full):
         stock[sku] = {"propio": int(propio.get(sku, 0)), "full": int(full.get(sku, 0))}
