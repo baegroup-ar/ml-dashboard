@@ -3590,35 +3590,47 @@ def _rank_from_paid(paid, variant_map=None):
             item_envio = order_envio * share
             item_ing = order_ing * share
             item_bonif = order_bonif * share
+            contrib = {
+                "ventas": 1, "unidades": int(round(qty * combo_qty)),
+                "facturacion": item_monto, "comision": item_com,
+                "ingreso_envio": item_ing, "bonificacion": item_bonif,
+                "envio": item_envio, "cmv": item_cmv,
+                "ganancia": item_monto + item_ing + item_bonif - item_com - item_envio - item_cmv,
+            }
             rec = rank.setdefault(group_sku, {
                 "sku": group_sku, "titulo": item.get("titulo") or "",
                 "ventas": 0, "unidades": 0,
                 "facturacion": 0.0, "comision": 0.0,
                 "ingreso_envio": 0.0, "bonificacion": 0.0,
                 "envio": 0.0, "cmv": 0.0, "ganancia": 0.0,
+                "_variants": {},
             })
-            rec["ventas"] += 1
-            rec["unidades"] += int(round(qty * combo_qty))
-            rec["facturacion"] += item_monto
-            rec["comision"] += item_com
-            rec["ingreso_envio"] += item_ing
-            rec["bonificacion"] += item_bonif
-            rec["envio"] += item_envio
-            rec["cmv"] += item_cmv
-            rec["ganancia"] += (
-                item_monto + item_ing + item_bonif
-                - item_com - item_envio - item_cmv
-            )
+            for k, v in contrib.items():
+                rec[k] += v
+            # Desglose: si la venta vino de un SKU variante (rolido al original),
+            # guardamos su aporte para mostrarlo como sub-fila expandible.
+            if sku != group_sku:
+                ve = rec["_variants"].setdefault(sku, dict(
+                    {"sku": sku}, ventas=0, unidades=0, facturacion=0.0,
+                    comision=0.0, ingreso_envio=0.0, bonificacion=0.0,
+                    envio=0.0, cmv=0.0, ganancia=0.0))
+                for k, v in contrib.items():
+                    ve[k] += v
     out = []
     for r in rank.values():
-        r["facturacion"] = round(r["facturacion"], 2)
-        r["comision"] = round(r["comision"], 2)
-        r["ingreso_envio"] = round(r["ingreso_envio"], 2)
-        r["bonificacion"] = round(r["bonificacion"], 2)
-        r["envio"] = round(r["envio"], 2)
-        r["cmv"] = round(r["cmv"], 2)
-        r["ganancia"] = round(r["ganancia"], 2)
+        for k in ("facturacion", "comision", "ingreso_envio", "bonificacion",
+                  "envio", "cmv", "ganancia"):
+            r[k] = round(r[k], 2)
         r["margen_pct"] = round((r["ganancia"] / r["facturacion"]) * 100, 2) if r["facturacion"] > 0 else 0
+        variantes = []
+        for ve in r.pop("_variants").values():
+            for k in ("facturacion", "comision", "ingreso_envio", "bonificacion",
+                      "envio", "cmv", "ganancia"):
+                ve[k] = round(ve[k], 2)
+            ve["margen_pct"] = round((ve["ganancia"] / ve["facturacion"]) * 100, 2) if ve["facturacion"] > 0 else 0
+            variantes.append(ve)
+        variantes.sort(key=lambda x: x["facturacion"], reverse=True)
+        r["variantes"] = variantes
         out.append(r)
     out.sort(key=lambda x: x["facturacion"], reverse=True)
     return out
@@ -5612,29 +5624,32 @@ async def api_promociones_items(
         # marcan como convergidas, por lo que salen instantáneas.
         converge_key = f"{account_id}:{promotion_id}:{status}:{promo_type_key}"
         if converge_key not in PROMO_CONVERGED and status in ("candidate", "started"):
-            MAX_CONVERGE_PASSES = 8     # techo de pasadas
-            CONVERGE_DELAY = 2.5        # s entre pasadas (> cache de ML)
-            STABLE_NEEDED = 2           # pasadas seguidas sin cambios = convergió
+            # Presupuesto moderado: más rápido que antes, pero sin sacrificar la
+            # convergencia del descuento real. Early-stop por STABLE_NEEDED hace
+            # que las promos que convergen rápido NO esperen el techo completo.
+            # El piso además se persiste en DB y se refina entre cargas.
+            MAX_CONVERGE_PASSES = 5     # techo de pasadas (antes 8)
+            CONVERGE_DELAY = 2.0        # s entre pasadas (antes 2.5; sigue > cache ML)
+            STABLE_NEEDED = 2           # 2 pasadas sin cambios = convergió (sin cambio)
             stable_passes = 0
             for _pass in range(MAX_CONVERGE_PASSES):
                 await asyncio.sleep(CONVERGE_DELAY)
                 changed = False
-                p_offset = 0
-                for _ in range(max_iterations):
-                    try:
-                        rp = await client.get(
-                            f"{ML_API_URL}/seller-promotions/promotions/{promotion_id}/items",
-                            headers=headers,
-                            params={**params, "offset": p_offset},
-                        )
-                    except Exception:
-                        break
-                    if rp.status_code != 200:
-                        break
+                # ML IGNORA el offset en este endpoint (devuelve siempre la 1ra
+                # página). Antes el loop re-pedía la misma página varias veces con
+                # offsets crecientes: round-trips duplicados sin dato nuevo. Una
+                # sola lectura por pasada cubre lo mismo y es mucho más rápida.
+                try:
+                    rp = await client.get(
+                        f"{ML_API_URL}/seller-promotions/promotions/{promotion_id}/items",
+                        headers=headers,
+                        params={**params},
+                    )
+                except Exception:
+                    rp = None
+                if rp is not None and rp.status_code == 200:
                     pdata = rp.json()
                     presults = pdata.get("results", []) if isinstance(pdata, dict) else []
-                    if not presults:
-                        break
                     for it in presults:
                         if not isinstance(it, dict) or not it.get("id"):
                             continue
@@ -5648,11 +5663,6 @@ async def api_promociones_items(
                         pct = round((1 - p / o) * 100, 2)
                         if pct > 0 and _record_promo_floor(promotion_id, it.get("id"), pct):
                             changed = True
-                    p_offset += len(presults)
-                    if len(presults) < promo_page_limit:
-                        break
-                    if expected_total > 0 and p_offset >= expected_total:
-                        break
                 stable_passes = 0 if changed else stable_passes + 1
                 if stable_passes >= STABLE_NEEDED:
                     break
@@ -5756,7 +5766,7 @@ async def api_promociones_items(
         scan_item_count = 0
         scan_matched_count = 0
         promo_details_override = []
-        detail_sem = asyncio.Semaphore(40)
+        detail_sem = asyncio.Semaphore(60)   # más concurrencia sin gatillar rate-limit de ML (antes 40)
 
         # ML ignora el `offset` en este endpoint (devuelve siempre la misma
         # primera página), así que la paginación directa queda INCOMPLETA cuando
@@ -5804,7 +5814,7 @@ async def api_promociones_items(
         # Multiget en lotes de 20 — MUCHO mas rapido que 1 request por item
         # (de N requests a N/20). ML devuelve [{code, body}, ...].
         enriched_map: dict = {}
-        mget_sem = asyncio.Semaphore(12)
+        mget_sem = asyncio.Semaphore(20)   # multiget /items en paralelo (antes 12)
         _attrs = "id,title,seller_sku,price,available_quantity,attributes,variations"
 
         async def fetch_batch(chunk):
