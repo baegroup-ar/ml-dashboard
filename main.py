@@ -2029,21 +2029,26 @@ async def _fetch_fulfillment_stock(token, inventory_ids) -> dict:
                         available = data.get("available_quantity")
                         if available is None:
                             return
-                        # Stock en camino: puede venir como inbound.total,
-                        # inbound (int), transfer_quantity, o quantities.inbound
-                        inb = data.get("inbound")
-                        if isinstance(inb, dict):
-                            inbound = int(inb.get("total") or inb.get("ready_for_sale") or 0)
-                        elif inb is not None:
-                            try:
-                                inbound = int(inb)
-                            except (TypeError, ValueError):
-                                inbound = 0
-                        else:
-                            inbound = int(data.get("transfer_quantity") or 0)
-                            if not inbound:
-                                q = data.get("quantities") or {}
-                                inbound = int(q.get("inbound") or q.get("in_transit") or 0)
+                        # Stock EN CAMINO hacia Full: viene en
+                        # not_available_detail[] con status de tránsito
+                        # (transfer/inbound/in_transit). Los demás status
+                        # (damaged/lost/withdrawal/etc) NO son en camino.
+                        inbound = 0
+                        transit_statuses = {
+                            "transfer", "inbound", "in_transit",
+                            "transit", "to_send", "to_be_delivered",
+                        }
+                        detail = data.get("not_available_detail")
+                        if isinstance(detail, list):
+                            for d in detail:
+                                if not isinstance(d, dict):
+                                    continue
+                                st = (d.get("status") or "").lower()
+                                if st in transit_statuses:
+                                    try:
+                                        inbound += int(d.get("quantity") or 0)
+                                    except (TypeError, ValueError):
+                                        pass
                         out[inv] = {"available": int(available), "inbound": inbound}
                 except Exception:
                     pass
@@ -2674,6 +2679,52 @@ async def api_stock(request: Request, account_id: int, target_days: int = 15,
     return await _build_stock_payload(account_id, acc, token, user, target_days,
                                       sales_days=sales_days, user_id=user_id,
                                       refresh=bool(refresh))
+
+
+@app.get("/api/stock/{account_id:int}/debug-fulfillment")
+async def api_stock_debug_fulfillment(request: Request, account_id: int, sku: str):
+    """DEBUG temporal: devuelve el JSON crudo de /inventories/{id}/stock/fulfillment
+    para los inventory_id Full de un SKU. Sirve para confirmar dónde viene el
+    stock en camino (not_available_detail, inbound, etc)."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    token = await refresh_ml_token(account_id)
+    if not token:
+        raise HTTPException(502)
+    headers = {"Authorization": f"Bearer {token}"}
+    seller_id = acc["ml_user_id"]
+    target_sku = (sku or "").strip().upper()
+    out = []
+    async with httpx.AsyncClient(timeout=60) as client:
+        ids = await fetch_all_seller_item_ids(client, headers, seller_id)
+        chunks = [ids[i:i + 20] for i in range(0, len(ids), 20)]
+        inv_ids = set()
+        for chunk in chunks:
+            r = await client.get(
+                f"{ML_API_URL}/items", headers=headers,
+                params={"ids": ",".join(chunk),
+                        "attributes": "id,seller_sku,available_quantity,inventory_id,attributes,variations,status,shipping"})
+            if r.status_code != 200:
+                continue
+            for entry in r.json():
+                body = entry.get("body") if isinstance(entry, dict) else None
+                if not isinstance(body, dict):
+                    continue
+                if ((body.get("shipping") or {}).get("logistic_type") != "fulfillment"):
+                    continue
+                for s, q, inv in _stock_sku_qty(body):
+                    if inv and (s or "").strip().upper() == target_sku:
+                        inv_ids.add(inv)
+        for inv in inv_ids:
+            r = await client.get(
+                f"{ML_API_URL}/inventories/{inv}/stock/fulfillment", headers=headers)
+            out.append({"inventory_id": inv, "status_code": r.status_code,
+                        "raw": r.json() if r.status_code == 200 else r.text[:500]})
+    return {"sku": target_sku, "inventories": out}
 
 
 @app.get("/api/stock/{account_id:int}/export")
