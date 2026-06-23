@@ -2722,8 +2722,31 @@ async def api_stock_debug_fulfillment(request: Request, account_id: int, sku: st
         for inv in inv_ids:
             r = await client.get(
                 f"{ML_API_URL}/inventories/{inv}/stock/fulfillment", headers=headers)
-            out.append({"inventory_id": inv, "status_code": r.status_code,
-                        "raw": r.json() if r.status_code == 200 else r.text[:500]})
+            entry = {"inventory_id": inv, "status_code": r.status_code,
+                     "raw": r.json() if r.status_code == 200 else r.text[:500]}
+            # Probamos endpoints candidatos para el stock EN CAMINO (inbound)
+            probes = {}
+            candidates = [
+                ("operations_search",
+                 f"{ML_API_URL}/stock/fulfillment/operations/search",
+                 {"seller_id": seller_id, "inventory_id": inv}),
+                ("inbound_operations",
+                 f"{ML_API_URL}/stock/fulfillment/operations/search",
+                 {"seller_id": seller_id, "inventory_id": inv, "type": "inbound"}),
+                ("stock_plain",
+                 f"{ML_API_URL}/inventories/{inv}/stock", {}),
+            ]
+            for name, url, params in candidates:
+                try:
+                    pr = await client.get(url, headers=headers, params=params)
+                    probes[name] = {
+                        "status": pr.status_code,
+                        "body": (pr.json() if pr.status_code == 200 else pr.text[:400]),
+                    }
+                except Exception as e:
+                    probes[name] = {"error": str(e)[:200]}
+            entry["probes"] = probes
+            out.append(entry)
     return {"sku": target_sku, "inventories": out}
 
 
