@@ -27,8 +27,10 @@
     button.ghost { padding: 8px 14px; border: 1px solid #ddd; border-radius: 8px; background: #fff; color: #111; font-size: 13px; cursor: pointer; }
     button:disabled { background: #ccc !important; color: #fff !important; cursor: not-allowed; }
     table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 12px; }
-    th { padding: 9px 12px; text-align: left; color: #888; font-weight: 500; border-bottom: 1px solid #eee; font-size: 12px; }
-    td { padding: 8px 12px; border-bottom: 1px solid #f0f0ee; color: #333; }
+    th { padding: 9px 9px; text-align: left; color: #888; font-weight: 500; border-bottom: 1px solid #eee; font-size: 12px; white-space: nowrap; }
+    td { padding: 8px 9px; border-bottom: 1px solid #f0f0ee; color: #333; white-space: nowrap; }
+    /* La 1ra columna (SKU) sí puede ocupar lo que necesite; el resto va compacto. */
+    th:first-child, td:first-child { white-space: normal; }
     tbody tr:hover { background: #fafaf8; }
     .num { text-align: right; font-variant-numeric: tabular-nums; }
     .empty { padding: 2rem; text-align: center; color: #aaa; font-size: 13px; }

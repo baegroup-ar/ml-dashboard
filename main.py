@@ -3502,7 +3502,8 @@ async def api_ranking(request: Request, account_id: int,
 
     # Sólo ventas pagadas cuentan para ranking
     paid = [o for o in cached_orders if o.get("estado") == "paid"]
-    out = _rank_from_paid(paid)
+    variant_map = _get_variant_map(_cost_account_id_for(user, account_id))
+    out = _rank_from_paid(paid, variant_map)
     return {"items": out, "period": {"from": df, "to": dt}, "cache_info": cache_info}
 
 
@@ -3544,13 +3545,29 @@ async def api_ranking_all(request: Request,
     if not paid:
         return {"items": [], "period": {"from": df, "to": dt}, "cache_info": cache_info,
                 "info": "No hay datos cacheados. Cargá el Dashboard de cada cuenta para generar el caché."}
-    out = _rank_from_paid(paid)
+    variant_map = _get_variant_map(_cost_account_id_for(user, accounts[0]["id"])) if accounts else {}
+    out = _rank_from_paid(paid, variant_map)
     return {"items": out, "period": {"from": df, "to": dt}, "cache_info": cache_info}
 
 
-def _rank_from_paid(paid):
+def _rank_from_paid(paid, variant_map=None):
     """Agrupa órdenes pagadas por SKU y calcula facturación, costos, ganancia y
-    margen ponderado. Sirve para una cuenta o para todas combinadas."""
+    margen ponderado. Sirve para una cuenta o para todas combinadas.
+
+    Si se pasa variant_map ({componente: [(original, qty), ...]}), las ventas de
+    una variante/combo que mapea a UN ÚNICO original se agrupan en la fila del
+    original (igual que Stock valorizado). Las unidades suman × qty del combo;
+    los importes (facturación/comisión/CMV/etc) se suman tal cual. Los combos
+    multi-producto (varios originales) NO se rolean: quedan como su propia fila
+    para no repartir mal la facturación."""
+    variant_map = variant_map or {}
+
+    def _group_sku(sku):
+        m = variant_map.get(sku)
+        if m and len(m) == 1:
+            return m[0][0], float(m[0][1])   # (original, qty del combo)
+        return sku, 1.0
+
     rank: dict = {}
     for order in paid:
         items = order.get("items") or []
@@ -3564,6 +3581,7 @@ def _rank_from_paid(paid):
             sku = (item.get("sku") or "").strip()
             if not sku:
                 sku = (item.get("titulo") or "Sin SKU")[:40]
+            group_sku, combo_qty = _group_sku(sku)
             qty = int(item.get("cantidad", 1) or 1)
             item_monto = float(item.get("monto", 0) or 0)
             item_com = float(item.get("comision", 0) or 0)
@@ -3572,15 +3590,15 @@ def _rank_from_paid(paid):
             item_envio = order_envio * share
             item_ing = order_ing * share
             item_bonif = order_bonif * share
-            rec = rank.setdefault(sku, {
-                "sku": sku, "titulo": item.get("titulo") or "",
+            rec = rank.setdefault(group_sku, {
+                "sku": group_sku, "titulo": item.get("titulo") or "",
                 "ventas": 0, "unidades": 0,
                 "facturacion": 0.0, "comision": 0.0,
                 "ingreso_envio": 0.0, "bonificacion": 0.0,
                 "envio": 0.0, "cmv": 0.0, "ganancia": 0.0,
             })
             rec["ventas"] += 1
-            rec["unidades"] += qty
+            rec["unidades"] += int(round(qty * combo_qty))
             rec["facturacion"] += item_monto
             rec["comision"] += item_com
             rec["ingreso_envio"] += item_ing
@@ -7058,6 +7076,21 @@ async def _api_orders_impl(request: Request, account_id: int,
     # Para admin (no master) los costos son compartidos entre cuentas → _cost_account_id_for.
     cost_aid = _cost_account_id_for(user, account_id)
     versioned_costs = db_get_product_costs(cost_aid)
+    # Mapa de variantes/combos (base SKU): {componente: [(original, qty), ...]}.
+    # Para el CMV de una variante/combo sin costo propio cargado, cruzamos al/los
+    # SKU original(es) y sumamos su costo × cantidad.
+    variant_map = _get_variant_map(cost_aid)
+
+    def _unit_cost_for(sold_sku, sale_date):
+        """Costo unitario (con IVA) del SKU vendido. Si no tiene costo propio,
+        lo deriva del/los SKU original(es) vía base SKU × cantidad del combo."""
+        uc = cost_with_iva(find_cost_for_date(versioned_costs, sold_sku, sale_date)) if sold_sku else 0.0
+        if uc > 0:
+            return uc
+        total = 0.0
+        for (orig, q) in variant_map.get((sold_sku or "").strip(), []):
+            total += cost_with_iva(find_cost_for_date(versioned_costs, orig, sale_date)) * float(q)
+        return total
     # Cargar tarifas Flex propias del vendedor (para reemplazar el costo de
     # envío de las ventas flex con lo que el vendedor le paga a su mensajería).
     flex_tariffs = db_get_flex_tariffs(cost_aid)
@@ -7133,8 +7166,7 @@ async def _api_orders_impl(request: Request, account_id: int,
             # entry con valid_from <= fecha de la venta). Si el costo está
             # cargado sin IVA, le aplicamos 21% para que sea comparable con
             # monto/comisión que vienen con IVA incluido.
-            cost_entry = find_cost_for_date(versioned_costs, sku, fecha) if sku else None
-            unit_cost = cost_with_iva(cost_entry)
+            unit_cost = _unit_cost_for(sku, fecha)
             item_cmv = round(unit_cost * qty, 2)
             order_cmv += item_cmv
             items.append({
