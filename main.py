@@ -39,6 +39,11 @@ PROMO_ITEM_SCAN_CACHE: dict[str, dict] = {}
 # cuando se aplica o se quita un descuento en esa cuenta.
 PROMO_ITEMS_RESULT_TTL_SECONDS = 120
 PROMO_ITEMS_RESULT_CACHE: dict[str, dict] = {}
+# Cache de la LISTA de promociones disponibles (/api/promociones/{acc}). El
+# escaneo recorre TODAS las publicaciones del vendedor (puede ser 1000+), así
+# que cachear el resultado evita re-escanear en cada apertura/refresh.
+PROMO_LIST_TTL_SECONDS = 300
+PROMO_LIST_CACHE: dict[int, dict] = {}
 # Mínimo de descuento MÁS BAJO que ML reportó alguna vez por (promo, item).
 # La API de ML para campañas FLEXIBLE_PERCENTAGE es eventualmente consistente:
 # devuelve un `max_discounted_price` distinto entre llamadas (a veces 10%, a
@@ -93,6 +98,9 @@ def _invalidate_promo_items_cache(account_id: int) -> None:
     prefix = f"{account_id}:"
     for k in [k for k in PROMO_ITEMS_RESULT_CACHE if k.startswith(prefix)]:
         PROMO_ITEMS_RESULT_CACHE.pop(k, None)
+    # La lista de promos también cambia al aplicar/quitar (cambian los
+    # contadores de items participando/aplicables).
+    PROMO_LIST_CACHE.pop(account_id, None)
 
 
 # Warmers en curso (1 por promo) para no spawnear duplicados.
@@ -5321,6 +5329,12 @@ async def api_promociones_list(request: Request, account_id: int):
     acc = _account_for_user(account_id, user_id)
     if not acc:
         raise HTTPException(404)
+    # Cache de resultado: re-abrir la página o refrescar es instantáneo dentro
+    # del TTL. Aplicar/quitar un descuento invalida esta cache (igual que items).
+    refresh = (request.query_params.get("refresh") in ("1", "true", "yes"))
+    _cached = PROMO_LIST_CACHE.get(account_id) if not refresh else None
+    if _cached and (datetime.utcnow() - _cached["at"]).total_seconds() < PROMO_LIST_TTL_SECONDS:
+        return _cached["data"]
     token = await refresh_ml_token(account_id)
     if not token:
         raise HTTPException(502)
@@ -5341,22 +5355,34 @@ async def api_promociones_list(request: Request, account_id: int):
         # item (incluso si todavía no participa, en status="candidate").
         # Es la forma en que ML expone marketplace campaigns, deals,
         # price_discount, etc. (la misma que usa Zentor).
+        # Concurrencia moderada: son 1000+ llamadas individuales (1 por
+        # publicación) y es lo que domina el tiempo de carga. Subimos 10->25 con
+        # reintento ante 429/5xx para acelerar SIN perder promos por rate-limit.
         promos: dict = {}
-        sem = asyncio.Semaphore(10)
+        sem = asyncio.Semaphore(25)
 
         async def fetch_item_promos(item_id):
             async with sem:
-                try:
-                    r = await client.get(
-                        f"{ML_API_URL}/seller-promotions/items/{item_id}",
-                        headers=headers,
-                        params={"app_version": "v2"},
-                    )
-                    if r.status_code != 200:
-                        return item_id, None, f"seller-promotions/items/{item_id}: HTTP {r.status_code}: {r.text[:120]}"
-                    return item_id, r.json(), None
-                except Exception as e:
-                    return item_id, None, f"seller-promotions/items/{item_id}: {str(e)[:120]}"
+                for attempt in range(3):
+                    try:
+                        r = await client.get(
+                            f"{ML_API_URL}/seller-promotions/items/{item_id}",
+                            headers=headers,
+                            params={"app_version": "v2"},
+                        )
+                    except Exception as e:
+                        if attempt < 2:
+                            await asyncio.sleep(0.4 * (2 ** attempt))
+                            continue
+                        return item_id, None, f"seller-promotions/items/{item_id}: {str(e)[:120]}"
+                    if r.status_code == 200:
+                        return item_id, r.json(), None
+                    # Rate-limit / error transitorio: reintentar para no saltear
+                    # (saltear = perder las promos de esa publicación).
+                    if r.status_code in (429, 500, 502, 503, 504) and attempt < 2:
+                        await asyncio.sleep(0.4 * (2 ** attempt))
+                        continue
+                    return item_id, None, f"seller-promotions/items/{item_id}: HTTP {r.status_code}: {r.text[:120]}"
 
         outcomes = await asyncio.gather(*[fetch_item_promos(i) for i in all_item_ids])
 
@@ -5436,11 +5462,13 @@ async def api_promociones_list(request: Request, account_id: int):
 
     items = list(promos.values())
     items.sort(key=lambda x: (x.get("status") != "started", -x.get("applicable_items", 0), (x.get("name") or "").lower()))
-    return {
+    result = {
         "items": items,
         "errors": debug,
         "items_scanned": len(all_item_ids),
     }
+    PROMO_LIST_CACHE[account_id] = {"at": datetime.utcnow(), "data": result}
+    return result
 
 
 @app.get("/api/promociones/{account_id}/{promotion_id}/items")
