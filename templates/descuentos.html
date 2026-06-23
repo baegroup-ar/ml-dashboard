@@ -1142,6 +1142,18 @@
       // CANDIDATE_NOT_FOUND = ya participaba/programada: no es un fallo real.
       const already = (data.results || []).filter(x => !x.ok && (x.error || '').includes('CANDIDATE_NOT_FOUND'));
       const fails = (data.results || []).filter(x => !x.ok && !(x.error || '').includes('CANDIDATE_NOT_FOUND'));
+      // Actualización OPTIMISTA: los items aplicados (o que ya participaban)
+      // dejan de ser elegibles → los sacamos del listado AL INSTANTE para
+      // seguir analizando, sin esperar el re-fetch del servidor.
+      const goneIds = new Set(
+        (data.results || [])
+          .filter(x => x.ok || (x.error || '').includes('CANDIDATE_NOT_FOUND'))
+          .map(x => x.item_id));
+      if(goneIds.size) {
+        currentItems = currentItems.filter(it => !goneIds.has(it.item_id));
+        goneIds.forEach(id => previewSelected.delete(id));
+        renderPreview();
+      }
       let msg = `${oks} aplicados correctamente.`;
       if(already.length) {
         msg += `\n${already.length} ya estaban participando o programadas (no hacía falta re-aplicarlas).`;
@@ -1160,7 +1172,6 @@
         console.warn('Fallos completos:', fails);
       }
       alert(msg);
-      await loadPromoItems(currentStatus);
     } catch(e) {
       alert(e.message);
     } finally {
@@ -1188,6 +1199,13 @@
       const data = await r.json();
       const oks = (data.results || []).filter(x => x.ok).length;
       const fails = (data.results || []).filter(x => !x.ok);
+      // Optimista: las quitadas dejan de participar → fuera del listado al instante.
+      const goneIds = new Set((data.results || []).filter(x => x.ok).map(x => x.item_id));
+      if(goneIds.size) {
+        currentItems = currentItems.filter(it => !goneIds.has(it.item_id));
+        goneIds.forEach(id => previewSelected.delete(id));
+        renderPreview();
+      }
       let msg = `${oks} quitadas de la promoción.`;
       if(fails.length) {
         msg += `\n${fails.length} fallaron:\n\n`;
@@ -1198,7 +1216,6 @@
         console.warn('Fallos completos:', fails);
       }
       alert(msg);
-      await loadPromoItems(currentStatus);
     } catch(e) {
       alert(e.message);
     } finally {

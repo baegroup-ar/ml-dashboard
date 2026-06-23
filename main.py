@@ -5356,10 +5356,10 @@ async def api_promociones_list(request: Request, account_id: int):
         # Es la forma en que ML expone marketplace campaigns, deals,
         # price_discount, etc. (la misma que usa Zentor).
         # Concurrencia moderada: son 1000+ llamadas individuales (1 por
-        # publicación) y es lo que domina el tiempo de carga. Subimos 10->25 con
+        # publicación) y es lo que domina el tiempo de carga. Subimos 10->32 con
         # reintento ante 429/5xx para acelerar SIN perder promos por rate-limit.
         promos: dict = {}
-        sem = asyncio.Semaphore(25)
+        sem = asyncio.Semaphore(32)
 
         async def fetch_item_promos(item_id):
             async with sem:
@@ -5794,7 +5794,7 @@ async def api_promociones_items(
         scan_item_count = 0
         scan_matched_count = 0
         promo_details_override = []
-        detail_sem = asyncio.Semaphore(60)   # más concurrencia sin gatillar rate-limit de ML (antes 40)
+        detail_sem = asyncio.Semaphore(72)   # más concurrencia (retry protege ante 429); antes 40
 
         # ML ignora el `offset` en este endpoint (devuelve siempre la misma
         # primera página), así que la paginación directa queda INCOMPLETA cuando
