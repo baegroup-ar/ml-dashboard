@@ -2004,11 +2004,16 @@ def _stock_sku_qty(item: dict):
 
 
 async def _fetch_fulfillment_stock(token, inventory_ids) -> dict:
-    """Devuelve {inventory_id: {"available": int, "inbound": int}} consultando el
+    """Devuelve {inventory_id: available_quantity_real_en_Full} consultando el
     endpoint de fulfillment inventory de ML. Es la fuente de verdad del stock Full;
     el available_quantity de /items puede reflejar depósito cuando el Full está
     vacío. Si la consulta falla para un inventory_id, se omite (queda el dato de
-    /items como fallback)."""
+    /items como fallback).
+
+    NOTA: el stock EN CAMINO (envío del seller a Full, todavía no recibido) NO
+    está disponible en la API pública de ML. El endpoint solo devuelve el stock
+    ya recibido (total = available + not_available por daño/transferencia). El
+    panel 'Planificación de envíos' usa endpoints internos del Seller Center."""
     inventory_ids = [i for i in inventory_ids if i]
     if not inventory_ids:
         return {}
@@ -2026,30 +2031,10 @@ async def _fetch_fulfillment_stock(token, inventory_ids) -> dict:
                     )
                     if r.status_code == 200:
                         data = r.json()
-                        available = data.get("available_quantity")
-                        if available is None:
-                            return
-                        # Stock EN CAMINO hacia Full: viene en
-                        # not_available_detail[] con status de tránsito
-                        # (transfer/inbound/in_transit). Los demás status
-                        # (damaged/lost/withdrawal/etc) NO son en camino.
-                        inbound = 0
-                        transit_statuses = {
-                            "transfer", "inbound", "in_transit",
-                            "transit", "to_send", "to_be_delivered",
-                        }
-                        detail = data.get("not_available_detail")
-                        if isinstance(detail, list):
-                            for d in detail:
-                                if not isinstance(d, dict):
-                                    continue
-                                st = (d.get("status") or "").lower()
-                                if st in transit_statuses:
-                                    try:
-                                        inbound += int(d.get("quantity") or 0)
-                                    except (TypeError, ValueError):
-                                        pass
-                        out[inv] = {"available": int(available), "inbound": inbound}
+                        # available_quantity = lo realmente vendible en Full.
+                        q = data.get("available_quantity")
+                        if q is not None:
+                            out[inv] = int(q)
                 except Exception:
                     pass
 
@@ -2121,11 +2106,10 @@ async def _fetch_stock_by_sku(account_id, acc, token, force=False) -> dict:
     # el Full está vacío (caso D-S3FT: aparecía 64 en Full sin stock real). Por eso
     # consultamos /inventories/{id}/stock/fulfillment por cada inventory_id Full.
     real_full_qty = await _fetch_fulfillment_stock(token, list(inv_to_sku.keys()))
-    for inv, data in real_full_qty.items():
+    for inv, qty in real_full_qty.items():
         sku = inv_to_sku.get(inv)
         if sku and sku in full_inv:
-            # available + inbound = total Full (disponible + en camino)
-            full_inv[sku][inv] = data["available"] + data["inbound"]
+            full_inv[sku][inv] = qty          # reemplaza el dato dudoso de /items
     full = {sku: sum(d.values()) for sku, d in full_inv.items()}
     for sku in set(propio) | set(full):
         stock[sku] = {"propio": int(propio.get(sku, 0)), "full": int(full.get(sku, 0))}
@@ -2679,85 +2663,6 @@ async def api_stock(request: Request, account_id: int, target_days: int = 15,
     return await _build_stock_payload(account_id, acc, token, user, target_days,
                                       sales_days=sales_days, user_id=user_id,
                                       refresh=bool(refresh))
-
-
-@app.get("/api/stock/{account_id:int}/debug-fulfillment")
-async def api_stock_debug_fulfillment(request: Request, account_id: int, sku: str):
-    """DEBUG temporal: devuelve el JSON crudo de /inventories/{id}/stock/fulfillment
-    para los inventory_id Full de un SKU. Sirve para confirmar dónde viene el
-    stock en camino (not_available_detail, inbound, etc)."""
-    user_id = get_session_user_id(request)
-    if not user_id:
-        raise HTTPException(401)
-    acc = _account_for_user(account_id, user_id)
-    if not acc:
-        raise HTTPException(404)
-    token = await refresh_ml_token(account_id)
-    if not token:
-        raise HTTPException(502)
-    headers = {"Authorization": f"Bearer {token}"}
-    seller_id = acc["ml_user_id"]
-    target_sku = (sku or "").strip().upper()
-    out = []
-    async with httpx.AsyncClient(timeout=60) as client:
-        ids = await fetch_all_seller_item_ids(client, headers, seller_id)
-        chunks = [ids[i:i + 20] for i in range(0, len(ids), 20)]
-        inv_ids = set()
-        for chunk in chunks:
-            r = await client.get(
-                f"{ML_API_URL}/items", headers=headers,
-                params={"ids": ",".join(chunk),
-                        "attributes": "id,seller_sku,available_quantity,inventory_id,attributes,variations,status,shipping"})
-            if r.status_code != 200:
-                continue
-            for entry in r.json():
-                body = entry.get("body") if isinstance(entry, dict) else None
-                if not isinstance(body, dict):
-                    continue
-                if ((body.get("shipping") or {}).get("logistic_type") != "fulfillment"):
-                    continue
-                for s, q, inv in _stock_sku_qty(body):
-                    if inv and (s or "").strip().upper() == target_sku:
-                        inv_ids.add(inv)
-        for inv in inv_ids:
-            r = await client.get(
-                f"{ML_API_URL}/inventories/{inv}/stock/fulfillment", headers=headers)
-            entry = {"inventory_id": inv, "status_code": r.status_code,
-                     "raw": r.json() if r.status_code == 200 else r.text[:500]}
-            # Probamos endpoints candidatos para el stock EN CAMINO (inbound)
-            probes = {}
-            candidates = [
-                ("inbound_search_seller",
-                 f"{ML_API_URL}/inbound-shipments/search",
-                 {"seller_id": seller_id}),
-                ("inbound_search_inv",
-                 f"{ML_API_URL}/inbound-shipments/search",
-                 {"seller_id": seller_id, "inventory_id": inv}),
-                ("inbounds_search",
-                 f"{ML_API_URL}/inbounds/search",
-                 {"seller_id": seller_id, "inventory_id": inv}),
-                ("stock_inbound",
-                 f"{ML_API_URL}/stock/fulfillment/inbound/search",
-                 {"seller_id": seller_id, "inventory_id": inv}),
-                ("fbm_inbound",
-                 f"{ML_API_URL}/users/{seller_id}/items/fbm_inbound", {}),
-                ("ops_inbound_reception",
-                 f"{ML_API_URL}/stock/fulfillment/operations/search",
-                 {"seller_id": seller_id, "inventory_id": inv,
-                  "type": "inbound_reception", "date_from": "2026-01-01T00:00:00.000-03:00"}),
-            ]
-            for name, url, params in candidates:
-                try:
-                    pr = await client.get(url, headers=headers, params=params)
-                    probes[name] = {
-                        "status": pr.status_code,
-                        "body": (pr.json() if pr.status_code == 200 else pr.text[:400]),
-                    }
-                except Exception as e:
-                    probes[name] = {"error": str(e)[:200]}
-            entry["probes"] = probes
-            out.append(entry)
-    return {"sku": target_sku, "inventories": out}
 
 
 @app.get("/api/stock/{account_id:int}/export")
