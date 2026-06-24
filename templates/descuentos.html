@@ -1156,20 +1156,27 @@
       // listado al instante (optimista) para seguir analizando. En PARTICIPANDO
       // siguen participando (con el desc. nuevo), así que NO los sacamos: se
       // recarga el listado para reflejar el "Particip. ML" actualizado.
+      const okIds = new Set(
+        (data.results || [])
+          .filter(x => x.ok || (x.error || '').includes('CANDIDATE_NOT_FOUND'))
+          .map(x => x.item_id));
       if(currentStatus === 'candidate') {
-        const goneIds = new Set(
-          (data.results || [])
-            .filter(x => x.ok || (x.error || '').includes('CANDIDATE_NOT_FOUND'))
-            .map(x => x.item_id));
-        if(goneIds.size) {
-          currentItems = currentItems.filter(it => !goneIds.has(it.item_id));
-          goneIds.forEach(id => previewSelected.delete(id));
-          renderPreview();
+        // Elegibles: los aplicados dejan de ser elegibles → fuera del listado.
+        if(okIds.size) {
+          currentItems = currentItems.filter(it => !okIds.has(it.item_id));
         }
       } else {
-        previewSelected = new Set();
-        loadPromoItems(currentStatus);   // refresca el % aplicado (puede tardar unos seg)
+        // Participando: siguen participando, pero con el desc. NUEVO. Actualizamos
+        // el % aplicado localmente (= lo que cargaste) para que salgan al instante
+        // del filtro "mejorables" sin recargar del server.
+        currentItems.forEach(it => {
+          if(okIds.has(it.item_id) && it.loaded_discount_pct != null) {
+            it.ml_applied_pct = it.loaded_discount_pct;
+          }
+        });
       }
+      okIds.forEach(id => previewSelected.delete(id));
+      renderPreview();
       let msg = `${oks} aplicados correctamente.`;
       if(already.length) {
         msg += `\n${already.length} ya estaban participando o programadas (no hacía falta re-aplicarlas).`;
