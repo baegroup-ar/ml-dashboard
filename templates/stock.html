@@ -112,6 +112,13 @@
         </select>
         <label>Días de cobertura:</label>
         <input type="number" id="target-days" value="15" min="1" max="365" oninput="renderTable()" style="width:70px;" />
+        <label>Aging:</label>
+        <select id="aging-op" onchange="renderTable()" style="width:70px;">
+          <option value="">—</option>
+          <option value="gte">≥</option>
+          <option value="lte">≤</option>
+        </select>
+        <input type="number" id="aging-val" placeholder="días" min="0" max="3650" oninput="renderTable()" style="width:70px;" />
         <label style="font-size:12px;"><input type="checkbox" id="f-activas" onchange="renderTable()" style="vertical-align:-2px;"> Activas (con stock)</label>
         <label style="font-size:12px;"><input type="checkbox" id="f-sinstock" onchange="renderTable()" style="vertical-align:-2px;"> Sin stock</label>
         <label style="font-size:12px;"><input type="checkbox" id="only-rep" onchange="renderTable()" style="vertical-align:-2px;"> Con reposición</label>
@@ -200,6 +207,9 @@ function renderTable() {
   const onlyRep = document.getElementById('only-rep').checked;
   const fActivas = document.getElementById('f-activas').checked;
   const fSinStock = document.getElementById('f-sinstock').checked;
+  const agingOp = document.getElementById('aging-op').value;
+  const agingValRaw = document.getElementById('aging-val').value;
+  const agingVal = agingValRaw === '' ? null : parseInt(agingValRaw);
   const sd = DATA.sales_days || 7;
   let rows = (DATA.items || []).map(it => {
     const total = (it.stock_total != null) ? it.stock_total : (it.stock || 0);
@@ -214,6 +224,14 @@ function renderTable() {
   // si tildás las dos (o ninguna), muestra todo.
   if (fActivas && !fSinStock) rows = rows.filter(r => r._total > 0);
   else if (fSinStock && !fActivas) rows = rows.filter(r => r._total === 0);
+  // Filtro por aging (días desde la última compra). Los SKU sin fecha de
+  // compra (aging null) quedan fuera cuando hay un filtro de aging activo.
+  if (agingOp && agingVal != null && !isNaN(agingVal)) {
+    rows = rows.filter(r => {
+      if (r.aging == null) return false;
+      return agingOp === 'gte' ? r.aging >= agingVal : r.aging <= agingVal;
+    });
+  }
   // Orden: por VALORIZADO de mayor a menor (los sin precio van al final).
   rows.sort((a, b) => {
     const va = a.valor_venta == null ? -1 : a.valor_venta;
