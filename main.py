@@ -6729,18 +6729,37 @@ async def api_promociones_apply(
                 payload["offer_id"] = offer_id
             # Limpiamos campos None
             payload = {k: v for k, v in payload.items() if v is not None}
+            url = f"{ML_API_URL}/seller-promotions/items/{iid}"
+            # Tipos que NO soportan modificar la oferta: hay que borrarla y
+            # re-crearla con el precio nuevo (doc ML). El resto se modifica con PUT.
+            DELETE_TO_MODIFY = {"PRICE_DISCOUNT", "DOD", "LIGHTNING"}
             async with sem:
                 last_status = 0
                 last_error = None
                 offer_id_refreshed = False
-                for attempt in range(5):
+                # method: POST crea; si la oferta YA existe pasamos a "modificar"
+                # (PUT, o DELETE+POST para los tipos que no soportan update).
+                method = "POST"
+                for attempt in range(6):
                     try:
-                        r = await client.post(
-                            f"{ML_API_URL}/seller-promotions/items/{iid}",
-                            headers=headers,
-                            params={"app_version": "v2"},
-                            json=payload,
-                        )
+                        if method == "PUT":
+                            r = await client.put(
+                                url, headers=headers,
+                                params={"app_version": "v2"}, json=payload)
+                        elif method == "DELETE_POST":
+                            dparams = {"app_version": "v2", "promotion_id": promotion_id,
+                                       "promotion_type": ptype}
+                            if offer_id:
+                                dparams["offer_id"] = offer_id
+                            await client.request("DELETE", url, headers=headers, params=dparams)
+                            await asyncio.sleep(0.6)
+                            r = await client.post(
+                                url, headers=headers,
+                                params={"app_version": "v2"}, json=payload)
+                        else:
+                            r = await client.post(
+                                url, headers=headers,
+                                params={"app_version": "v2"}, json=payload)
                         if r.status_code in (200, 201, 204):
                             return {
                                 "item_id": iid,
@@ -6748,18 +6767,29 @@ async def api_promociones_apply(
                                 "status": r.status_code,
                                 "error": None,
                                 "payload": payload,
+                                "modified": method != "POST",
                                 "attempts": attempt + 1,
                             }
                         last_status = r.status_code
                         last_error = r.text[:500]
+                        low = last_error.lower()
+                        # La oferta YA EXISTE → no se crea, se MODIFICA. PUT para
+                        # DEAL/SELLER_CAMPAIGN/SMART; DELETE+POST para los que no
+                        # soportan update. Solo cambiamos de método una vez.
+                        if (method == "POST" and r.status_code in (400, 409)
+                                and ("already exist" in low or "offer_already_exists" in low)):
+                            method = "DELETE_POST" if ptype in DELETE_TO_MODIFY else "PUT"
+                            # Co-fondeadas: al CREAR no mandamos precio (lo fija la
+                            # oferta de ML), pero al MODIFICAR sí, para que cambie
+                            # el descuento del vendedor al nuevo valor cargado.
+                            if (method == "PUT" and deal_price is not None
+                                    and ptype in ("SMART", "MARKETPLACE_CAMPAIGN")):
+                                payload["deal_price"] = deal_price
+                            continue
                         # Reintentos por status server-side / lock.
                         retriable = r.status_code in (423, 429, 500, 502, 503, 504)
                         # Algunos 400 de ML son TRANSITORIOS (ML está procesando
                         # internamente la publicación): reintentar también.
-                        #  - OFFER_SIBLING_CREATION_IN_PROCESS: oferta hermana en
-                        #    creación; al rato deja aplicar el precio.
-                        #  - REST_CREDIBILITY_API_ERROR: microservicio de precios
-                        #    de ML caído/ocupado, suele recuperarse.
                         if r.status_code == 400 and (
                             "OFFER_SIBLING_CREATION_IN_PROCESS" in last_error
                             or "REST_CREDIBILITY_API_ERROR" in last_error
@@ -6778,14 +6808,14 @@ async def api_promociones_apply(
                                 payload["offer_id"] = fresh
                                 await asyncio.sleep(0.5)
                                 continue
-                        if retriable and attempt < 4:
+                        if retriable and attempt < 5:
                             await asyncio.sleep(1.5 * (attempt + 1))
                             continue
                         break
                     except Exception as e:
                         last_status = 0
                         last_error = str(e)[:300]
-                        if attempt < 4:
+                        if attempt < 5:
                             await asyncio.sleep(1.5 * (attempt + 1))
                             continue
                         break
@@ -6795,7 +6825,7 @@ async def api_promociones_apply(
                     "status": last_status,
                     "error": last_error,
                     "payload": payload,
-                    "attempts": 5,
+                    "attempts": 6,
                 }
         results = await asyncio.gather(*[apply_one(it) for it in items])
     _invalidate_promo_items_cache(account_id)
