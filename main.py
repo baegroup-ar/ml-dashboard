@@ -63,6 +63,11 @@ def _load_promo_floor_from_db() -> None:
     """Carga el piso histórico persistido (sobrevive redeploys)."""
     global _PROMO_FLOOR_LOADED
     try:
+        # Limpia pisos < 5% que son ruido de API (max_discounted_price casi igual al original).
+        db_execute("DELETE FROM promo_min_floor WHERE min_pct < 4.9")
+    except Exception:
+        pass
+    try:
         rows = db_fetchall("SELECT promotion_id, item_id, min_pct FROM promo_min_floor")
         for r in rows:
             PROMO_MIN_PCT_SEEN[_promo_floor_key(r["promotion_id"], r["item_id"])] = float(r["min_pct"])
@@ -71,10 +76,16 @@ def _load_promo_floor_from_db() -> None:
         pass
 
 
+_PROMO_FLOOR_MIN_THRESHOLD = 4.9  # ML no acepta menos de 5% en ninguna promo real
+
 def _record_promo_floor(promotion_id, item_id, pct: float) -> bool:
     """Fija el piso por item si `pct` es menor al guardado. Devuelve True si
     bajó/creó el piso (es decir, cambió). Persiste en DB (best-effort)."""
     if pct is None or pct <= 0:
+        return False
+    # Valores < 5% son ruido de la API (max_discounted_price casi igual al original).
+    # ML nunca acepta menos de 5% en promos reales; ignoramos lecturas espurias.
+    if pct < _PROMO_FLOOR_MIN_THRESHOLD:
         return False
     key = _promo_floor_key(promotion_id, item_id)
     prev = PROMO_MIN_PCT_SEEN.get(key)
