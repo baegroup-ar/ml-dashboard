@@ -1142,7 +1142,9 @@
       const r = await fetch(`/api/promociones/${currentAccountId}/${encodeURIComponent(currentPromo.id)}/apply`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ items: sel }),
+        // modify=true cuando ya participan (pestaña Participando): el backend
+        // MODIFICA la oferta (PUT) en vez de crearla (POST).
+        body: JSON.stringify({ items: sel, modify: currentStatus === 'started' }),
       });
       if(!r.ok) throw new Error('Error al aplicar');
       const data = await r.json();

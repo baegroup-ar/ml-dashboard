@@ -6609,6 +6609,10 @@ async def api_promociones_apply(
         raise HTTPException(404)
     body = await request.json()
     items = body.get("items") or []
+    # modify=True cuando el item YA participa (pestaña Participando): hay que
+    # MODIFICAR la oferta (PUT), no crear (POST). Para SELLER_CAMPAIGN el POST a
+    # un item ya participante devuelve 200 sin cambiar nada → por eso se fuerza PUT.
+    modify_existing = bool(body.get("modify"))
     if not items:
         raise HTTPException(400, "Faltan items para aplicar")
     token = await refresh_ml_token(account_id)
@@ -6782,7 +6786,13 @@ async def api_promociones_apply(
                 last_status = 0
                 last_error = None
                 offer_id_refreshed = False
-                method = "POST"      # POST crea; si ya existe pasamos a modificar
+                # Si el item ya participa, MODIFICAMOS directo (PUT, o DELETE+POST
+                # para los tipos que no soportan update). Si no, POST crea y, si
+                # ML dice "ya existe", recién ahí pasamos a modificar (fallback).
+                if modify_existing:
+                    method = "DELETE_POST" if ptype in DELETE_TO_MODIFY else "PUT"
+                else:
+                    method = "POST"
                 for attempt in range(6):
                     try:
                         if method == "PUT":
