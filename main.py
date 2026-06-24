@@ -2710,7 +2710,7 @@ async def api_stock_export(request: Request, account_id: int, target_days: int =
     ws.title = "Stock valorizado"
     headers = ["SKU", "Stock ML", "Stock Full", "En camino", "Stock total", "Precio venta",
                "Valorizado", "Última compra", "Aging (días)", f"Ventas {sd}d",
-               "Prom/día", "Días cobertura", "Reposición sug."]
+               "Prom/día", "Días Stock", "Reposición sug."]
     ws.append(headers)
     fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
     for col in range(1, len(headers) + 1):

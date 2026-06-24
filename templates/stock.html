@@ -111,14 +111,21 @@
           <option value="30">30 días</option>
         </select>
         <label>Días de cobertura:</label>
-        <input type="number" id="target-days" value="15" min="1" max="365" oninput="renderTable()" style="width:70px;" />
+        <input type="number" id="target-days" value="15" min="1" max="365" oninput="renderTable()" style="width:56px;" />
         <label>Aging:</label>
-        <select id="aging-op" onchange="renderTable()" style="width:70px;">
+        <select id="aging-op" onchange="renderTable()" style="width:52px;min-width:0;padding:7px 4px;">
           <option value="">—</option>
           <option value="gte">≥</option>
           <option value="lte">≤</option>
         </select>
-        <input type="number" id="aging-val" placeholder="días" min="0" max="3650" oninput="renderTable()" style="width:70px;" />
+        <input type="number" id="aging-val" placeholder="días" min="0" max="3650" oninput="renderTable()" style="width:56px;" />
+        <label>Días Stock:</label>
+        <select id="cob-op" onchange="renderTable()" style="width:52px;min-width:0;padding:7px 4px;">
+          <option value="">—</option>
+          <option value="gte">≥</option>
+          <option value="lte">≤</option>
+        </select>
+        <input type="number" id="cob-val" placeholder="días" min="0" max="3650" oninput="renderTable()" style="width:56px;" />
         <label style="font-size:12px;"><input type="checkbox" id="f-activas" onchange="renderTable()" style="vertical-align:-2px;"> Activas (con stock)</label>
         <label style="font-size:12px;"><input type="checkbox" id="f-sinstock" onchange="renderTable()" style="vertical-align:-2px;"> Sin stock</label>
         <label style="font-size:12px;"><input type="checkbox" id="only-rep" onchange="renderTable()" style="vertical-align:-2px;"> Con reposición</label>
@@ -141,7 +148,7 @@
           <th class="num">Precio venta</th><th class="num">Valorizado</th>
           <th>Última compra</th><th class="num">Aging</th>
           <th class="num" id="th-ventas">Ventas 7d</th><th class="num">Prom/día</th>
-          <th class="num">Días cob.</th><th class="num">Reposición sug.</th>
+          <th class="num">Días Stock</th><th class="num">Reposición sug.</th>
         </tr></thead>
         <tbody id="stock-body"></tbody>
       </table>
@@ -210,6 +217,9 @@ function renderTable() {
   const agingOp = document.getElementById('aging-op').value;
   const agingValRaw = document.getElementById('aging-val').value;
   const agingVal = agingValRaw === '' ? null : parseInt(agingValRaw);
+  const cobOp = document.getElementById('cob-op').value;
+  const cobValRaw = document.getElementById('cob-val').value;
+  const cobVal = cobValRaw === '' ? null : parseInt(cobValRaw);
   const sd = DATA.sales_days || 7;
   let rows = (DATA.items || []).map(it => {
     const total = (it.stock_total != null) ? it.stock_total : (it.stock || 0);
@@ -230,6 +240,14 @@ function renderTable() {
     rows = rows.filter(r => {
       if (r.aging == null) return false;
       return agingOp === 'gte' ? r.aging >= agingVal : r.aging <= agingVal;
+    });
+  }
+  // Filtro por Días Stock (cobertura calculada: stock / venta diaria). Los SKU
+  // sin cobertura (sin ventas → null) quedan fuera cuando el filtro está activo.
+  if (cobOp && cobVal != null && !isNaN(cobVal)) {
+    rows = rows.filter(r => {
+      if (r._cob == null) return false;
+      return cobOp === 'gte' ? r._cob >= cobVal : r._cob <= cobVal;
     });
   }
   // Orden: por VALORIZADO de mayor a menor (los sin precio van al final).
