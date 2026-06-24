@@ -2738,7 +2738,35 @@ async def api_stock_debug_sku(request: Request, account_id: int, sku: str):
         for inv in inv_ids:
             r = await client.get(f"{ML_API_URL}/inventories/{inv}/stock/fulfillment", headers=headers)
             ff[inv] = r.json() if r.status_code == 200 else f"HTTP {r.status_code}"
-    return {"sku": target, "items": out, "fulfillment": ff}
+        # Cuerpo COMPLETO del primer item + sondas de stock por logística.
+        probes = {}
+        if out:
+            iid = out[0]["id"]
+            try:
+                rf = await client.get(f"{ML_API_URL}/items/{iid}", headers=headers)
+                full = rf.json() if rf.status_code == 200 else {}
+                # Solo claves relacionadas a stock/logística para no inundar.
+                keys = ("available_quantity", "initial_quantity", "sold_quantity",
+                        "user_product_id", "catalog_product_id", "inventory_id",
+                        "shipping", "channels", "stock", "logistic")
+                probes["item_full_stock_keys"] = {k: full.get(k) for k in keys if k in full}
+                probes["item_all_keys"] = sorted(full.keys())
+                upid = full.get("user_product_id")
+                for name, url in [
+                    ("user_product_stock", f"{ML_API_URL}/user-products/{upid}/stock" if upid else None),
+                    ("item_stock", f"{ML_API_URL}/items/{iid}/stock"),
+                ]:
+                    if not url:
+                        continue
+                    try:
+                        pr = await client.get(url, headers=headers)
+                        probes[name] = {"status": pr.status_code,
+                                        "body": pr.json() if pr.status_code == 200 else pr.text[:300]}
+                    except Exception as e:
+                        probes[name] = {"error": str(e)[:150]}
+            except Exception as e:
+                probes["error"] = str(e)[:200]
+    return {"sku": target, "items": out, "fulfillment": ff, "probes": probes}
 
 
 @app.get("/api/stock/{account_id:int}/export")
