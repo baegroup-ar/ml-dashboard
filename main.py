@@ -2053,6 +2053,38 @@ async def _fetch_fulfillment_stock(token, inventory_ids) -> dict:
     return out
 
 
+async def _fetch_user_product_stock(token, user_product_ids) -> dict:
+    """Devuelve {user_product_id: cantidad_en_selling_address} (= stock de
+    DEPÓSITO propio) consultando /user-products/{id}/stock. Es la fuente que ML
+    usa para el 'Depósito' en coexistencia Full+propio: cuando TODAS las
+    publicaciones de un SKU son fulfillment, /items no expone el depósito y solo
+    este endpoint lo trae (locations[].type == 'selling_address')."""
+    user_product_ids = [u for u in user_product_ids if u]
+    if not user_product_ids:
+        return {}
+    headers = {"Authorization": f"Bearer {token}"}
+    out: dict = {}
+    async with httpx.AsyncClient(timeout=30) as client:
+        sem = asyncio.Semaphore(8)
+
+        async def _one(upid):
+            async with sem:
+                try:
+                    r = await client.get(
+                        f"{ML_API_URL}/user-products/{upid}/stock", headers=headers)
+                    if r.status_code == 200:
+                        data = r.json()
+                        for loc in (data.get("locations") or []):
+                            if isinstance(loc, dict) and loc.get("type") == "selling_address":
+                                out[upid] = int(loc.get("quantity") or 0)
+                                return
+                except Exception:
+                    pass
+
+        await asyncio.gather(*[_one(u) for u in user_product_ids])
+    return out
+
+
 async def _fetch_stock_by_sku(account_id, acc, token, force=False) -> dict:
     """Devuelve {sku: {propio, full}}. force=True ignora el caché (para cuando el
     usuario acaba de cambiar stock en ML)."""
@@ -2075,7 +2107,7 @@ async def _fetch_stock_by_sku(account_id, acc, token, force=False) -> dict:
                         f"{ML_API_URL}/items",
                         headers=headers,
                         params={"ids": ",".join(chunk),
-                                "attributes": "id,seller_sku,available_quantity,inventory_id,attributes,variations,status,shipping"},
+                                "attributes": "id,seller_sku,available_quantity,inventory_id,attributes,variations,status,shipping,user_product_id"},
                     )
                     if r.status_code == 200:
                         return r.json()
@@ -2092,6 +2124,7 @@ async def _fetch_stock_by_sku(account_id, acc, token, force=False) -> dict:
     propio: dict = {}
     full_inv: dict = {}    # sku -> {inventory_id: qty (reportado por /items)}
     inv_to_sku: dict = {}  # inventory_id -> sku (para consultar fulfillment real)
+    up_by_sku: dict = {}   # sku -> user_product_id (publicaciones Full sin variaciones)
     for res in results:
         if not isinstance(res, list):
             continue
@@ -2100,6 +2133,8 @@ async def _fetch_stock_by_sku(account_id, acc, token, force=False) -> dict:
             if not isinstance(body, dict):
                 continue
             is_full = ((body.get("shipping") or {}).get("logistic_type") == "fulfillment")
+            upid = body.get("user_product_id")
+            has_vars = bool(body.get("variations"))
             for sku, qty, inv in _stock_sku_qty(body):
                 if not sku:
                     continue
@@ -2110,6 +2145,10 @@ async def _fetch_stock_by_sku(account_id, acc, token, force=False) -> dict:
                         d[key] = qty           # mismo inventario: una sola vez
                     if inv:
                         inv_to_sku[inv] = sku
+                    # Coexistencia: guardamos el user_product (sin variaciones)
+                    # para poder consultar el depósito si /items no lo trae.
+                    if upid and not has_vars:
+                        up_by_sku.setdefault(sku, upid)
                 elif qty > propio.get(sku, -1):
                     propio[sku] = qty           # depósito: máximo
     # FUENTE DE VERDAD del stock Full: el endpoint de fulfillment inventory.
@@ -2122,6 +2161,18 @@ async def _fetch_stock_by_sku(account_id, acc, token, force=False) -> dict:
         if sku and sku in full_inv:
             full_inv[sku][inv] = qty          # reemplaza el dato dudoso de /items
     full = {sku: sum(d.values()) for sku, d in full_inv.items()}
+    # DEPÓSITO en coexistencia: para SKUs Full que quedaron con depósito 0 (todas
+    # sus publicaciones son fulfillment → /items no expuso el stock propio),
+    # consultamos /user-products/{id}/stock que sí trae el 'selling_address'.
+    # Solo los sospechosos para no agregar miles de llamadas.
+    suspect = {sku: upid for sku, upid in up_by_sku.items()
+               if int(propio.get(sku, 0)) == 0}
+    if suspect:
+        dep = await _fetch_user_product_stock(token, list(suspect.values()))
+        for sku, upid in suspect.items():
+            d = dep.get(upid)
+            if d:
+                propio[sku] = max(int(propio.get(sku, 0)), int(d))
     for sku in set(propio) | set(full):
         stock[sku] = {"propio": int(propio.get(sku, 0)), "full": int(full.get(sku, 0))}
     STOCK_CACHE[account_id] = {"at": datetime.utcnow(), "stock": dict(stock)}
@@ -2680,93 +2731,6 @@ async def api_stock(request: Request, account_id: int, target_days: int = 15,
     return await _build_stock_payload(account_id, acc, token, user, target_days,
                                       sales_days=sales_days, user_id=user_id,
                                       refresh=bool(refresh))
-
-
-@app.get("/api/stock/{account_id:int}/debug-sku")
-async def api_stock_debug_sku(request: Request, account_id: int, sku: str):
-    """DEBUG temporal: para un SKU, dumpea cada publicación que lo contiene con
-    su logistic_type, available_quantity, inventory_id y variaciones, más el
-    JSON crudo del fulfillment. Sirve para ver por qué falta el stock depósito."""
-    user_id = get_session_user_id(request)
-    if not user_id:
-        raise HTTPException(401)
-    acc = _account_for_user(account_id, user_id)
-    if not acc:
-        raise HTTPException(404)
-    token = await refresh_ml_token(account_id)
-    if not token:
-        raise HTTPException(502)
-    headers = {"Authorization": f"Bearer {token}"}
-    seller_id = acc["ml_user_id"]
-    target = (sku or "").strip().upper()
-    out = []
-    inv_ids = set()
-    async with httpx.AsyncClient(timeout=60) as client:
-        ids = await fetch_all_seller_item_ids(client, headers, seller_id)
-        chunks = [ids[i:i + 20] for i in range(0, len(ids), 20)]
-        for chunk in chunks:
-            r = await client.get(
-                f"{ML_API_URL}/items", headers=headers,
-                params={"ids": ",".join(chunk),
-                        "attributes": "id,seller_sku,available_quantity,inventory_id,attributes,variations,status,shipping"})
-            if r.status_code != 200:
-                continue
-            for entry in r.json():
-                body = entry.get("body") if isinstance(entry, dict) else None
-                if not isinstance(body, dict):
-                    continue
-                rows = _stock_sku_qty(body)
-                if not any((s or "").strip().upper() == target for (s, _q, _i) in rows):
-                    continue
-                lt = (body.get("shipping") or {}).get("logistic_type")
-                out.append({
-                    "id": body.get("id"),
-                    "status": body.get("status"),
-                    "logistic_type": lt,
-                    "available_quantity": body.get("available_quantity"),
-                    "inventory_id": body.get("inventory_id"),
-                    "sku_qty_inv": rows,
-                    "variations": [
-                        {"sku": _stock_sku_from_obj(v), "aq": v.get("available_quantity"),
-                         "inv": v.get("inventory_id")}
-                        for v in (body.get("variations") or []) if isinstance(v, dict)],
-                })
-                for (_s, _q, inv) in rows:
-                    if inv:
-                        inv_ids.add(inv)
-        ff = {}
-        for inv in inv_ids:
-            r = await client.get(f"{ML_API_URL}/inventories/{inv}/stock/fulfillment", headers=headers)
-            ff[inv] = r.json() if r.status_code == 200 else f"HTTP {r.status_code}"
-        # Cuerpo COMPLETO del primer item + sondas de stock por logística.
-        probes = {}
-        if out:
-            iid = out[0]["id"]
-            try:
-                rf = await client.get(f"{ML_API_URL}/items/{iid}", headers=headers)
-                full = rf.json() if rf.status_code == 200 else {}
-                # Solo claves relacionadas a stock/logística para no inundar.
-                keys = ("available_quantity", "initial_quantity", "sold_quantity",
-                        "user_product_id", "catalog_product_id", "inventory_id",
-                        "shipping", "channels", "stock", "logistic")
-                probes["item_full_stock_keys"] = {k: full.get(k) for k in keys if k in full}
-                probes["item_all_keys"] = sorted(full.keys())
-                upid = full.get("user_product_id")
-                for name, url in [
-                    ("user_product_stock", f"{ML_API_URL}/user-products/{upid}/stock" if upid else None),
-                    ("item_stock", f"{ML_API_URL}/items/{iid}/stock"),
-                ]:
-                    if not url:
-                        continue
-                    try:
-                        pr = await client.get(url, headers=headers)
-                        probes[name] = {"status": pr.status_code,
-                                        "body": pr.json() if pr.status_code == 200 else pr.text[:300]}
-                    except Exception as e:
-                        probes[name] = {"error": str(e)[:150]}
-            except Exception as e:
-                probes["error"] = str(e)[:200]
-    return {"sku": target, "items": out, "fulfillment": ff, "probes": probes}
 
 
 @app.get("/api/stock/{account_id:int}/export")
