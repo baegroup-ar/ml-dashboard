@@ -126,11 +126,13 @@
           <option value="lte">≤</option>
         </select>
         <input type="number" id="cob-val" placeholder="días" min="0" max="3650" oninput="renderTable()" style="width:56px;" />
-        <label style="font-size:12px;"><input type="checkbox" id="f-activas" onchange="renderTable()" style="vertical-align:-2px;"> Activas (con stock)</label>
-        <label style="font-size:12px;"><input type="checkbox" id="f-sinstock" onchange="renderTable()" style="vertical-align:-2px;"> Sin stock</label>
-        <label style="font-size:12px;"><input type="checkbox" id="only-rep" onchange="renderTable()" style="vertical-align:-2px;"> Con reposición</label>
       </div>
       <button class="green" onclick="downloadStockExcel()" title="Descarga el listado completo en Excel">⬇ Descargar Excel</button>
+    </div>
+    <div class="row" style="margin-top:10px;">
+      <label style="font-size:12px;"><input type="checkbox" id="f-activas" onchange="renderTable()" style="vertical-align:-2px;"> Activas (con stock)</label>
+      <label style="font-size:12px;"><input type="checkbox" id="f-sinstock" onchange="renderTable()" style="vertical-align:-2px;"> Sin stock</label>
+      <label style="font-size:12px;"><input type="checkbox" id="only-rep" onchange="renderTable()" style="vertical-align:-2px;"> Con reposición</label>
     </div>
     <div class="summary" style="margin-top:12px;">
       <span><span class="lbl">SKUs</span><b id="sum-skus">0</b></span>
