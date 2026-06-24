@@ -157,11 +157,6 @@
   let currentAccountId = document.getElementById('account-select')?.value;
   const ALL_ACCOUNT_IDS = {{ accounts | map(attribute='id') | list | tojson }};
   let rankingCache = [];
-  let EXPANDED = new Set();
-  function toggleRankExp(sku) {
-    if(EXPANDED.has(sku)) EXPANDED.delete(sku); else EXPANDED.add(sku);
-    renderTable();
-  }
 
   function todayStr() { return new Intl.DateTimeFormat('sv', {timeZone:'America/Argentina/Buenos_Aires'}).format(new Date()); }
   function addDays(d, n) { const dt = new Date(d + 'T12:00:00'); dt.setDate(dt.getDate()+n); return dt.toISOString().slice(0,10); }
@@ -284,16 +279,10 @@
       else if(realRank === 3) rankCls = 'bronze';
       const gColor = r.ganancia >= 0 ? '#1a8a5a' : '#c0392b';
       const margenColor = r.margen_pct >= 0 ? '#1a8a5a' : '#c0392b';
-      const vars = r.variantes || [];
-      const open = EXPANDED.has(r.sku);
-      const caret = vars.length
-        ? `<span style="cursor:pointer;color:#999;font-size:11px;" onclick="toggleRankExp('${(r.sku||'').replace(/'/g,'\\'')}')">${open ? '▼' : '▶'}</span> `
-        : '';
-      const varTag = vars.length ? ` <span style="display:inline-block;font-size:11px;padding:1px 7px;border-radius:99px;background:#eef4ff;color:#2a5db0;">${vars.length} var.</span>` : '';
-      let html = `
+      return `
         <tr>
           <td><span class="rank-pill ${rankCls}">${realRank}</span></td>
-          <td>${caret}<b>${r.sku}</b>${varTag}</td>
+          <td><b>${r.sku}</b></td>
           <td class="num">${fmtInt(r.ventas)}</td>
           <td class="num">${fmtInt(r.unidades)}</td>
           <td class="num"><b>${fmt(r.facturacion)}</b></td>
@@ -304,28 +293,8 @@
           <td class="num" style="color:${r.cmv>0?'#c0392b':'#aaa'};">${fmt(r.cmv)}</td>
           <td class="num" style="color:${gColor};font-weight:600;">${fmt(r.ganancia)}</td>
           <td class="num" style="color:${margenColor};font-weight:600;">${r.margen_pct.toFixed(1)}%</td>
-        </tr>`;
-      if(open) {
-        for(const v of vars) {
-          const vg = v.ganancia >= 0 ? '#1a8a5a' : '#c0392b';
-          html += `
-        <tr style="background:#fcfcfb;">
-          <td></td>
-          <td style="padding-left:28px;color:#777;">↳ ${v.sku}</td>
-          <td class="num" style="color:#777;">${fmtInt(v.ventas)}</td>
-          <td class="num" style="color:#777;">${fmtInt(v.unidades)}</td>
-          <td class="num" style="color:#777;">${fmt(v.facturacion)}</td>
-          <td class="num" style="color:#c0392b;">${fmt(v.comision)}</td>
-          <td class="num" style="color:#1a8a5a;">${fmt(v.ingreso_envio)}</td>
-          <td class="num" style="color:#1a8a5a;">${fmt(v.bonificacion)}</td>
-          <td class="num" style="color:#c47a1e;">${fmt(v.envio)}</td>
-          <td class="num" style="color:${v.cmv>0?'#c0392b':'#aaa'};">${fmt(v.cmv)}</td>
-          <td class="num" style="color:${vg};">${fmt(v.ganancia)}</td>
-          <td class="num" style="color:${vg};">${v.margen_pct.toFixed(1)}%</td>
-        </tr>`;
-        }
-      }
-      return html;
+        </tr>
+      `;
     }).join('');
   }
 

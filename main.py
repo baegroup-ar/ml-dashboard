@@ -3611,34 +3611,15 @@ def _rank_from_paid(paid, variant_map=None):
                 "facturacion": 0.0, "comision": 0.0,
                 "ingreso_envio": 0.0, "bonificacion": 0.0,
                 "envio": 0.0, "cmv": 0.0, "ganancia": 0.0,
-                "_variants": {},
             })
             for k, v in contrib.items():
                 rec[k] += v
-            # Desglose: si la venta vino de un SKU variante (rolido al original),
-            # guardamos su aporte para mostrarlo como sub-fila expandible.
-            if sku != group_sku:
-                ve = rec["_variants"].setdefault(sku, dict(
-                    {"sku": sku}, ventas=0, unidades=0, facturacion=0.0,
-                    comision=0.0, ingreso_envio=0.0, bonificacion=0.0,
-                    envio=0.0, cmv=0.0, ganancia=0.0))
-                for k, v in contrib.items():
-                    ve[k] += v
     out = []
     for r in rank.values():
         for k in ("facturacion", "comision", "ingreso_envio", "bonificacion",
                   "envio", "cmv", "ganancia"):
             r[k] = round(r[k], 2)
         r["margen_pct"] = round((r["ganancia"] / r["facturacion"]) * 100, 2) if r["facturacion"] > 0 else 0
-        variantes = []
-        for ve in r.pop("_variants").values():
-            for k in ("facturacion", "comision", "ingreso_envio", "bonificacion",
-                      "envio", "cmv", "ganancia"):
-                ve[k] = round(ve[k], 2)
-            ve["margen_pct"] = round((ve["ganancia"] / ve["facturacion"]) * 100, 2) if ve["facturacion"] > 0 else 0
-            variantes.append(ve)
-        variantes.sort(key=lambda x: x["facturacion"], reverse=True)
-        r["variantes"] = variantes
         out.append(r)
     out.sort(key=lambda x: x["facturacion"], reverse=True)
     return out
