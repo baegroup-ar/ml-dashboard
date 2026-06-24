@@ -2682,6 +2682,65 @@ async def api_stock(request: Request, account_id: int, target_days: int = 15,
                                       refresh=bool(refresh))
 
 
+@app.get("/api/stock/{account_id:int}/debug-sku")
+async def api_stock_debug_sku(request: Request, account_id: int, sku: str):
+    """DEBUG temporal: para un SKU, dumpea cada publicación que lo contiene con
+    su logistic_type, available_quantity, inventory_id y variaciones, más el
+    JSON crudo del fulfillment. Sirve para ver por qué falta el stock depósito."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    token = await refresh_ml_token(account_id)
+    if not token:
+        raise HTTPException(502)
+    headers = {"Authorization": f"Bearer {token}"}
+    seller_id = acc["ml_user_id"]
+    target = (sku or "").strip().upper()
+    out = []
+    inv_ids = set()
+    async with httpx.AsyncClient(timeout=60) as client:
+        ids = await fetch_all_seller_item_ids(client, headers, seller_id)
+        chunks = [ids[i:i + 20] for i in range(0, len(ids), 20)]
+        for chunk in chunks:
+            r = await client.get(
+                f"{ML_API_URL}/items", headers=headers,
+                params={"ids": ",".join(chunk),
+                        "attributes": "id,seller_sku,available_quantity,inventory_id,attributes,variations,status,shipping"})
+            if r.status_code != 200:
+                continue
+            for entry in r.json():
+                body = entry.get("body") if isinstance(entry, dict) else None
+                if not isinstance(body, dict):
+                    continue
+                rows = _stock_sku_qty(body)
+                if not any((s or "").strip().upper() == target for (s, _q, _i) in rows):
+                    continue
+                lt = (body.get("shipping") or {}).get("logistic_type")
+                out.append({
+                    "id": body.get("id"),
+                    "status": body.get("status"),
+                    "logistic_type": lt,
+                    "available_quantity": body.get("available_quantity"),
+                    "inventory_id": body.get("inventory_id"),
+                    "sku_qty_inv": rows,
+                    "variations": [
+                        {"sku": _stock_sku_from_obj(v), "aq": v.get("available_quantity"),
+                         "inv": v.get("inventory_id")}
+                        for v in (body.get("variations") or []) if isinstance(v, dict)],
+                })
+                for (_s, _q, inv) in rows:
+                    if inv:
+                        inv_ids.add(inv)
+        ff = {}
+        for inv in inv_ids:
+            r = await client.get(f"{ML_API_URL}/inventories/{inv}/stock/fulfillment", headers=headers)
+            ff[inv] = r.json() if r.status_code == 200 else f"HTTP {r.status_code}"
+    return {"sku": target, "items": out, "fulfillment": ff}
+
+
 @app.get("/api/stock/{account_id:int}/export")
 async def api_stock_export(request: Request, account_id: int, target_days: int = 15,
                            sales_days: int = 7):
