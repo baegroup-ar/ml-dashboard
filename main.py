@@ -6644,6 +6644,33 @@ async def api_promociones_apply(
                 pass
             return None
 
+        async def fetch_fresh_offer(iid, ptype):
+            """GET en vivo de la oferta de ESTA promo para el item. Devuelve el
+            PRECIO ACTUAL (original_price) y el offer_id frescos. Crítico: el
+            precio de la publicación puede haber cambiado desde que se cargó la
+            promo; calcular deal_price con un precio viejo aplica un % equivocado."""
+            try:
+                params = {"app_version": "v2", "promotion_id": promotion_id}
+                if ptype:
+                    params["promotion_type"] = ptype
+                r = await client.get(
+                    f"{ML_API_URL}/seller-promotions/items/{iid}",
+                    headers=headers, params=params)
+                if r.status_code != 200:
+                    return None
+                data = r.json()
+                for off in promo_offers_from_response(data):
+                    if isinstance(off, dict) and promo_id_matches(promo_offer_id(off), promotion_id):
+                        return {
+                            "original_price": off.get("original_price"),
+                            "offer_id": promo_candidate_offer_id(off),
+                            "min_discounted_price": off.get("min_discounted_price"),
+                            "max_discounted_price": off.get("max_discounted_price"),
+                        }
+            except Exception:
+                pass
+            return None
+
         async def apply_one(it):
             iid = it.get("item_id")
             ptype = (it.get("promotion_type") or "DEAL").upper()
@@ -6671,10 +6698,28 @@ async def api_promociones_apply(
                     "payload": None,
                     "attempts": 0,
                 }
+            # PRECIO FRESCO: para los tipos que mandan deal_price, traemos el
+            # precio ACTUAL de ML (no el cacheado) así el % aplicado es exacto
+            # aunque la publicación haya cambiado de precio. SMART no usa precio.
+            fresh_min_dp = fresh_max_dp = None
+            if ptype not in ("SMART", "MARKETPLACE_CAMPAIGN"):
+                fresh = await fetch_fresh_offer(iid, ptype)
+                if fresh:
+                    if fresh.get("original_price"):
+                        original_price = fresh["original_price"]
+                    if fresh.get("offer_id") and not offer_id:
+                        offer_id = fresh["offer_id"]
+                    fresh_min_dp = fresh.get("min_discounted_price")
+                    fresh_max_dp = fresh.get("max_discounted_price")
             deal_price = None
             if original_price and pct > 0:
                 try:
                     deal_price = round(float(original_price) * (1 - pct / 100.0), 2)
+                    # Acotamos al rango permitido por ML para evitar rechazo.
+                    if fresh_min_dp is not None and deal_price < float(fresh_min_dp):
+                        deal_price = round(float(fresh_min_dp), 2)
+                    if fresh_max_dp is not None and deal_price > float(fresh_max_dp):
+                        deal_price = round(float(fresh_max_dp), 2)
                 except (TypeError, ValueError):
                     deal_price = None
             # Cada tipo de promo tiene su shape de payload distinta.
@@ -6729,18 +6774,32 @@ async def api_promociones_apply(
                 payload["offer_id"] = offer_id
             # Limpiamos campos None
             payload = {k: v for k, v in payload.items() if v is not None}
+            url = f"{ML_API_URL}/seller-promotions/items/{iid}"
+            # Tipos que NO soportan modificar la oferta (doc ML): hay que borrarla
+            # y re-crearla. El resto se modifica con PUT (mismo payload/precio).
+            DELETE_TO_MODIFY = {"PRICE_DISCOUNT", "DOD", "LIGHTNING"}
             async with sem:
                 last_status = 0
                 last_error = None
                 offer_id_refreshed = False
-                for attempt in range(5):
+                method = "POST"      # POST crea; si ya existe pasamos a modificar
+                for attempt in range(6):
                     try:
-                        r = await client.post(
-                            f"{ML_API_URL}/seller-promotions/items/{iid}",
-                            headers=headers,
-                            params={"app_version": "v2"},
-                            json=payload,
-                        )
+                        if method == "PUT":
+                            r = await client.put(url, headers=headers,
+                                                  params={"app_version": "v2"}, json=payload)
+                        elif method == "DELETE_POST":
+                            dparams = {"app_version": "v2", "promotion_id": promotion_id,
+                                       "promotion_type": ptype}
+                            if offer_id:
+                                dparams["offer_id"] = offer_id
+                            await client.request("DELETE", url, headers=headers, params=dparams)
+                            await asyncio.sleep(0.6)
+                            r = await client.post(url, headers=headers,
+                                                  params={"app_version": "v2"}, json=payload)
+                        else:
+                            r = await client.post(url, headers=headers,
+                                                  params={"app_version": "v2"}, json=payload)
                         if r.status_code in (200, 201, 204):
                             return {
                                 "item_id": iid,
@@ -6748,18 +6807,22 @@ async def api_promociones_apply(
                                 "status": r.status_code,
                                 "error": None,
                                 "payload": payload,
+                                "modified": method != "POST",
                                 "attempts": attempt + 1,
                             }
                         last_status = r.status_code
                         last_error = r.text[:500]
+                        low = last_error.lower()
+                        # La oferta YA EXISTE → no se crea, se MODIFICA (con el
+                        # MISMO deal_price fresco, así aplica tu % exacto).
+                        if (method == "POST" and r.status_code in (400, 409)
+                                and ("already exist" in low or "offer_already_exists" in low)):
+                            method = "DELETE_POST" if ptype in DELETE_TO_MODIFY else "PUT"
+                            continue
                         # Reintentos por status server-side / lock.
                         retriable = r.status_code in (423, 429, 500, 502, 503, 504)
                         # Algunos 400 de ML son TRANSITORIOS (ML está procesando
                         # internamente la publicación): reintentar también.
-                        #  - OFFER_SIBLING_CREATION_IN_PROCESS: oferta hermana en
-                        #    creación; al rato deja aplicar el precio.
-                        #  - REST_CREDIBILITY_API_ERROR: microservicio de precios
-                        #    de ML caído/ocupado, suele recuperarse.
                         if r.status_code == 400 and (
                             "OFFER_SIBLING_CREATION_IN_PROCESS" in last_error
                             or "REST_CREDIBILITY_API_ERROR" in last_error
@@ -6772,20 +6835,20 @@ async def api_promociones_apply(
                         if (r.status_code == 400 and "CANDIDATE_NOT_FOUND" in last_error
                                 and not offer_id_refreshed):
                             offer_id_refreshed = True
-                            fresh = await resolve_offer_id(iid, ptype)
-                            if fresh and fresh != offer_id:
-                                offer_id = fresh
-                                payload["offer_id"] = fresh
+                            fresh_oid = await resolve_offer_id(iid, ptype)
+                            if fresh_oid and fresh_oid != offer_id:
+                                offer_id = fresh_oid
+                                payload["offer_id"] = fresh_oid
                                 await asyncio.sleep(0.5)
                                 continue
-                        if retriable and attempt < 4:
+                        if retriable and attempt < 5:
                             await asyncio.sleep(1.5 * (attempt + 1))
                             continue
                         break
                     except Exception as e:
                         last_status = 0
                         last_error = str(e)[:300]
-                        if attempt < 4:
+                        if attempt < 5:
                             await asyncio.sleep(1.5 * (attempt + 1))
                             continue
                         break
@@ -6795,7 +6858,7 @@ async def api_promociones_apply(
                     "status": last_status,
                     "error": last_error,
                     "payload": payload,
-                    "attempts": 5,
+                    "attempts": 6,
                 }
         results = await asyncio.gather(*[apply_one(it) for it in items])
     _invalidate_promo_items_cache(account_id)
