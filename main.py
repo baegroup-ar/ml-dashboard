@@ -6668,6 +6668,7 @@ async def api_promociones_apply(
                         return {
                             "original_price": off.get("original_price"),
                             "offer_id": promo_candidate_offer_id(off),
+                            "raw_id": off.get("id"),   # id de la oferta (C-.../P-...)
                             "min_discounted_price": off.get("min_discounted_price"),
                             "max_discounted_price": off.get("max_discounted_price"),
                         }
@@ -6713,6 +6714,10 @@ async def api_promociones_apply(
                         original_price = fresh["original_price"]
                     if fresh.get("offer_id") and not offer_id:
                         offer_id = fresh["offer_id"]
+                    # SELLER_CAMPAIGN no expone offer_id aparte; el id de la oferta
+                    # (C-...) es lo que el PUT necesita para modificar (verificado).
+                    if not offer_id and ptype == "SELLER_CAMPAIGN" and fresh.get("raw_id"):
+                        offer_id = fresh["raw_id"]
                     fresh_min_dp = fresh.get("min_discounted_price")
                     fresh_max_dp = fresh.get("max_discounted_price")
             deal_price = None
