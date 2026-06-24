@@ -118,6 +118,7 @@
     <div class="search-row">
       <input type="text" id="filter-input" placeholder="Buscar por SKU..." oninput="renderTable()" />
       <span id="count-label" style="font-size:13px;color:#888;align-self:center;"></span>
+      <button onclick="downloadRankingExcel()" title="Descarga el ranking del período en Excel" style="margin-left:auto;align-self:center;border:none;border-radius:8px;background:#1a8a5a;color:#fff;font-size:13px;padding:8px 16px;cursor:pointer;white-space:nowrap;">⬇ Descargar Excel</button>
     </div>
     <div style="overflow-x:auto;">
       <table>
@@ -194,6 +195,16 @@
     const r = await fetch(url);
     if(!r.ok) throw new Error('Error al cargar el ranking');
     return await r.json();
+  }
+
+  function downloadRankingExcel() {
+    if(!currentAccountId) { alert('Elegí una cuenta primero.'); return; }
+    const df = document.getElementById('date-from').value;
+    const dt = document.getElementById('date-to').value;
+    const params = new URLSearchParams();
+    if(df) params.set('date_from', df);
+    if(dt) params.set('date_to', dt);
+    window.location.href = `/api/ranking/${currentAccountId}/export?${params}`;
   }
 
   async function loadRanking(force) {

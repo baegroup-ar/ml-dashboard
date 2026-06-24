@@ -803,10 +803,6 @@
 
   function exportOrdersExcel() {
     if(!currentAccountId) return;
-    if(currentAccountId === 'all') {
-      alert('El export a Excel es por cuenta. Elegí una cuenta puntual para descargarlo.');
-      return;
-    }
     const df = document.getElementById('date-from')?.value || '';
     const dt = document.getElementById('date-to')?.value || '';
     const params = new URLSearchParams();

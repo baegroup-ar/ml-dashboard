@@ -3558,6 +3558,82 @@ async def api_ranking_all(request: Request,
     return {"items": out, "period": {"from": df, "to": dt}, "cache_info": cache_info}
 
 
+@app.get("/api/ranking/{account_id}/export")
+async def api_ranking_export(
+    request: Request, account_id: str,
+    date_from: Optional[str] = None, date_to: Optional[str] = None,
+):
+    """Descarga el ranking por SKU del período como .xlsx (mismas columnas y
+    agrupado de variantes que la tabla). account_id='all' combina todas las
+    cuentas visibles del usuario."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    user = get_user(user_id)
+    require_page(user, "ranking")
+    is_all = (str(account_id).lower() == "all")
+    if is_all:
+        accts = get_visible_accounts(user_id, user)
+    else:
+        acc = _account_for_user(int(account_id), user_id)
+        if not acc:
+            raise HTTPException(404)
+        accts = [acc]
+    today = datetime.utcnow().date()
+    df = date_from or str(today - timedelta(days=30))
+    dt = date_to or str(today)
+    paid = []
+    for a in accts:
+        orders = db_fetch_order_snapshots(a["id"], df, dt) or []
+        paid.extend([o for o in orders if o.get("estado") == "paid"])
+    variant_map = _get_variant_map(_cost_account_id_for(user, accts[0]["id"])) if accts else {}
+    rows = _rank_from_paid(paid, variant_map)
+
+    import io
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from fastapi.responses import StreamingResponse
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Ranking"
+    headers = ["#", "SKU", "Ventas", "Unidades", "Facturación", "Comisión",
+               "Ingreso Envío", "Bonificación", "Costo Envío", "CMV",
+               "Ganancia", "Margen %"]
+    ws.append(headers)
+    fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
+    for col in range(1, len(headers) + 1):
+        c = ws.cell(row=1, column=col)
+        c.fill = fill
+        c.font = Font(bold=True)
+        c.alignment = Alignment(horizontal="center")
+    for idx, r in enumerate(rows, start=1):
+        ws.append([
+            idx, r.get("sku") or "", r.get("ventas") or 0, r.get("unidades") or 0,
+            r.get("facturacion") or 0, r.get("comision") or 0,
+            r.get("ingreso_envio") or 0, r.get("bonificacion") or 0,
+            r.get("envio") or 0, r.get("cmv") or 0, r.get("ganancia") or 0,
+            r.get("margen_pct") or 0,
+        ])
+    widths = [6, 24, 9, 10, 16, 14, 14, 14, 14, 14, 16, 10]
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = w
+    for row in ws.iter_rows(min_row=2, min_col=5, max_col=11):
+        for cell in row:
+            cell.number_format = '"$"#,##0.00'
+    for row in ws.iter_rows(min_row=2, min_col=12, max_col=12):
+        for cell in row:
+            cell.number_format = '0.00"%"'
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    nick = "TODAS" if is_all else (accts[0].get("nickname") or accts[0].get("ml_user_id") or "cuenta")
+    nick = str(nick).replace(" ", "_")
+    fname = f"ranking_{nick}_{df}_{dt}.xlsx"
+    return StreamingResponse(
+        buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+
+
 def _rank_from_paid(paid, variant_map=None):
     """Agrupa órdenes pagadas por SKU y calcula facturación, costos, ganancia y
     margen ponderado. Sirve para una cuenta o para todas combinadas.
@@ -7471,23 +7547,37 @@ async def api_orders_all(request: Request,
 
 @app.get("/api/orders/{account_id}/export")
 async def api_orders_export(
-    request: Request, account_id: int,
+    request: Request, account_id: str,
     date_from: Optional[str] = None, date_to: Optional[str] = None,
     sku: Optional[str] = None, envio: Optional[str] = None,
 ):
     """Descarga las ventas del período como .xlsx. Respeta los mismos
     filtros del Dashboard (SKU y tipo de envío). Lee del caché — el
-    Dashboard ya se encarga de refrescar contra ML."""
+    Dashboard ya se encarga de refrescar contra ML. account_id='all'
+    combina TODAS las cuentas visibles (con columna Cuenta)."""
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
-    acc = _account_for_user(account_id, user_id)
-    if not acc:
-        raise HTTPException(404)
+    user = get_user(user_id)
+    is_all = (str(account_id).lower() == "all")
+    if is_all:
+        accts = get_visible_accounts(user_id, user)
+    else:
+        acc = _account_for_user(int(account_id), user_id)
+        if not acc:
+            raise HTTPException(404)
+        accts = [acc]
     today = datetime.utcnow().date()
     df = date_from or str(today - timedelta(days=30))
     dt = date_to or str(today)
-    cached_orders = db_fetch_order_snapshots(account_id, df, dt) or []
+    # Juntamos las órdenes de cada cuenta, etiquetando el nombre de la cuenta.
+    cached_orders = []
+    for a in accts:
+        nick = a.get("nickname") or str(a.get("ml_user_id") or a.get("id"))
+        for o in (db_fetch_order_snapshots(a["id"], df, dt) or []):
+            o = dict(o)
+            o["_cuenta"] = nick
+            cached_orders.append(o)
 
     # Filtros
     sku_q = (sku or "").strip().upper()
@@ -7514,7 +7604,7 @@ async def api_orders_export(
     ws = wb.active
     ws.title = "Ventas"
     headers = [
-        "Fecha", "Hora", "N° Venta", "Estado", "Producto", "SKU", "Envío",
+        "Cuenta", "Fecha", "Hora", "N° Venta", "Estado", "Producto", "SKU", "Envío",
         "Unidades", "Monto", "Comisión", "Ingreso Envío", "Bonificación",
         "Costo Envío", "CMV", "Ganancia neta", "Margen %",
     ]
@@ -7537,6 +7627,7 @@ async def api_orders_export(
         ganancia = float(o.get("ganancia") or 0)
         margen = (ganancia / monto * 100) if monto > 0 else 0
         ws.append([
+            o.get("_cuenta") or "",
             o.get("fecha") or "",
             o.get("hora") or "",
             str(o.get("venta_id") or o.get("id") or ""),
@@ -7555,21 +7646,22 @@ async def api_orders_export(
             round(margen, 2),
         ])
 
-    # Ancho de columnas + formato moneda básico
-    widths = [12, 8, 16, 10, 40, 22, 12, 8, 14, 14, 14, 14, 14, 14, 14, 10]
+    # Ancho de columnas + formato moneda básico (col 10-16 = $, col 17 = %)
+    widths = [16, 12, 8, 16, 10, 40, 22, 12, 8, 14, 14, 14, 14, 14, 14, 14, 10]
     for i, w in enumerate(widths, start=1):
         ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = w
-    for row in ws.iter_rows(min_row=2, min_col=9, max_col=15):
+    for row in ws.iter_rows(min_row=2, min_col=10, max_col=16):
         for cell in row:
             cell.number_format = '"$"#,##0.00'
-    for row in ws.iter_rows(min_row=2, min_col=16, max_col=16):
+    for row in ws.iter_rows(min_row=2, min_col=17, max_col=17):
         for cell in row:
             cell.number_format = '0.00"%"'
 
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
-    nick = (acc.get("nickname") or acc.get("ml_user_id") or "cuenta").replace(" ", "_")
+    nick = "TODAS" if is_all else (accts[0].get("nickname") or accts[0].get("ml_user_id") or "cuenta")
+    nick = str(nick).replace(" ", "_")
     fname = f"ventas_{nick}_{df}_{dt}.xlsx"
     return StreamingResponse(
         buf,
