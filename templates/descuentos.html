@@ -1168,11 +1168,17 @@
           currentItems = currentItems.filter(it => !okIds.has(it.item_id));
         }
       } else {
-        // Participando: siguen participando, pero con el desc. NUEVO. Actualizamos
-        // el % aplicado localmente (= lo que cargaste) para que salgan al instante
-        // del filtro "mejorables" sin recargar del server.
+        // Participando: siguen participando, pero con el desc. NUEVO. Tomamos el
+        // % aplicado EXACTO del precio que confirmó ML (no una aproximación), así
+        // "Particip. ML" queda igual a lo real y salen del filtro "mejorables".
+        const resById = {};
+        (data.results || []).forEach(x => { if(x.ok) resById[x.item_id] = x; });
         currentItems.forEach(it => {
-          if(okIds.has(it.item_id) && it.loaded_discount_pct != null) {
+          if(!okIds.has(it.item_id)) return;
+          const res = resById[it.item_id];
+          if(res && res.applied_price && res.applied_original) {
+            it.ml_applied_pct = Math.round((1 - res.applied_price / res.applied_original) * 1000) / 10;
+          } else if(it.loaded_discount_pct != null) {
             it.ml_applied_pct = it.loaded_discount_pct;
           }
         });

@@ -6816,6 +6816,15 @@ async def api_promociones_apply(
                             r = await client.post(url, headers=headers,
                                                   params={"app_version": "v2"}, json=payload)
                         if r.status_code in (200, 201, 204):
+                            # Precio EXACTO aplicado: preferimos el que devuelve
+                            # ML; si no, el deal_price que mandamos (= lo aplicado).
+                            applied_price = deal_price
+                            try:
+                                rb = r.json()
+                                if isinstance(rb, dict) and rb.get("price"):
+                                    applied_price = float(rb["price"])
+                            except Exception:
+                                pass
                             return {
                                 "item_id": iid,
                                 "ok": True,
@@ -6823,6 +6832,8 @@ async def api_promociones_apply(
                                 "error": None,
                                 "payload": payload,
                                 "modified": method != "POST",
+                                "applied_price": applied_price,
+                                "applied_original": (float(original_price) if original_price else None),
                                 "attempts": attempt + 1,
                             }
                         last_status = r.status_code
