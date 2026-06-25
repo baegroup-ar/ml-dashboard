@@ -6763,11 +6763,16 @@ async def api_promociones_apply(
             if base_price and pct > 0:
                 try:
                     deal_price = round(float(base_price) * (1 - pct / 100.0), 2)
-                    # Acotamos al rango permitido por ML para evitar rechazo.
+                    # Solo acotamos el descuento MÁXIMO (no pasarse del techo de ML).
                     if fresh_min_dp is not None and deal_price < float(fresh_min_dp):
                         deal_price = round(float(fresh_min_dp), 2)
-                    if fresh_max_dp is not None and deal_price > float(fresh_max_dp):
-                        deal_price = round(float(fresh_max_dp), 2)
+                    # NO clampeamos contra max_discounted_price. Ese valor parpadea
+                    # en la API de ML y a veces llega IGUAL al precio sugerido
+                    # (mayor descuento que el mínimo). Forzar el deal_price a ese
+                    # "techo" terminaba aplicando el SUGERIDO de ML (ej: 10%) en vez
+                    # del descuento del vendedor (ej: 5%). Regla: JAMÁS aplicar más
+                    # descuento que el cargado. Si el % queda por debajo del mínimo
+                    # real, dejamos que ML lo rechace en vez de inflar el descuento.
                 except (TypeError, ValueError):
                     deal_price = None
             # Cada tipo de promo tiene su shape de payload distinta.
