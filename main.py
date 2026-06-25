@@ -6390,12 +6390,12 @@ async def api_promociones_items(
         seller_suggested_pct = min_discount_pct
         suggested_pct = min_discount_pct
         # `seller_pct` = lo que se va a aplicar. Priorizamos lo que
-        # cargó el vendedor; si no hay, usamos solamente el mínimo de ML
-        # (min + 0.1). No usamos sugeridos/óptimos como fallback.
+        # cargó el vendedor; si no hay, usamos solamente el mínimo de ML.
+        # No usamos sugeridos/óptimos como fallback.
         if loaded_pct is not None:
             seller_pct = loaded_pct
         elif min_discount_pct is not None:
-            seller_pct = round(min_discount_pct + 0.1, 2)
+            seller_pct = min_discount_pct
         else:
             seller_pct = 0.0
         # `final_pct` (descuento total que ve el comprador) = tu % + aporte ML
@@ -6409,9 +6409,9 @@ async def api_promociones_items(
         # no la sugerencia. Si no cargaste nada, te falta TODO.
         check_pct = loaded_pct if loaded_pct is not None else 0.0
         if min_discount_pct is not None:
-            required_pct = round(min_discount_pct + 0.1, 2)
+            required_pct = min_discount_pct
             gap_pct = round(max(0.0, required_pct - check_pct), 2)
-            if check_pct <= min_discount_pct:
+            if check_pct < min_discount_pct:
                 below_min = True
         final_price = None
         if original_price:

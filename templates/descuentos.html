@@ -692,22 +692,21 @@
   function computeItemGap(it) {
     const target = it.min_discount_pct != null ? it.min_discount_pct : null;
     if(target == null) return null;
-    const required = target + 0.1;
+    const required = target;
     const loaded = it.loaded_discount_pct != null ? it.loaded_discount_pct : 0;
     return Math.max(0, Math.round((required - loaded) * 10) / 10);
   }
 
   // Descuento a enviar:
-  // - Tu desc > mínimo ML → tu descuento exacto, sin tocar nada
-  // - Tu desc <= mínimo ML (debajo, seleccionado a conciencia) → mínimo ML + 0.1
-  //   (el +0.1 es porque ML exige SUPERAR estrictamente el piso, no igualarlo)
+  // - Tu desc >= mínimo ML → tu descuento exacto, sin tocar nada
+  // - Tu desc < mínimo ML (debajo, seleccionado a conciencia) → mínimo ML
   // - Sin descuento cargado → null (no se aplica)
   function applySellerPct(it) {
     const loaded = it.loaded_discount_pct;
     const min = it.min_discount_pct;
     if(loaded == null) return null;
-    if(min == null || loaded > min) return loaded;
-    return Math.round((min + 0.1) * 10) / 10;
+    if(min == null || loaded >= min) return loaded;
+    return min;
   }
 
   function applyFinalPrice(it) {
@@ -1008,7 +1007,7 @@
       const gap = computeItemGap(it);
       const estado = it.loaded_discount_pct == null
         ? 'Sin descuento cargado'
-        : (it.below_min ? `Debe superar ${it.min_discount_pct}%` : 'Listo para aplicar');
+        : (it.below_min ? `Debe alcanzar ${it.min_discount_pct}%` : 'Listo para aplicar');
       return `<tr>
         <td>${esc(it.mla || it.item_id || '')}</td>
         <td>${esc(it.sku || '')}</td>
