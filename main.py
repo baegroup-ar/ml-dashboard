@@ -2846,10 +2846,10 @@ async def api_debug_item_any(request: Request, item_id: str):
             continue
         dump = await _debug_item_dump(token, item_id)
         tried.append(aid)
-        # Si /items devolvió el item con body, es la cuenta correcta.
+        # Solo es la cuenta dueña si /items respondió 200 (no 403 forbidden).
         items_raw = dump.get("items_raw")
         if isinstance(items_raw, list) and items_raw and isinstance(items_raw[0], dict):
-            if (items_raw[0].get("body") or {}).get("id"):
+            if items_raw[0].get("code") == 200:
                 dump["account_id"] = aid
                 dump["accounts_tried"] = tried
                 return dump
