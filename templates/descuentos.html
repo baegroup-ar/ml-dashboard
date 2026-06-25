@@ -191,27 +191,28 @@
       <a href="#" id="btn-debug-json" onclick="openDebugJson(event)" style="margin-left:auto;font-size:11px;color:#888;text-decoration:underline;cursor:pointer;">Ver JSON crudo (debug)</a>
       <span id="preview-status" style="font-size:12px;color:#888;"></span>
     </div>
-    <div class="row" style="margin-bottom:10px;gap:10px;flex-wrap:wrap;">
-      <label style="font-size:13px;color:#666;">Filtrar Diferencia:</label>
+    <div class="row" style="margin-bottom:10px;gap:10px;flex-wrap:wrap;align-items:center;">
+      <label style="font-size:13px;color:#666;">Filtrar:</label>
       <select id="preview-filter" onchange="onPreviewFilterChange()" style="padding:6px 10px;border:1px solid #ddd;border-radius:8px;font-size:13px;">
         <option value="all">Todas</option>
         <option value="upgrade">Tu desc. mayor al aplicado (mejorables)</option>
+        <option value="downgrade">Tu desc. menor al aplicado</option>
         <option value="nodisc">Sin descuento cargado (no están en tu base)</option>
         <option value="ok">Solo OK (sin diferencia)</option>
         <option value="below">Solo con diferencia (debajo del mínimo)</option>
-        <option value="lt1">Diferencia ≤ 1%</option>
-        <option value="lt2">Diferencia ≤ 2%</option>
-        <option value="lt3">Diferencia ≤ 3%</option>
-        <option value="lt5">Diferencia ≤ 5%</option>
-        <option value="lt10">Diferencia ≤ 10%</option>
-        <option value="custom">Personalizado…</option>
       </select>
-      <span id="preview-custom-wrap" style="display:none;align-items:center;gap:6px;">
-        <span style="font-size:13px;color:#666;">Diferencia ≤</span>
-        <input type="number" id="preview-custom-max" min="0" max="100" step="0.5" value="0" oninput="onPreviewFilterChange()" style="width:80px;padding:6px 10px;border:1px solid #ddd;border-radius:8px;font-size:13px;" />
-        <span style="font-size:13px;color:#666;">%</span>
-      </span>
-      <label style="font-size:13px;color:#666;margin-left:10px;">Buscar:</label>
+      <label style="font-size:13px;color:#666;margin-left:6px;">Diferencia:</label>
+      <select id="diff-op" onchange="onPreviewFilterChange()" style="width:62px;min-width:0;padding:6px 4px;border:1px solid #ddd;border-radius:8px;font-size:13px;">
+        <option value="">—</option>
+        <option value="lte">≤</option>
+        <option value="gte">≥</option>
+        <option value="between">entre</option>
+      </select>
+      <input type="number" id="diff-val1" min="0" max="100" step="0.5" placeholder="0" oninput="onPreviewFilterChange()" style="width:62px;padding:6px 8px;border:1px solid #ddd;border-radius:8px;font-size:13px;" />
+      <span id="diff-between-sep" style="display:none;font-size:13px;color:#666;">y</span>
+      <input type="number" id="diff-val2" min="0" max="100" step="0.5" placeholder="0" oninput="onPreviewFilterChange()" style="display:none;width:62px;padding:6px 8px;border:1px solid #ddd;border-radius:8px;font-size:13px;" />
+      <span id="diff-pct-label" style="display:none;font-size:13px;color:#666;">%</span>
+      <label style="font-size:13px;color:#666;margin-left:6px;">Buscar:</label>
       <input type="search" id="preview-search" placeholder="SKU o MLA" oninput="onPreviewSearchChange()" style="min-width:240px;flex:1;max-width:420px;padding:6px 10px;border:1px solid #ddd;border-radius:8px;font-size:13px;" />
       <button onclick="exportPreviewFiltered()" style="padding:7px 12px;border:1px solid #1a8a5a;background:#fff;color:#1a8a5a;border-radius:8px;font-size:12px;cursor:pointer;">Excel filtrado</button>
     </div>
@@ -686,7 +687,6 @@
   let previewPage = 1;
   let previewSelected = new Set();
   let previewFilter = 'all';
-  let previewCustomMax = 0;
   let previewSearch = '';
 
   function computeItemGap(it) {
@@ -725,7 +725,15 @@
     return Math.round(it.original_price * (1 - total / 100) * 100) / 100;
   }
 
+  function getDiffFilter() {
+    const op = (document.getElementById('diff-op')?.value || '');
+    const v1 = parseFloat(document.getElementById('diff-val1')?.value) || 0;
+    const v2 = parseFloat(document.getElementById('diff-val2')?.value) || 0;
+    return { op, v1, v2 };
+  }
+
   function getFilteredItems() {
+    const { op, v1, v2 } = getDiffFilter();
     return currentItems.filter(it => {
       if(previewSearch) {
         const sku = (it.sku || '').toUpperCase();
@@ -733,23 +741,27 @@
         if(!sku.includes(previewSearch) && !mla.includes(previewSearch)) return false;
       }
       const gap = computeItemGap(it);
+      // Filtro por tipo
       switch(previewFilter) {
-        // Mejorables: ya participan y tu desc. cargado supera al aplicado en ML
-        // (re-aplicando, subís el descuento). Margen 0.4 para evitar ruido de redondeo.
         case 'upgrade':
-          return it.ml_applied_pct != null && it.loaded_discount_pct != null
-                 && (it.loaded_discount_pct - it.ml_applied_pct) > 0.4;
-        case 'nodisc': return it.loaded_discount_pct == null;
-        case 'ok': return gap === 0;
-        case 'below': return gap != null && gap > 0;
-        case 'lt1': return gap != null && gap <= 1;
-        case 'lt2': return gap != null && gap <= 2;
-        case 'lt3': return gap != null && gap <= 3;
-        case 'lt5': return gap != null && gap <= 5;
-        case 'lt10': return gap != null && gap <= 10;
-        case 'custom': return gap != null && gap <= previewCustomMax;
-        default: return true;
+          if(!(it.ml_applied_pct != null && it.loaded_discount_pct != null
+               && (it.loaded_discount_pct - it.ml_applied_pct) > 0.4)) return false;
+          break;
+        case 'downgrade':
+          if(!(it.ml_applied_pct != null && it.loaded_discount_pct != null
+               && (it.ml_applied_pct - it.loaded_discount_pct) > 0.4)) return false;
+          break;
+        case 'nodisc': if(it.loaded_discount_pct != null) return false; break;
+        case 'ok':     if(gap !== 0) return false; break;
+        case 'below':  if(!(gap != null && gap > 0)) return false; break;
       }
+      // Filtro numérico de Diferencia (se combina con cualquier tipo)
+      if(op && gap != null) {
+        if(op === 'lte'     && !(gap <= v1)) return false;
+        if(op === 'gte'     && !(gap >= v1)) return false;
+        if(op === 'between' && !(gap >= v1 && gap <= v2)) return false;
+      }
+      return true;
     });
   }
 
@@ -760,13 +772,14 @@
   }
 
   function onPreviewFilterChange() {
-    const sel = document.getElementById('preview-filter');
-    previewFilter = sel.value;
-    const customWrap = document.getElementById('preview-custom-wrap');
-    customWrap.style.display = previewFilter === 'custom' ? 'inline-flex' : 'none';
-    if(previewFilter === 'custom') {
-      previewCustomMax = parseFloat(document.getElementById('preview-custom-max').value) || 0;
-    }
+    previewFilter = document.getElementById('preview-filter').value;
+    const op = document.getElementById('diff-op').value;
+    const isBetween = op === 'between';
+    const hasOp = op !== '';
+    document.getElementById('diff-val1').style.display = hasOp ? '' : 'none';
+    document.getElementById('diff-between-sep').style.display = isBetween ? '' : 'none';
+    document.getElementById('diff-val2').style.display = isBetween ? '' : 'none';
+    document.getElementById('diff-pct-label').style.display = hasOp ? '' : 'none';
     previewPage = 1;
     renderPreview();
   }
