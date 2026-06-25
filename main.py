@@ -6632,6 +6632,30 @@ async def api_promociones_apply(
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     results = []
     async with httpx.AsyncClient(timeout=60) as client:
+        # Pre-fetch precios reales desde /items (no el tachado/original_price de la promo).
+        # Evita PRICE_GT_CURRENT: cuando original_price de la promo API es el precio de
+        # referencia/tachado (> precio_real), deal_price calculado puede quedar > precio_real.
+        actual_prices: dict = {}
+        item_ids_to_fetch = [it.get("item_id") for it in items if it.get("item_id")]
+        if item_ids_to_fetch:
+            for _bi in range(0, len(item_ids_to_fetch), 20):
+                batch = item_ids_to_fetch[_bi:_bi + 20]
+                try:
+                    _r = await client.get(
+                        f"{ML_API_URL}/items",
+                        headers=headers,
+                        params={"ids": ",".join(batch), "attributes": "id,price"},
+                    )
+                    if _r.status_code == 200:
+                        for _entry in _r.json():
+                            if isinstance(_entry, dict) and _entry.get("code") == 200:
+                                _body = _entry.get("body") or {}
+                                _iid = _body.get("id")
+                                _p = _body.get("price")
+                                if _iid and _p is not None:
+                                    actual_prices[_iid] = float(_p)
+                except Exception:
+                    pass
         # ML bloquea temporalmente ofertas cuando procesa cambios masivos.
         # Concurrencia baja + retries reduce HTTP 423 LockedEntityException.
         sem = asyncio.Semaphore(3)
@@ -6731,10 +6755,14 @@ async def api_promociones_apply(
                         offer_id = fresh["raw_id"]
                     fresh_min_dp = fresh.get("min_discounted_price")
                     fresh_max_dp = fresh.get("max_discounted_price")
+            # Precio base para calcular deal_price: preferir precio real del item
+            # (de /items) sobre original_price de la promo (que puede ser el tachado,
+            # más alto que el precio real → genera PRICE_GT_CURRENT).
+            base_price = actual_prices.get(iid) or original_price
             deal_price = None
-            if original_price and pct > 0:
+            if base_price and pct > 0:
                 try:
-                    deal_price = round(float(original_price) * (1 - pct / 100.0), 2)
+                    deal_price = round(float(base_price) * (1 - pct / 100.0), 2)
                     # Acotamos al rango permitido por ML para evitar rechazo.
                     if fresh_min_dp is not None and deal_price < float(fresh_min_dp):
                         deal_price = round(float(fresh_min_dp), 2)
