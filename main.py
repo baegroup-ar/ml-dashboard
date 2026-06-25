@@ -6756,17 +6756,26 @@ async def api_promociones_apply(
                     fresh_min_dp = fresh.get("min_discounted_price")
                     fresh_max_dp = fresh.get("max_discounted_price")
             # Precio base para calcular deal_price.
-            # OJO: para items que YA participan (modify_existing), /items devuelve
-            # el precio CON la promo aplicada (descontado), no el de lista. Usar ese
-            # como base genera un descuento compuesto enorme y el clamp del mínimo
-            # lo termina clavando en el descuento actual → no baja nunca. Por eso,
-            # para los que ya participan usamos el precio de LISTA (original_price
-            # de la oferta). Para candidatos sí usamos el precio real de /items
-            # (evita PRICE_GT_CURRENT cuando original_price es el tachado).
-            if modify_existing:
-                base_price = original_price or actual_prices.get(iid)
-            else:
-                base_price = actual_prices.get(iid) or original_price
+            # Regla de seguridad: usamos el precio MÁS ALTO entre el de lista
+            # (original_price de la oferta) y el real de /items. Por qué el más alto:
+            #  - Si el item YA participa (en esta u OTRA promo), /items devuelve el
+            #    precio DESCONTADO; usarlo daría descuento sobre descuento → aplicaría
+            #    MÁS descuento que el cargado. El de lista lo evita.
+            #  - Si original_price quedó desactualizado por encima del real, el peor
+            #    caso es que ML rechace con PRICE_GT_CURRENT (error), nunca que se
+            #    aplique de más.
+            # Tomar el máximo GARANTIZA que jamás se aplique un descuento mayor al
+            # cargado: una base más alta = menos descuento, nunca más.
+            _price_candidates = []
+            try:
+                if original_price:
+                    _price_candidates.append(float(original_price))
+            except (TypeError, ValueError):
+                pass
+            _ap = actual_prices.get(iid)
+            if _ap:
+                _price_candidates.append(float(_ap))
+            base_price = max(_price_candidates) if _price_candidates else None
             deal_price = None
             if base_price and pct > 0:
                 try:
