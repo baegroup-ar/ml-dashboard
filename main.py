@@ -2760,11 +2760,21 @@ async def api_stock_debug_item(request: Request, account_id: int, item_id: str):
     headers = {"Authorization": f"Bearer {token}"}
     out = {"item_id": item_id}
     async with httpx.AsyncClient(timeout=60) as client:
+        # Promos del item (para diagnosticar ml_applied_pct con variantes):
+        # el price/original_price que ML reporta por publicación vs por variante.
+        try:
+            pr = await client.get(
+                f"{ML_API_URL}/seller-promotions/items/{item_id}",
+                headers=headers, params={"app_version": "v2"})
+            out["promotions_status"] = pr.status_code
+            out["promotions_raw"] = pr.json()
+        except Exception as e:
+            out["promotions_error"] = str(e)
         r = await client.get(
             f"{ML_API_URL}/items",
             headers=headers,
             params={"ids": item_id,
-                    "attributes": "id,seller_sku,available_quantity,inventory_id,attributes,variations,status,shipping,user_product_id"},
+                    "attributes": "id,seller_sku,price,original_price,available_quantity,inventory_id,attributes,variations,status,shipping,user_product_id"},
         )
         out["items_status"] = r.status_code
         body = None
