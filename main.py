@@ -2744,19 +2744,10 @@ async def api_stock(request: Request, account_id: int, target_days: int = 15,
                                       refresh=bool(refresh))
 
 
-@app.get("/api/stock/{account_id:int}/debug-item")
-async def api_stock_debug_item(request: Request, account_id: int, item_id: str):
-    """DEBUG TEMPORAL: dump crudo de /items + stock de fulfillment + user-products
-    para un item, para entender coexistencia Full+depósito en variantes."""
-    user_id = get_session_user_id(request)
-    if not user_id:
-        raise HTTPException(401)
-    acc = _account_for_user(account_id, user_id)
-    if not acc:
-        raise HTTPException(404)
-    token = await refresh_ml_token(account_id)
-    if not token:
-        raise HTTPException(502)
+async def _debug_item_dump(token: str, item_id: str) -> dict:
+    """DEBUG TEMPORAL: dump crudo de /items + promos + fulfillment + user-products
+    para un item, para entender coexistencia Full+depósito y ml_applied_pct en
+    publicaciones con variantes."""
     headers = {"Authorization": f"Bearer {token}"}
     out = {"item_id": item_id}
     async with httpx.AsyncClient(timeout=60) as client:
@@ -2816,6 +2807,53 @@ async def api_stock_debug_item(request: Request, account_id: int, item_id: str):
                 ups[up] = {"status": rr.status_code, "body": rr.text}
         out["user_products"] = ups
     return out
+
+
+@app.get("/api/stock/{account_id:int}/debug-item")
+async def api_stock_debug_item(request: Request, account_id: int, item_id: str):
+    """DEBUG TEMPORAL: dump para un item en una cuenta concreta."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    token = await refresh_ml_token(account_id)
+    if not token:
+        raise HTTPException(502)
+    return await _debug_item_dump(token, item_id)
+
+
+@app.get("/api/debug-item")
+async def api_debug_item_any(request: Request, item_id: str):
+    """DEBUG TEMPORAL: busca el item en TODAS las cuentas del usuario (sin tener
+    que pasar account_id) y devuelve el dump de la primera que lo encuentra."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    user = get_user(user_id)
+    if not user:
+        raise HTTPException(404)
+    owner = _accounts_owner_id(user, user_id)
+    rows = db_fetchall(
+        "SELECT id FROM ml_accounts WHERE user_id=:uid AND COALESCE(access_token,'') <> '' ORDER BY id",
+        {"uid": owner})
+    tried = []
+    for row in rows:
+        aid = row["id"]
+        token = await refresh_ml_token(aid)
+        if not token:
+            continue
+        dump = await _debug_item_dump(token, item_id)
+        tried.append(aid)
+        # Si /items devolvió el item con body, es la cuenta correcta.
+        items_raw = dump.get("items_raw")
+        if isinstance(items_raw, list) and items_raw and isinstance(items_raw[0], dict):
+            if (items_raw[0].get("body") or {}).get("id"):
+                dump["account_id"] = aid
+                dump["accounts_tried"] = tried
+                return dump
+    return {"item_id": item_id, "found": False, "accounts_tried": tried}
 
 
 @app.get("/api/stock/{account_id:int}/export")
