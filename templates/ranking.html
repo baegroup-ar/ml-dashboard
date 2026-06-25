@@ -99,6 +99,7 @@
     <div class="filter-bar">
       <label>Período:</label>
       <button class="period-btn" onclick="setPeriod('today', this)">Hoy</button>
+      <button class="period-btn" onclick="setPeriod('yesterday', this)">Ayer</button>
       <button class="period-btn" onclick="setPeriod('7d', this)">7 días</button>
       <button class="period-btn active" onclick="setPeriod('30d', this)">30 días</button>
       <button class="period-btn" onclick="setPeriod('90d', this)">90 días</button>
@@ -169,6 +170,7 @@
     const df = document.getElementById('date-from');
     const dt = document.getElementById('date-to');
     if(p==='today'){ df.value=today; dt.value=today; }
+    else if(p==='yesterday'){ const y=addDays(today,-1); df.value=y; dt.value=y; }
     else if(p==='7d'){ df.value=addDays(today,-6); dt.value=today; }
     else if(p==='30d'){ df.value=addDays(today,-29); dt.value=today; }
     else if(p==='90d'){ df.value=addDays(today,-89); dt.value=today; }
