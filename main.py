@@ -2664,6 +2664,14 @@ async def _build_stock_payload(account_id, acc, token, user, target_days,
         sinfo = stock.get(original) or {}
         st_propio = int(sinfo.get("propio", 0))   # SOLO el stock del original
         st_full = int(sinfo.get("full", 0))
+        # Sumar el stock en Full de las publicaciones equivalentes (variantes
+        # qty 1 que mapean a este SKU). Cada publicación en Full tiene su propio
+        # inventory_id, así que el Full se suma sin doble-contar. El depósito NO
+        # se suma: suele ser el mismo stock físico compartido entre las
+        # publicaciones de cuotas del SKU.
+        for (comp, q) in contrib_to.get(original, []):
+            if q == 1:
+                st_full += int((stock.get(comp) or {}).get("full", 0))
         st_camino = int(en_camino_map.get(original, 0))   # en camino a Full (manual)
         st_total = st_propio + st_full + st_camino
         price = prices.get(original)
