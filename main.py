@@ -6755,10 +6755,18 @@ async def api_promociones_apply(
                         offer_id = fresh["raw_id"]
                     fresh_min_dp = fresh.get("min_discounted_price")
                     fresh_max_dp = fresh.get("max_discounted_price")
-            # Precio base para calcular deal_price: preferir precio real del item
-            # (de /items) sobre original_price de la promo (que puede ser el tachado,
-            # más alto que el precio real → genera PRICE_GT_CURRENT).
-            base_price = actual_prices.get(iid) or original_price
+            # Precio base para calcular deal_price.
+            # OJO: para items que YA participan (modify_existing), /items devuelve
+            # el precio CON la promo aplicada (descontado), no el de lista. Usar ese
+            # como base genera un descuento compuesto enorme y el clamp del mínimo
+            # lo termina clavando en el descuento actual → no baja nunca. Por eso,
+            # para los que ya participan usamos el precio de LISTA (original_price
+            # de la oferta). Para candidatos sí usamos el precio real de /items
+            # (evita PRICE_GT_CURRENT cuando original_price es el tachado).
+            if modify_existing:
+                base_price = original_price or actual_prices.get(iid)
+            else:
+                base_price = actual_prices.get(iid) or original_price
             deal_price = None
             if base_price and pct > 0:
                 try:
