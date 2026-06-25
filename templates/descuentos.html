@@ -886,6 +886,7 @@
         const cannotApply = sinDescuento && currentStatus === 'candidate';
         const checked = previewSelected.has(it.item_id) && !cannotApply ? 'checked' : '';
         const disabled = cannotApply ? 'disabled' : '';
+        const chkTitle = debajo ? 'title="Al seleccionar, se aplica el mínimo de ML."' : '';
         const finalShown = applyFinalPrice(it);
 
         // Descuento ML: lo que ML le exige al vendedor (seller_percentage para
