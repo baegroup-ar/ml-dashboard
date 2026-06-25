@@ -2744,6 +2744,70 @@ async def api_stock(request: Request, account_id: int, target_days: int = 15,
                                       refresh=bool(refresh))
 
 
+@app.get("/api/stock/{account_id:int}/debug-item")
+async def api_stock_debug_item(request: Request, account_id: int, item_id: str):
+    """DEBUG TEMPORAL: dump crudo de /items + stock de fulfillment + user-products
+    para un item, para entender coexistencia Full+depósito en variantes."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    token = await refresh_ml_token(account_id)
+    if not token:
+        raise HTTPException(502)
+    headers = {"Authorization": f"Bearer {token}"}
+    out = {"item_id": item_id}
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await client.get(
+            f"{ML_API_URL}/items",
+            headers=headers,
+            params={"ids": item_id,
+                    "attributes": "id,seller_sku,available_quantity,inventory_id,attributes,variations,status,shipping,user_product_id"},
+        )
+        out["items_status"] = r.status_code
+        body = None
+        try:
+            data = r.json()
+            out["items_raw"] = data
+            if isinstance(data, list) and data and isinstance(data[0], dict):
+                body = data[0].get("body")
+        except Exception as e:
+            out["items_parse_error"] = str(e)
+        inv_ids, up_ids = [], []
+        if isinstance(body, dict):
+            if body.get("inventory_id"):
+                inv_ids.append(body["inventory_id"])
+            if body.get("user_product_id"):
+                up_ids.append(body["user_product_id"])
+            for var in (body.get("variations") or []):
+                if isinstance(var, dict):
+                    if var.get("inventory_id"):
+                        inv_ids.append(var["inventory_id"])
+                    if var.get("user_product_id"):
+                        up_ids.append(var["user_product_id"])
+        out["inventory_ids"] = inv_ids
+        out["user_product_ids"] = up_ids
+        ff = {}
+        for inv in set(inv_ids):
+            rr = await client.get(f"{ML_API_URL}/inventories/{inv}/stock/fulfillment", headers=headers)
+            try:
+                ff[inv] = {"status": rr.status_code, "body": rr.json()}
+            except Exception:
+                ff[inv] = {"status": rr.status_code, "body": rr.text}
+        out["fulfillment"] = ff
+        ups = {}
+        for up in set(up_ids):
+            rr = await client.get(f"{ML_API_URL}/user-products/{up}/stock", headers=headers)
+            try:
+                ups[up] = {"status": rr.status_code, "body": rr.json()}
+            except Exception:
+                ups[up] = {"status": rr.status_code, "body": rr.text}
+        out["user_products"] = ups
+    return out
+
+
 @app.get("/api/stock/{account_id:int}/export")
 async def api_stock_export(request: Request, account_id: int, target_days: int = 15,
                            sales_days: int = 7):
