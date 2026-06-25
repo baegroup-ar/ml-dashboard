@@ -1129,6 +1129,8 @@
       return 'El precio Meli+ (loyalty) quedo muy cerca del precio normal.';
     if(txt.includes('must be lower than current'))
       return 'Ya tiene aplicado un descuento IGUAL o MAYOR al que querés poner. ML solo permite mejorar el descuento (no bajarlo) modificando: ya está bien. Si querés bajarlo, quitalo de la promo y volvé a aplicarlo.';
+    if(txt.includes('PRICE_GT_CURRENT'))
+      return 'El precio de lista bajó justo antes de aplicar el descuento, así que el precio oferta quedó mayor al precio actual. Volvé a aplicarlo y debería resolverse solo.';
     // Intento extraer el error_message de ML si vino como JSON
     const m = txt.match(/"error_message":"([^"]+)"/) || txt.match(/"message":"([^"]+)"/);
     if(m) return m[1];
