@@ -697,18 +697,24 @@
     return Math.max(0, Math.round((required - loaded) * 10) / 10);
   }
 
-  // Devuelve ÚNICAMENTE el descuento cargado por el usuario.
-  // Nunca se sustituye por el mínimo de ML ni por ningún otro valor.
-  // Si no hay descuento cargado → null (no se aplica nada).
+  // Descuento a enviar:
+  // - Tu desc > mínimo ML → tu descuento exacto, sin tocar nada
+  // - Tu desc <= mínimo ML (debajo, seleccionado a conciencia) → mínimo ML + 0.1
+  //   (el +0.1 es porque ML exige SUPERAR estrictamente el piso, no igualarlo)
+  // - Sin descuento cargado → null (no se aplica)
   function applySellerPct(it) {
-    return it.loaded_discount_pct ?? null;
+    const loaded = it.loaded_discount_pct;
+    const min = it.min_discount_pct;
+    if(loaded == null) return null;
+    if(min == null || loaded > min) return loaded;
+    return Math.round((min + 0.1) * 10) / 10;
   }
 
   function applyFinalPrice(it) {
-    const pct = it.loaded_discount_pct;
-    if(pct == null || it.original_price == null) return it.final_price;
+    const sellerPct = applySellerPct(it);
+    if(sellerPct == null || it.original_price == null) return it.final_price;
     const aporte = it.ml_contribution_pct || 0;
-    return Math.round(it.original_price * (1 - (pct + aporte) / 100) * 100) / 100;
+    return Math.round(it.original_price * (1 - (sellerPct + aporte) / 100) * 100) / 100;
   }
 
   function getDiffFilter() {
@@ -873,14 +879,14 @@
         if(sinDescuento) {
           estado = '<span class="badge gray">Sin descuento cargado</span>';
         } else if(debajo) {
-          estado = `<span class="badge warn" title="Tu descuento (${it.loaded_discount_pct}%) está por debajo del mínimo que exige ML (${it.min_discount_pct}%). Si intentás aplicarlo, ML lo rechazará.">Debajo del mínimo</span>`;
+          estado = `<span class="badge warn" title="Tu descuento (${it.loaded_discount_pct}%) está por debajo del mínimo de ML (${it.min_discount_pct}%). Si lo seleccionás, se aplica el mínimo de ML.">Aplica desc. ML ${it.min_discount_pct}%</span>`;
         } else {
           estado = '<span class="badge ok">Listo para aplicar</span>';
         }
         const cannotApply = sinDescuento && currentStatus === 'candidate';
         const checked = previewSelected.has(it.item_id) && !cannotApply ? 'checked' : '';
         const disabled = cannotApply ? 'disabled' : '';
-        const finalShown = it.final_price;
+        const finalShown = applyFinalPrice(it);
 
         // Descuento ML: lo que ML le exige al vendedor (seller_percentage para
         // promos co-fondeadas). Si hay aporte ML, lo mostramos como "(+X%)".
@@ -1079,10 +1085,10 @@
       const it = currentItems.find(x => x.item_id === s.item_id);
       return it && it.below_min;
     }).length;
-    let txt = `Vas a aplicar la promoción "${currentPromo.name}" a ${sel.length} items con TU descuento cargado.`;
-    if(debajoMin) {
-      txt += ` Atención: ${debajoMin} tienen tu descuento por debajo del mínimo de ML y probablemente sean rechazados.`;
-    }
+    const normal = sel.length - debajoMin;
+    let txt = `Vas a aplicar la promoción "${currentPromo.name}" a ${sel.length} items.`;
+    if(normal) txt += ` ${normal} con tu descuento.`;
+    if(debajoMin) txt += ` ${debajoMin} con el descuento mínimo de ML (tu desc. está por debajo del mínimo).`;
     document.getElementById('confirm-text').textContent = txt;
     document.getElementById('confirm-modal').classList.add('show');
   }
