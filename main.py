@@ -470,6 +470,22 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
 
+# DEBUG TEMPORAL: traceback de 500 en /api/promociones/.../items. Quitar luego.
+import traceback as _dbg_traceback
+
+
+@app.exception_handler(Exception)
+async def _dbg_unhandled_exc(request: Request, exc: Exception):
+    tb = _dbg_traceback.format_exc()
+    path = str(request.url.path)
+    if "/promociones/" in path and "/items" in path:
+        return JSONResponse(status_code=500, content={
+            "debug_error": f"{type(exc).__name__}: {exc}",
+            "debug_traceback": tb.split("\n")[-18:],
+        })
+    return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
+
+
 def db_fetchone(query, params=None):
     with engine.connect() as conn:
         result = conn.execute(text(query), params or {})
