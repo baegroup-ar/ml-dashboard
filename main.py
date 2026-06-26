@@ -6550,21 +6550,9 @@ async def api_promociones_items(
             _mp = float(merged.get("price"))
         except (TypeError, ValueError):
             _mp = None
-        # El precio de lista para este % DEBE salir de la MISMA oferta que el
-        # price con descuento (merged.original_price), NO de la variable
-        # `original_price`, que tiene fallbacks (info.get("price")) capaces de
-        # traer el precio de OTRA publicación de cuotas del mismo SKU. Ese cruce
-        # daba, p.ej., 1 - 13663.05/20158.60 = 32.2% en vez del 39% real
-        # (1 - 13663.05/22398.44). Si la oferta no trae original_price coherente,
-        # caemos a la variable como último recurso.
-        _op_offer = merged.get("original_price")
-        try:
-            _op = float(_op_offer) if _op_offer else (
-                float(original_price) if original_price else None)
-        except (TypeError, ValueError):
-            _op = None
-        if _mp and _op:
+        if _mp and original_price:
             try:
+                _op = float(original_price)
                 if 0 < _mp < _op:
                     ml_applied_pct = round((1 - _mp / _op) * 100, 1)
                     ml_applied_price = round(_mp, 2)
