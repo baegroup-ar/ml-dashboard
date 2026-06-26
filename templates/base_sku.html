@@ -3,14 +3,15 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Base SKU · Panel ML</title>
+  <title>Base SKU · Panel BAE</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Cantarell:ital,wght@0,400;0,700;1,400&amp;display=swap" rel="stylesheet"><link rel="icon" type="image/png" href="/static/bae-favicon.png">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: 'Inter', sans-serif; background: #f5f5f3; color: #111; }
+    body { font-family: 'Cantarell', 'Inter', system-ui, sans-serif; background: #fff; color: #111; }
     nav { background: #fff; border-bottom: 1px solid #e5e5e3; padding: 0 1.5rem; height: 56px; display: flex; align-items: center; justify-content: space-between; }
     .nav-brand { font-weight: 600; font-size: 15px; display: flex; align-items: center; gap: 8px; }
-    .nav-brand span { background: #FFE600; border-radius: 6px; padding: 2px 8px; font-size: 12px; }
+    .nav-brand span { background: #EAF1FF; color: #005CFF; border-radius: 6px; padding: 2px 8px; font-size: 12px; }
     .nav-right { display: flex; align-items: center; gap: 10px; font-size: 13px; }
     .btn-nav { padding: 6px 14px; border: 1px solid #ddd; border-radius: 8px; background: #fff; font-size: 13px; cursor: pointer; text-decoration: none; color: #111; }
     main { max-width: 1100px; margin: 0 auto; padding: 1.5rem; }
@@ -22,14 +23,14 @@
     .row label { font-size: 13px; color: #666; }
     .row select, .row input { padding: 7px 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 13px; font-family: 'Inter', sans-serif; }
     .row select { min-width: 220px; }
-    button.primary { padding: 8px 16px; border: none; border-radius: 8px; background: #3483FA; color: #fff; font-size: 13px; cursor: pointer; }
+    button.primary { padding: 8px 16px; border: none; border-radius: 8px; background: #005CFF; color: #fff; font-size: 13px; cursor: pointer; }
     button.green { padding: 8px 16px; border: none; border-radius: 8px; background: #1a8a5a; color: #fff; font-size: 13px; cursor: pointer; }
     table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 12px; }
     th { padding: 9px 12px; text-align: left; color: #888; font-weight: 500; border-bottom: 1px solid #eee; font-size: 12px; }
     td { padding: 8px 12px; border-bottom: 1px solid #f0f0ee; color: #333; }
     tbody tr:hover { background: #fafaf8; }
     .empty { padding: 2rem; text-align: center; color: #aaa; font-size: 13px; }
-    .help-box { background: #f5f5f3; border-left: 3px solid #3483FA; padding: 10px 14px; font-size: 12px; color: #666; margin-top: 10px; }
+    .help-box { background: #EAF1FF; border-left: 3px solid #005CFF; padding: 10px 14px; font-size: 12px; color: #666; margin-top: 10px; }
     .help-box code { background: #fff; padding: 1px 6px; border-radius: 4px; border: 1px solid #e5e5e3; font-family: monospace; }
     .btn-delete { color: #c0392b; background: none; border: none; cursor: pointer; font-size: 12px; }
     .no-accounts { text-align: center; padding: 4rem; color: #888; font-size: 14px; }
@@ -38,7 +39,7 @@
 <body>
 <nav>
   <div class="nav-brand">
-    <div style="width:24px;height:24px;background:#FFE600;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;">ML</div>
+    <img src="/static/bae-logo.png" alt="BAE" style="height:26px;width:auto;display:block;" />
     Panel de ventas <span>Beta</span>
   </div>
   <div class="nav-right">
@@ -49,10 +50,10 @@
     {% if 'ranking' in perms %}<a href="/ranking" class="btn-nav">Ranking</a>{% endif %}
     {% if 'etiquetas' in perms %}<a href="/etiquetas" class="btn-nav">Etiquetas</a>{% endif %}
     {% if 'stock' in perms %}<a href="/stock" class="btn-nav">Stock valorizado</a>{% endif %}
-    <span style="color:#3483FA;font-weight:500;">Base SKU</span>
+    <span style="color:#005CFF;font-weight:500;">Base SKU</span>
     {% if 'pvp' in perms %}<a href="/pvp" class="btn-nav">PVP</a>{% endif %}
     <span style="color:#888;">{{ user.name }}</span>
-    {% if user.is_admin %}<a href="/admin" style="font-size:12px;color:#3483FA;text-decoration:none;">Admin</a>{% endif %}
+    {% if user.is_admin %}<a href="/admin" style="font-size:12px;color:#005CFF;text-decoration:none;">Admin</a>{% endif %}
     <a href="/logout" class="btn-nav">Salir</a>
   </div>
 </nav>
@@ -86,7 +87,7 @@
       <input type="file" id="file" accept=".xlsx,.xlsm,.csv" />
       <button class="green" onclick="uploadFile()" id="btn-upload">Subir archivo</button>
       <a href="#" onclick="downloadExport(event)" style="padding:8px 14px;border:1px solid #1a8a5a;border-radius:8px;background:#fff;color:#1a8a5a;font-size:13px;text-decoration:none;">⬇ Descargar cargados</a>
-      <a href="/api/base-sku/template" download="plantilla_base_sku.xlsx" style="padding:8px 14px;border:1px solid #3483FA;border-radius:8px;background:#fff;color:#3483FA;font-size:13px;text-decoration:none;">Descargar plantilla</a>
+      <a href="/api/base-sku/template" download="plantilla_base_sku.xlsx" style="padding:8px 14px;border:1px solid #005CFF;border-radius:8px;background:#fff;color:#005CFF;font-size:13px;text-decoration:none;">Descargar plantilla</a>
     </div>
     <div class="help-box">Columnas: <code>SKU componente</code>, <code>SKU original</code>, <code>Cantidad</code>. Cuando se vende el <b>componente</b>, suma <b>cantidad × unidades</b> al <b>original</b>. Variante → cantidad <b>1</b>. Combo x2/x3 → cantidad <b>N</b>. Combo de varios productos → varias filas con el mismo componente. Subir actualiza/agrega.</div>
     <div class="row" style="margin-top:12px;">

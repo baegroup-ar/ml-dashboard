@@ -3,25 +3,26 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Panel ML</title>
+  <title>Panel BAE</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Cantarell:ital,wght@0,400;0,700;1,400&amp;display=swap" rel="stylesheet"><link rel="icon" type="image/png" href="/static/bae-favicon.png">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: 'Inter', sans-serif; background: #f5f5f3; color: #111; }
+    body { font-family: 'Cantarell', 'Inter', system-ui, sans-serif; background: #fff; color: #111; }
     nav { background: #fff; border-bottom: 1px solid #e5e5e3; padding: 0 1.5rem; height: 56px; display: flex; align-items: center; justify-content: space-between; }
     .nav-brand { font-weight: 600; font-size: 15px; display: flex; align-items: center; gap: 8px; }
-    .nav-brand span { background: #FFE600; border-radius: 6px; padding: 2px 8px; font-size: 12px; }
+    .nav-brand span { background: #EAF1FF; color: #005CFF; border-radius: 6px; padding: 2px 8px; font-size: 12px; }
     .nav-right { display: flex; align-items: center; gap: 10px; font-size: 13px; }
     .btn-nav { padding: 6px 14px; border: 1px solid #ddd; border-radius: 8px; background: #fff; font-size: 13px; cursor: pointer; text-decoration: none; color: #111; }
-    .btn-blue { background: #3483FA; color: #fff !important; border-color: #3483FA; }
+    .btn-blue { background: #005CFF; color: #fff !important; border-color: #005CFF; }
     .btn-blue:hover { background: #2970e0 !important; }
-    .admin-link { font-size: 12px; color: #3483FA; text-decoration: none; }
+    .admin-link { font-size: 12px; color: #005CFF; text-decoration: none; }
     main { max-width: 1150px; margin: 0 auto; padding: 1.5rem; }
 
     .account-bar { background: #fff; border: 1px solid #e5e5e3; border-radius: 12px; padding: 1rem 1.25rem; margin-bottom: 1rem; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
     .account-bar label { font-size: 13px; color: #666; }
     .account-bar select { flex: 1; min-width: 180px; padding: 7px 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 14px; font-family: 'Inter', sans-serif; }
-    .connect-link { display: flex; align-items: center; gap: 6px; padding: 7px 14px; background: #FFE600; border: none; border-radius: 8px; font-size: 13px; font-weight: 500; text-decoration: none; color: #111; cursor: pointer; white-space: nowrap; }
+    .connect-link { display: flex; align-items: center; gap: 6px; padding: 7px 14px; background: #005CFF; border: none; border-radius: 8px; font-size: 13px; font-weight: 500; text-decoration: none; color: #fff; cursor: pointer; white-space: nowrap; }
     .connect-link:hover { background: #f0d800; }
     .disconnect-btn { padding: 7px 12px; border: 1px solid #fcc; border-radius: 8px; background: #fff; color: #c0392b; font-size: 13px; cursor: pointer; }
 
@@ -29,7 +30,7 @@
     .filter-bar label { font-size: 13px; color: #666; }
     .filter-bar input[type=date] { padding: 6px 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 13px; font-family: 'Inter', sans-serif; }
     .period-btn { padding: 6px 12px; border: 1px solid #ddd; border-radius: 8px; background: #fff; font-size: 13px; cursor: pointer; color: #555; }
-    .period-btn.active { background: #3483FA; color: #fff; border-color: #3483FA; }
+    .period-btn.active { background: #005CFF; color: #fff; border-color: #005CFF; }
     .live-badge { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #1a8a5a; margin-left: auto; }
     .live-dot { width: 8px; height: 8px; background: #1a8a5a; border-radius: 50%; animation: pulse 2s infinite; }
     @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
@@ -42,7 +43,7 @@
     .value.red { color: #c0392b; }
     .value.orange { color: #c47a1e; }
     .value.loading { color: #ccc; font-size: 13px; }
-    .loading-bar { position: absolute; bottom: 0; left: 0; right: 0; height: 2px; background: linear-gradient(90deg, #3483FA 0%, #9FE1CB 50%, #3483FA 100%); background-size: 200% 100%; animation: shimmer 1.5s infinite; border-radius: 0 0 12px 12px; }
+    .loading-bar { position: absolute; bottom: 0; left: 0; right: 0; height: 2px; background: linear-gradient(90deg, #005CFF 0%, #A9C7FF 50%, #005CFF 100%); background-size: 200% 100%; animation: shimmer 1.5s infinite; border-radius: 0 0 12px 12px; }
     @keyframes shimmer { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
 
     .charts-row { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; margin-bottom: 1.5rem; }
@@ -67,18 +68,18 @@
 
     .page-loading { text-align: center; padding: 4rem; color: #888; font-size: 14px; }
     .error-box { background: #fce9e9; border: 1px solid #f5c6c6; border-radius: 10px; padding: 1rem 1.25rem; color: #c0392b; font-size: 13px; margin-bottom: 1.5rem; }
-    .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid #ddd; border-top-color: #3483FA; border-radius: 50%; animation: spin 0.7s linear infinite; vertical-align: -2px; margin-right: 6px; }
+    .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid #ddd; border-top-color: #005CFF; border-radius: 50%; animation: spin 0.7s linear infinite; vertical-align: -2px; margin-right: 6px; }
     @keyframes spin { to { transform: rotate(360deg); } }
     .last-update { font-size: 12px; color: #aaa; margin-top: 1rem; text-align: right; }
     .fees-status { font-size: 12px; color: #888; display: flex; align-items: center; gap: 6px; }
     .no-accounts { text-align: center; padding: 4rem; color: #888; font-size: 14px; }
-    .no-accounts a { color: #3483FA; text-decoration: none; font-weight: 500; }
+    .no-accounts a { color: #005CFF; text-decoration: none; font-weight: 500; }
   </style>
 </head>
 <body>
 <nav>
   <div class="nav-brand">
-    <div style="width:24px;height:24px;background:#FFE600;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;">ML</div>
+    <img src="/static/bae-logo.png" alt="BAE" style="height:26px;width:auto;display:block;" />
     Panel de ventas <span>Beta</span>
   </div>
   <div class="nav-right">
@@ -135,7 +136,7 @@
     <h1 style="font-size:20px;font-weight:600;margin-bottom:4px;" id="period-title">Últimos 30 días</h1>
     <p style="font-size:13px;color:#888;margin:0;">
       <span id="last-update">Cargando...</span>
-      <a href="#" id="debug-link" onclick="showDebugJson(event)" style="margin-left:8px;font-size:12px;color:#3483fa;text-decoration:underline;">Ver JSON crudo (debug)</a>
+      <a href="#" id="debug-link" onclick="showDebugJson(event)" style="margin-left:8px;font-size:12px;color:#005CFF;text-decoration:underline;">Ver JSON crudo (debug)</a>
     </p>
   </div>
 
@@ -249,8 +250,8 @@
   };
   const LOGISTIC_COLORS = {
     'home_delivery': '#1a8a5a', 'self_service': '#1a8a5a',  // verde
-    'xd_drop_off': '#3483FA', 'drop_off': '#3483FA',         // azul
-    'cross_docking': '#3483FA',
+    'xd_drop_off': '#005CFF', 'drop_off': '#005CFF',         // azul
+    'cross_docking': '#005CFF',
     'fulfillment': '#7F77DD',                                // violeta
     'pickup': '#c47a1e',                                     // naranja
     'custom': '#888',
@@ -714,7 +715,7 @@
         : '';
       // Etiqueta de cuenta — solo presente en la vista "Todas las cuentas".
       const acctTag = o.cuenta
-        ? `<span style="display:inline-block;font-size:10px;font-weight:600;background:#eef3ff;color:#3483FA;border-radius:5px;padding:1px 6px;margin-right:6px;vertical-align:middle;">${o.cuenta}</span>`
+        ? `<span style="display:inline-block;font-size:10px;font-weight:600;background:#eef3ff;color:#005CFF;border-radius:5px;padding:1px 6px;margin-right:6px;vertical-align:middle;">${o.cuenta}</span>`
         : '';
       const commonCells = `
         <td style="text-align:center;">${units}</td>
@@ -732,7 +733,7 @@
           <td style="color:#888;">${o.hora||'—'}</td>
           <td style="font-size:11px;color:#aaa;white-space:nowrap;">#${o.venta_id||o.id}${cancelPill}</td>
           <td>
-            <button id="btn-pack-${o.id}" onclick="togglePack('${o.id}')" style="background:none;border:none;cursor:pointer;font-size:11px;color:#3483FA;padding:0 4px 0 0;line-height:1;">▶</button>
+            <button id="btn-pack-${o.id}" onclick="togglePack('${o.id}')" style="background:none;border:none;cursor:pointer;font-size:11px;color:#005CFF;padding:0 4px 0 0;line-height:1;">▶</button>
             ${acctTag}<span style="font-weight:500;">Paquete x${units}</span>
           </td>
           ${envioCell}

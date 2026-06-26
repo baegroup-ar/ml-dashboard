@@ -3,13 +3,14 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Panel ML — Iniciar sesión</title>
+  <title>Panel BAE — Iniciar sesión</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Cantarell:ital,wght@0,400;0,700;1,400&amp;display=swap" rel="stylesheet"><link rel="icon" type="image/png" href="/static/bae-favicon.png">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: 'Inter', sans-serif; background: #f5f5f3; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+    body { font-family: 'Cantarell', 'Inter', system-ui, sans-serif; background: #fff; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
     .card { background: #fff; border: 1px solid #e5e5e3; border-radius: 16px; padding: 2.5rem 2rem; width: 100%; max-width: 360px; }
-    .logo { width: 48px; height: 48px; background: #FFE600; border-radius: 12px; display: flex; align-items: center; justify-content: center; margin: 0 auto 1.25rem; font-size: 22px; font-weight: 700; }
+    .logo { height: 42px; width: auto; display: block; margin: 0 auto 1.5rem; }
     h1 { font-size: 20px; font-weight: 600; text-align: center; margin-bottom: 6px; }
     .subtitle { font-size: 14px; color: #888; text-align: center; margin-bottom: 1.75rem; }
     .field { margin-bottom: 14px; }
@@ -18,15 +19,15 @@
       width: 100%; padding: 10px 12px; border: 1px solid #ddd; border-radius: 8px;
       font-size: 14px; font-family: 'Inter', sans-serif; outline: none;
     }
-    input:focus { border-color: #3483FA; }
-    .btn { width: 100%; padding: 11px; background: #3483FA; border: none; border-radius: 8px; color: #fff; font-size: 15px; font-weight: 500; cursor: pointer; margin-top: 4px; }
+    input:focus { border-color: #005CFF; }
+    .btn { width: 100%; padding: 11px; background: #005CFF; border: none; border-radius: 8px; color: #fff; font-size: 15px; font-weight: 500; cursor: pointer; margin-top: 4px; }
     .btn:hover { background: #2970e0; }
     .error { background: #fce9e9; color: #c0392b; border-radius: 8px; padding: 10px 14px; font-size: 13px; margin-bottom: 14px; }
   </style>
 </head>
 <body>
   <div class="card">
-    <div class="logo">ML</div>
+    <img src="/static/bae-logo.png" alt="BAE" class="logo" />
     <h1>Panel de ventas</h1>
     <p class="subtitle">Ingresá con tu cuenta</p>
     {% if error %}
