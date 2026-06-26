@@ -6391,7 +6391,15 @@ async def api_promociones_items(
             for k, v in detail.items():
                 if merged.get(k) in (None, "", 0) and v not in (None, ""):
                     merged[k] = v
-        original_price = (merged.get("original_price")
+        # El original_price del DETALLE per-item (consultado con filtros de la
+        # promo) es el precio real del item. El del LISTADO de la promo puede
+        # venir CRUZADO con otra publicación de cuotas del mismo SKU (ej: 20158.6
+        # en vez de 22398.44), lo que daría un "Particip. ML" y un precio mal
+        # calculados (1 - 13663.05/20158.6 = 32.2% en vez del 39% real). Por eso
+        # el detalle tiene prioridad; el listado queda solo de respaldo.
+        _detail_op = detail.get("original_price") if isinstance(detail, dict) else None
+        original_price = (_detail_op
+                          or merged.get("original_price")
                           or (info.get("price") if info else None)
                           or merged.get("regular_price")
                           or merged.get("price"))
