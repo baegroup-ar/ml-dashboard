@@ -470,22 +470,6 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
 
-# DEBUG TEMPORAL: traceback de 500 en /api/promociones/.../items. Quitar luego.
-import traceback as _dbg_traceback
-
-
-@app.exception_handler(Exception)
-async def _dbg_unhandled_exc(request: Request, exc: Exception):
-    tb = _dbg_traceback.format_exc()
-    path = str(request.url.path)
-    if "/promociones/" in path and "/items" in path:
-        return JSONResponse(status_code=500, content={
-            "debug_error": f"{type(exc).__name__}: {exc}",
-            "debug_traceback": tb.split("\n")[-18:],
-        })
-    return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
-
-
 def db_fetchone(query, params=None):
     with engine.connect() as conn:
         result = conn.execute(text(query), params or {})
@@ -5799,12 +5783,18 @@ async def api_promociones_items(
             # convergencia del descuento real. Early-stop por STABLE_NEEDED hace
             # que las promos que convergen rápido NO esperen el techo completo.
             # El piso además se persiste en DB y se refina entre cargas.
-            MAX_CONVERGE_PASSES = 5     # techo de pasadas (antes 8)
-            CONVERGE_DELAY = 2.0        # s entre pasadas (antes 2.5; sigue > cache ML)
-            STABLE_NEEDED = 2           # 2 pasadas sin cambios = convergió (sin cambio)
+            # Presupuesto reducido para que la 1ra carga sea más rápida. El piso
+            # se persiste en DB y se sigue refinando entre cargas, así que no hace
+            # falta exprimir la convergencia en una sola pasada.
+            MAX_CONVERGE_PASSES = 3     # techo de pasadas (antes 5)
+            CONVERGE_DELAY = 1.3        # s entre pasadas (antes 2.0; sigue > cache ML)
+            STABLE_NEEDED = 2           # 2 pasadas sin cambios = convergió
             stable_passes = 0
             for _pass in range(MAX_CONVERGE_PASSES):
-                await asyncio.sleep(CONVERGE_DELAY)
+                # La 1ra lectura va sin espera (ya tenemos la lista inicial); las
+                # siguientes esperan a que rote el cache de ML.
+                if _pass > 0:
+                    await asyncio.sleep(CONVERGE_DELAY)
                 changed = False
                 # ML IGNORA el offset en este endpoint (devuelve siempre la 1ra
                 # página). Antes el loop re-pedía la misma página varias veces con
