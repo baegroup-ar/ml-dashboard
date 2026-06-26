@@ -470,23 +470,6 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
 
-# DEBUG TEMPORAL: exponer el traceback de errores 500 en /api/promociones/.../items
-# para diagnosticar el "Internal Server Error" del preview. Quitar luego.
-import traceback as _dbg_traceback
-
-
-@app.exception_handler(Exception)
-async def _dbg_unhandled_exc(request: Request, exc: Exception):
-    tb = _dbg_traceback.format_exc()
-    path = str(request.url.path)
-    if "/promociones/" in path and "/items" in path:
-        return JSONResponse(status_code=500, content={
-            "debug_error": f"{type(exc).__name__}: {exc}",
-            "debug_traceback": tb.split("\n")[-18:],
-        })
-    return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
-
-
 def db_fetchone(query, params=None):
     with engine.connect() as conn:
         result = conn.execute(text(query), params or {})
@@ -871,7 +854,7 @@ async def fetch_flex_billing_by_order(client, headers, order_periods: dict) -> d
                 )
                 if r.status_code not in (200, 206):
                     continue
-                for row in r.json().get("results", []):
+                for row in (r.json().get("results") or []):
                     oid = flex_order_id(row)
                     if not oid:
                         continue
@@ -905,7 +888,7 @@ async def fetch_billing_by_order(client, headers, seller_id, order_ids: list) ->
         if r.status_code not in (200, 206):
             continue
         data = r.json()
-        for row in data.get("results", []):
+        for row in (data.get("results") or []):
             for oid in order_ids_from_sales_info(row):
                 parsed.setdefault(oid, {
                     "comision": 0.0, "envio": 0.0, "bonificacion": 0.0, "ingreso_envio": 0.0,
@@ -4041,7 +4024,7 @@ async def _orders_search_all(client, headers, base, max_pages=60):
         if r.status_code != 200:
             break
         data = r.json()
-        res = data.get("results", []) if isinstance(data, dict) else []
+        res = (data.get("results") or []) if isinstance(data, dict) else []
         if not res:
             break
         out.extend(res)
@@ -5830,7 +5813,7 @@ async def api_promociones_items(
                 direct_error = f"ML {r.status_code}: {r.text[:200]}"
                 break
             data = r.json()
-            results = data.get("results", []) if isinstance(data, dict) else []
+            results = (data.get("results") or []) if isinstance(data, dict) else []
             paging = data.get("paging") or {}
             if paging_debug is None:
                 paging_debug = paging
@@ -5933,7 +5916,7 @@ async def api_promociones_items(
                     rp = None
                 if rp is not None and rp.status_code == 200:
                     pdata = rp.json()
-                    presults = pdata.get("results", []) if isinstance(pdata, dict) else []
+                    presults = (pdata.get("results") or []) if isinstance(pdata, dict) else []
                     for it in presults:
                         if not isinstance(it, dict) or not it.get("id"):
                             continue
@@ -7394,7 +7377,7 @@ async def _api_orders_impl(request: Request, account_id: int,
                 fetch_errors.append(f"[{start_d}..{end_d}] {err}")
                 return []
             data = r.json()
-            results = list(data.get("results", []))
+            results = list(data.get("results") or [])
             total = data.get("paging", {}).get("total", 0)
 
             # Si pegamos el tope y todavía hay días para partir, recursamos.
@@ -7428,7 +7411,7 @@ async def _api_orders_impl(request: Request, account_id: int,
                         if rp is None or rp.status_code != 200:
                             fetch_errors.append(f"[{start_d}..{end_d}] offset {off} {perr}")
                             return []
-                        return rp.json().get("results", [])
+                        return rp.json().get("results") or []
                 pages = await asyncio.gather(*[get_page(off) for off in offsets])
                 for page in pages:
                     results.extend(page)
@@ -8433,7 +8416,7 @@ async def debug_item_full(request: Request, account_ref: str):
         )
         if r.status_code != 200:
             return {"step": "items/search", "status": r.status_code, "body": r.text[:500]}
-        results = r.json().get("results", [])
+        results = r.json().get("results") or []
         if not results:
             return {"step": "items/search", "status": 200, "body": "no results"}
         item_id = results[0]
