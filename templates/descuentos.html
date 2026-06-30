@@ -712,6 +712,12 @@
   }
 
   function applyFinalPrice(it) {
+    // SMART (co-fondeada): ML fija el precio objetivo EXACTO. Se usa tal cual
+    // (ml_applied_price) para coincidir al peso con ML, en vez de reconstruirlo
+    // desde los % (que difiere por redondeo).
+    if(it.promotion_type === 'SMART' && it.ml_applied_price != null) {
+      return it.ml_applied_price;
+    }
     const sellerPct = applySellerPct(it);
     if(sellerPct == null || it.original_price == null) return it.final_price;
     const aporte = it.ml_contribution_pct || 0;

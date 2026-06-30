@@ -6583,6 +6583,14 @@ async def api_promociones_items(
                     ml_applied_price = round(_mp, 2)
             except (TypeError, ValueError):
                 pass
+        # SMART (co-fondeada): ML fija el PRECIO objetivo exacto (`price`). El
+        # precio final debe ser ESE, no una reconstrucción desde los % (seller +
+        # aporte), que difiere por redondeo. Así el panel coincide al peso con
+        # ML. El descuento total mostrado se alinea al precio real (ml_applied_pct).
+        if is_smart and ml_applied_price is not None:
+            final_price = ml_applied_price
+            if ml_applied_pct is not None:
+                final_pct = ml_applied_pct
         items_out.append({
             "item_id": item_id,
             "mla": item_id,
