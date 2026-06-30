@@ -105,6 +105,35 @@ def _record_promo_floor(promotion_id, item_id, pct: float) -> bool:
     return True
 
 
+def _set_promo_floor(promotion_id, item_id, pct: float) -> bool:
+    """Fija el piso AUTORITATIVAMENTE (sube o baja). A diferencia de
+    `_record_promo_floor` (que solo baja, para absorber el parpadeo de la API),
+    esto reemplaza el valor guardado por `pct`. Se usa al re-converger por TTL:
+    si ML subió el mínimo (p.ej. tras un cambio de precio/descuento), el piso
+    viejo más bajo quedaría mal — el re-baseline lo corrige. Devuelve True si
+    cambió. Persiste en DB (best-effort)."""
+    if pct is None or pct <= 0:
+        return False
+    # Valores < 5% son ruido de la API; ML no acepta menos en promos reales.
+    if pct < _PROMO_FLOOR_MIN_THRESHOLD:
+        return False
+    key = _promo_floor_key(promotion_id, item_id)
+    prev = PROMO_MIN_PCT_SEEN.get(key)
+    if prev is not None and abs(prev - pct) < 0.01:
+        return False
+    PROMO_MIN_PCT_SEEN[key] = pct
+    try:
+        db_execute(
+            "INSERT INTO promo_min_floor (promotion_id, item_id, min_pct) "
+            "VALUES (:p, :i, :m) ON CONFLICT (promotion_id, item_id) "
+            "DO UPDATE SET min_pct = EXCLUDED.min_pct, updated_at = NOW()",
+            {"p": promotion_id, "i": str(item_id or "").upper(), "m": pct},
+        )
+    except Exception:
+        pass
+    return True
+
+
 def _invalidate_promo_items_cache(account_id: int) -> None:
     prefix = f"{account_id}:"
     for k in [k for k in PROMO_ITEMS_RESULT_CACHE if k.startswith(prefix)]:
@@ -115,10 +144,13 @@ def _invalidate_promo_items_cache(account_id: int) -> None:
 
 
 # Warmers en curso (1 por promo) para no spawnear duplicados.
-# Promos cuyo mínimo por item ya convergió en este proceso. Evita repetir la
-# convergencia sincrónica en cada carga: una vez fijado el piso (y persistido
-# en DB), las cargas siguientes salen instantáneas.
-PROMO_CONVERGED: set = set()
+# Última vez (UTC) que cada promo+status convergió su piso por item. NO es
+# "una vez y listo": se re-converge cada PROMO_CONVERGE_TTL_SECONDS para que el
+# piso refleje el mínimo ACTUAL de ML (si subió tras un cambio de precio/
+# descuento, el re-baseline lo sube; ver _set_promo_floor). Entre convergencias
+# las cargas salen instantáneas usando el piso guardado.
+PROMO_CONVERGED_AT: dict[str, datetime] = {}
+PROMO_CONVERGE_TTL_SECONDS = int(os.environ.get("PROMO_CONVERGE_TTL_SECONDS", "1800"))  # 30 min
 
 serializer = URLSafeTimedSerializer(SECRET_KEY)
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -5822,18 +5854,25 @@ async def api_promociones_items(
         # una. Las cargas siguientes ya tienen el piso (en memoria + DB) y se
         # marcan como convergidas, por lo que salen instantáneas.
         converge_key = f"{account_id}:{promotion_id}:{status}:{promo_type_key}"
-        if converge_key not in PROMO_CONVERGED and status in ("candidate", "started"):
+        _last_conv = PROMO_CONVERGED_AT.get(converge_key)
+        _needs_converge = (
+            _last_conv is None
+            or (datetime.utcnow() - _last_conv).total_seconds() > PROMO_CONVERGE_TTL_SECONDS
+        )
+        if _needs_converge and status in ("candidate", "started"):
             # Presupuesto moderado: más rápido que antes, pero sin sacrificar la
             # convergencia del descuento real. Early-stop por STABLE_NEEDED hace
             # que las promos que convergen rápido NO esperen el techo completo.
             # El piso además se persiste en DB y se refina entre cargas.
-            # Presupuesto reducido para que la 1ra carga sea más rápida. El piso
-            # se persiste en DB y se sigue refinando entre cargas, así que no hace
-            # falta exprimir la convergencia en una sola pasada.
             MAX_CONVERGE_PASSES = 3     # techo de pasadas (antes 5)
             CONVERGE_DELAY = 1.3        # s entre pasadas (antes 2.0; sigue > cache ML)
             STABLE_NEEDED = 2           # 2 pasadas sin cambios = convergió
             stable_passes = 0
+            # Mínimo observado por item en ESTE ciclo de convergencia. Tomar el
+            # mínimo de la ventana reciente absorbe el parpadeo de la API; al
+            # final se fija de forma AUTORITATIVA (sube o baja) con
+            # _set_promo_floor, así un mínimo que ML subió deja de quedar viejo.
+            pass_min: dict = {}
             for _pass in range(MAX_CONVERGE_PASSES):
                 # La 1ra lectura va sin espera (ya tenemos la lista inicial); las
                 # siguientes esperan a que rote el cache de ML.
@@ -5866,12 +5905,24 @@ async def api_promociones_items(
                         if o <= 0 or p <= 0 or p >= o:
                             continue
                         pct = round((1 - p / o) * 100, 2)
-                        if pct > 0 and _record_promo_floor(promotion_id, it.get("id"), pct):
+                        if pct <= 0:
+                            continue
+                        iid = it.get("id")
+                        prevm = pass_min.get(iid)
+                        if prevm is None or pct < prevm:
+                            pass_min[iid] = pct
                             changed = True
                 stable_passes = 0 if changed else stable_passes + 1
                 if stable_passes >= STABLE_NEEDED:
                     break
-            PROMO_CONVERGED.add(converge_key)
+            # RE-BASELINE autoritativo: el mínimo de ESTE ciclo reemplaza al piso
+            # guardado, hacia ARRIBA o hacia ABAJO. Si ML subió el mínimo (cambio
+            # de precio/descuento), el piso lo refleja en vez de quedar clavado en
+            # un valor viejo más bajo. (Las SMART no entran acá: usan el
+            # seller_percentage exacto de ML, sin piso.)
+            for iid, pct in pass_min.items():
+                _set_promo_floor(promotion_id, iid, pct)
+            PROMO_CONVERGED_AT[converge_key] = datetime.utcnow()
 
         # Enriquecer con SKU y nombre desde /items/{id}. Sin filtrar
         # attributes para que vengan también `attributes[]` y `variations[]`,
