@@ -6386,12 +6386,23 @@ async def api_promociones_items(
                 ml_contribution_pct = None
         if ml_contribution_pct is None and default_meli_pct is not None:
             ml_contribution_pct = default_meli_pct
-        # Para promos SMART co-fondeadas (ml_contribution_pct > 0):
+        # ¿Promo SMART (co-fondeada con ML)? En estas ML fija el
+        # `seller_percentage` EXACTO que le exige al vendedor por item: ESE es
+        # el descuento requerido, no un "mínimo" que parpadea. Por eso a las
+        # SMART NO se les aplica el piso histórico (ver más abajo). El piso es
+        # solo para las NO-SMART (DEAL/SELLER_CAMPAIGN), donde el mínimo real es
+        # el más bajo que ML aceptó alguna vez.
+        is_smart = str(
+            merged.get("type") or merged.get("promotion_type")
+            or (promo_global.get("type") if promo_global else None)
+            or promotion_type or ""
+        ).strip().upper() == "SMART"
+        # Para promos SMART co-fondeadas:
         # seller_percentage = lo que ML le exige al VENDEDOR puntualmente.
         # Tiene prioridad sobre min_discount_percentage (nominal de campaña)
         # y sobre la extracción por precio (que no descuenta bien el aporte ML).
         min_discount_pct = None
-        if ml_contribution_pct:
+        if ml_contribution_pct or is_smart:
             _seller_pct_fields = (
                 "seller_percentage", "seller_min_discount_percentage",
                 "min_seller_discount_percentage", "nudge_seller_percentage",
@@ -6411,6 +6422,17 @@ async def api_promociones_items(
                             pass
                 if min_discount_pct is not None:
                     break
+        # SMART sin seller_percentage directo: derivar del precio objetivo de ML
+        # (descuento total = 1 - price/original) menos el aporte de ML.
+        if is_smart and min_discount_pct is None and original_price:
+            try:
+                _op = float(original_price)
+                _tp = float(merged.get("price") or 0)
+                if 0 < _tp < _op:
+                    _total = (1 - _tp / _op) * 100
+                    min_discount_pct = round(max(0.0, _total - (ml_contribution_pct or 0.0)), 2)
+            except (TypeError, ValueError):
+                pass
         # Si no hay seller_percentage (o no es SMART), extracción estándar por precio
         if min_discount_pct is None:
             min_candidates = []
@@ -6434,8 +6456,14 @@ async def api_promociones_items(
         # llamada y 5% en la siguiente). El mínimo REAL para participar es el
         # más bajo que ML aceptó alguna vez. Guardamos ese piso por item y lo
         # usamos siempre, así el valor queda estable y no vuelve a subir.
+        # OJO: SOLO para promos NO-SMART. En SMART el seller_percentage de ML es
+        # el valor exacto requerido — aplicarle el piso lo subestima (ej: ML
+        # exige 32.6% pero el piso viejo guardaba 16.7%). Por eso las SMART
+        # quedan exentas del piso.
         seen_key = _promo_floor_key(promotion_id, item_id)
-        if min_discount_pct is not None:
+        if is_smart:
+            pass  # SMART: usar el seller_percentage exacto, sin piso histórico.
+        elif min_discount_pct is not None:
             _record_promo_floor(promotion_id, item_id, min_discount_pct)
             min_discount_pct = PROMO_MIN_PCT_SEEN.get(seen_key, min_discount_pct)
         elif PROMO_MIN_PCT_SEEN.get(seen_key) is not None:
