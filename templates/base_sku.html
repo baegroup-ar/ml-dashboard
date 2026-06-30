@@ -156,10 +156,11 @@ function renderList() {
   tb.innerHTML = rows.length ? rows.map(r => {
     const k = rowKey(r);
     const qty = (r.qty != null) ? r.qty : 1;
+    const skuStyle = "width:100%;padding:5px 7px;border:1px solid #ddd;border-radius:6px;font-size:13px;text-transform:uppercase;font-family:'Inter',sans-serif;";
     return `<tr>
       <td><input type="checkbox" class="row-check" data-k="${esc(k)}" ${SELECTED.has(k) ? 'checked' : ''} onchange="onRowCheck(this)" /></td>
-      <td>${esc(r.variant)}</td>
-      <td><b>${esc(r.original)}</b></td>
+      <td><input type="text" value="${esc(r.variant)}" data-ov="${esc(r.variant)}" data-oo="${esc(r.original)}" data-f="variant" onchange="saveSku(this)" style="${skuStyle}" /></td>
+      <td><input type="text" value="${esc(r.original)}" data-ov="${esc(r.variant)}" data-oo="${esc(r.original)}" data-f="original" onchange="saveSku(this)" style="${skuStyle}font-weight:600;" /></td>
       <td class="num"><input type="number" min="0.01" step="0.01" value="${Number(qty)}" data-v="${esc(r.variant)}" data-o="${esc(r.original)}" onchange="saveQty(this)" style="width:70px;padding:5px 7px;border:1px solid #ddd;border-radius:6px;font-size:13px;text-align:right;" /></td>
       <td style="text-align:right;"><button class="btn-delete" onclick="delOne('${esc(r.variant)}','${esc(r.original)}')">Eliminar</button></td>
     </tr>`;
@@ -280,6 +281,34 @@ async function saveQty(inp) {
   } catch (e) {
     inp.style.borderColor = '#c0392b';
   } finally { inp.disabled = false; }
+}
+
+async function saveSku(inp) {
+  const oldVariant = inp.getAttribute('data-ov');
+  const oldOriginal = inp.getAttribute('data-oo');
+  const field = inp.getAttribute('data-f');
+  const val = (inp.value || '').trim().toUpperCase();
+  if (!val) { inp.value = field === 'variant' ? oldVariant : oldOriginal; return; }
+  const variant = field === 'variant' ? val : oldVariant;
+  const original = field === 'original' ? val : oldOriginal;
+  if (variant === oldVariant && original === oldOriginal) { inp.value = val; return; }
+  if (variant === original) {
+    alert('El componente no puede ser igual al original.');
+    inp.value = field === 'variant' ? oldVariant : oldOriginal; return;
+  }
+  inp.disabled = true;
+  try {
+    const r = await fetch(`/api/base-sku/${accId()}/edit`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ old_variant: oldVariant, old_original: oldOriginal, variant, original }) });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.detail || 'error');
+    loadList();
+  } catch (e) {
+    alert('Error: ' + e.message);
+    inp.value = field === 'variant' ? oldVariant : oldOriginal;
+    inp.disabled = false;
+  }
 }
 
 async function delOne(variant, original) {

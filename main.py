@@ -2449,6 +2449,50 @@ async def api_base_sku_add(request: Request, account_id: int):
     return {"ok": True}
 
 
+@app.post("/api/base-sku/{account_id:int}/edit")
+async def api_base_sku_edit(request: Request, account_id: int):
+    """Edita el SKU componente/original de una fila existente.
+    Como (variant_sku, original_sku) es PK, renombra = borra fila vieja + inserta nueva."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    if not _account_for_user(account_id, user_id):
+        raise HTTPException(404)
+    body = await request.json()
+    old_variant = str(body.get("old_variant") or "").strip()
+    old_original = str(body.get("old_original") or "").strip()
+    variant = str(body.get("variant") or "").strip()
+    original = str(body.get("original") or "").strip()
+    if not old_variant or not old_original:
+        raise HTTPException(400, "Faltan datos de la fila original.")
+    if not variant or not original:
+        raise HTTPException(400, "SKU componente y SKU original son obligatorios.")
+    if variant == original:
+        raise HTTPException(400, "El componente no puede ser igual al original.")
+    aid = _cost_account_id_for(get_user(user_id), account_id)
+    changed = (variant != old_variant) or (original != old_original)
+    # Si cambia la clave y la nueva ya existe en otra fila, no pisar.
+    if changed:
+        exists = db_fetchall(
+            "SELECT 1 FROM sku_variants WHERE account_id=:a AND variant_sku=:v AND original_sku=:o",
+            {"a": aid, "v": variant, "o": original})
+        if exists:
+            raise HTTPException(409, f"Ya existe un mapeo {variant} → {original}.")
+    # Conserva la cantidad si no se envía una nueva.
+    if "qty" in body:
+        qty = _coerce_qty(body.get("qty"))
+    else:
+        cur = db_fetchall(
+            "SELECT qty FROM sku_variants WHERE account_id=:a AND variant_sku=:v AND original_sku=:o",
+            {"a": aid, "v": old_variant, "o": old_original})
+        qty = _coerce_qty(cur[0].get("qty")) if cur else 1
+    if changed:
+        db_execute("DELETE FROM sku_variants WHERE account_id=:a AND variant_sku=:v AND original_sku=:o",
+                   {"a": aid, "v": old_variant, "o": old_original})
+    db_save_variants(aid, [{"variant": variant, "original": original, "qty": qty}])
+    return {"ok": True}
+
+
 @app.delete("/api/base-sku/{account_id:int}/{variant}")
 async def api_base_sku_delete(request: Request, account_id: int, variant: str, original: str = ""):
     user_id = get_session_user_id(request)
