@@ -5,3 +5,10 @@ __pycache__/
 .venv/
 venv/
 .DS_Store
+
+# Certificados y claves ARCA/AFIP — NUNCA subir al repo
+secrets/
+*.key
+*.csr
+*.crt
+*.pem

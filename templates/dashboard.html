@@ -91,6 +91,7 @@
     {% if 'stock' in perms %}<a href="/stock" class="btn-nav">Stock valorizado</a>{% endif %}
     {% if 'base_sku' in perms %}<a href="/base-sku" class="btn-nav">Base SKU</a>{% endif %}
     {% if 'pvp' in perms %}<a href="/pvp" class="btn-nav">PVP</a>{% endif %}
+    {% if 'clientes' in perms %}<a href="/clientes" class="btn-nav">Clientes</a>{% endif %}
     <span style="color:#888;">{{ user.name }}</span>
     {% if user.is_admin %}<a href="/admin" class="admin-link">Admin</a>{% endif %}
     <button class="btn-nav btn-blue" onclick="refreshNow()">

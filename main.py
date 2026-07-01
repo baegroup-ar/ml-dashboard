@@ -400,6 +400,34 @@ def init_db():
             conn.execute(text(
                 "INSERT INTO app_meta (key, value) VALUES ('sku_variants_combo_pk','1')"
                 " ON CONFLICT (key) DO NOTHING"))
+        # Base de clientes (módulo facturación/ERP). Compartida por DUEÑO
+        # (owner_user_id): un cliente es el mismo para todas las cuentas ML del
+        # dueño. Único por CUIT dentro del dueño. condicion_iva_id = código ARCA
+        # (1 RI, 4 Exento, 5 Consumidor Final, 6 Monotributo).
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS clientes (
+                id SERIAL PRIMARY KEY,
+                owner_user_id INTEGER NOT NULL,
+                dux_id TEXT,
+                razon_social TEXT NOT NULL,
+                condicion_iva_id INTEGER,
+                categoria_fiscal TEXT,
+                cuit TEXT,
+                tipo_doc TEXT,
+                nro_doc TEXT,
+                email TEXT,
+                provincia TEXT,
+                localidad TEXT,
+                domicilio TEXT,
+                telefono TEXT,
+                nombre_fantasia TEXT,
+                codigo TEXT,
+                updated_at TIMESTAMP DEFAULT NOW(),
+                UNIQUE (owner_user_id, cuit)
+            )
+        """))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_clientes_owner ON clientes(owner_user_id)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_clientes_razon ON clientes(owner_user_id, razon_social)"))
         # Migrar iva_included → iva_rate UNA VEZ (controlado por app_meta).
         iva_migrated = conn.execute(text(
             "SELECT 1 FROM app_meta WHERE key='iva_rate_migrated'"
@@ -519,6 +547,17 @@ def db_execute(query, params=None):
     with engine.connect() as conn:
         conn.execute(text(query), params or {})
         conn.commit()
+
+
+def db_executemany(query, params_list):
+    """Ejecuta el mismo statement para cada dict de params en UNA transacción
+    (executemany). Para cargas masivas (ej. importar clientes) — mucho más
+    rápido que llamar db_execute por fila."""
+    if not params_list:
+        return 0
+    with engine.begin() as conn:
+        conn.execute(text(query), params_list)
+    return len(params_list)
 
 
 def db_fetch_order_snapshots(account_id: int, date_from: str, date_to: str) -> list:
@@ -2639,6 +2678,157 @@ async def api_base_sku_export(request: Request, account_id: int):
     return StreamingResponse(
         buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="base_sku_{nick}.xlsx"'})
+
+
+# ─────────────────────────── Clientes (facturación) ───────────────────────────
+# Categoría fiscal (texto Dux) → código de Condición IVA de ARCA.
+_CONDICION_IVA_MAP = {
+    "RESPONSABLE INSCRIPTO": 1, "IVA RESPONSABLE INSCRIPTO": 1,
+    "EXENTO": 4, "IVA SUJETO EXENTO": 4, "SUJETO EXENTO": 4,
+    "CONSUMIDOR FINAL": 5,
+    "MONOTRIBUTISTA": 6, "MONOTRIBUTO": 6, "RESPONSABLE MONOTRIBUTO": 6,
+}
+
+
+def _clientes_owner_id(user: dict) -> int:
+    """Los clientes son compartidos por DUEÑO (todas sus cuentas ML)."""
+    return _accounts_owner_id(user, user["id"])
+
+
+def _cli_clean(v) -> str:
+    if v is None:
+        return ""
+    s = str(v).strip()
+    if s.endswith(".0") and s[:-2].isdigit():
+        s = s[:-2]
+    return s
+
+
+@app.get("/clientes", response_class=HTMLResponse)
+async def clientes_page(request: Request):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse("/")
+    user = get_user(user_id)
+    _r = _page_redirect(user, "clientes")
+    if _r:
+        return _r
+    return templates.TemplateResponse("clientes.html", {
+        "request": request, "user": user, "perms": user_permissions(user),
+    })
+
+
+@app.get("/api/clientes")
+async def api_clientes_list(request: Request, q: str = "", page: int = 1, page_size: int = 50):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    owner = _clientes_owner_id(get_user(user_id))
+    page = max(1, int(page)); page_size = min(200, max(1, int(page_size)))
+    where, params = "owner_user_id=:o", {"o": owner}
+    q = (q or "").strip()
+    if q:
+        where += " AND (razon_social ILIKE :q OR cuit ILIKE :q OR COALESCE(nombre_fantasia,'') ILIKE :q)"
+        params["q"] = f"%{q}%"
+    total = db_fetchone(f"SELECT COUNT(*) AS n FROM clientes WHERE {where}", params)["n"]
+    params["lim"], params["off"] = page_size, (page - 1) * page_size
+    rows = db_fetchall(
+        "SELECT id, razon_social, cuit, condicion_iva_id, categoria_fiscal, tipo_doc, nro_doc,"
+        " email, provincia, localidad, domicilio, telefono, nombre_fantasia"
+        f" FROM clientes WHERE {where} ORDER BY razon_social LIMIT :lim OFFSET :off", params)
+    return {"items": rows, "total": total, "page": page, "page_size": page_size}
+
+
+@app.post("/api/clientes/import")
+async def api_clientes_import(request: Request):
+    """Importa clientes desde un Excel de Dux. Solo RI/Monotributo/Exento con
+    CUIT válido (los Consumidor Final se descartan: se toman de cada venta)."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    user = get_user(user_id)
+    if not is_admin_user(user):
+        raise HTTPException(403, "Solo un administrador puede importar clientes.")
+    owner = _clientes_owner_id(user)
+    form = await request.form()
+    upload = form.get("file")
+    if upload is None or not hasattr(upload, "read"):
+        raise HTTPException(400, "Falta el archivo")
+    content = await upload.read()
+    import io
+    from openpyxl import load_workbook
+    try:
+        wb = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+    except Exception as e:
+        raise HTTPException(400, f"No pude leer el archivo: {e}")
+    ws = wb.active
+    ws.reset_dimensions = True  # el export de Dux declara mal el rango de celdas
+
+    def _norm(s):
+        s = str(s or "").strip().lower()
+        for a, b in (("á", "a"), ("é", "e"), ("í", "i"), ("ó", "o"), ("ú", "u"), ("ñ", "n")):
+            s = s.replace(a, b)
+        return s
+    WANT = {
+        "id": "dux_id", "cliente": "razon_social", "categoria fiscal": "categoria_fiscal",
+        "tipo documento": "tipo_doc", "numero documento": "nro_doc", "cuit/cuil": "cuit",
+        "correo electronico": "email", "provincia": "provincia", "localidad": "localidad",
+        "domicilio": "domicilio", "telefono": "telefono", "celular": "celular",
+        "nombre de fantasia": "nombre_fantasia", "codigo": "codigo",
+    }
+    colmap, seen, params, skipped = {}, set(), [], 0
+    for row in ws.iter_rows(values_only=True):
+        if not colmap:
+            nrow = [_norm(c) for c in row]
+            if "cliente" in nrow and "categoria fiscal" in nrow:
+                for i, name in enumerate(nrow):
+                    if name in WANT:
+                        colmap[WANT[name]] = i
+            continue
+
+        def g(f):
+            i = colmap.get(f)
+            return _cli_clean(row[i]) if (i is not None and i < len(row)) else ""
+        razon = g("razon_social")
+        if not razon:
+            continue
+        cond = _CONDICION_IVA_MAP.get(g("categoria_fiscal").upper())
+        if cond is None or cond == 5:  # Consumidor Final u otro → no se importa
+            continue
+        cuit = re.sub(r"\D", "", g("cuit"))
+        if len(cuit) != 11 and "CUIT" in g("tipo_doc").upper():
+            cuit = re.sub(r"\D", "", g("nro_doc"))
+        if len(cuit) != 11 or cuit in seen:
+            if len(cuit) != 11:
+                skipped += 1
+            continue
+        seen.add(cuit)
+        params.append({
+            "o": owner, "dux": g("dux_id"), "rz": razon, "cond": cond,
+            "cat": g("categoria_fiscal").upper(), "cuit": cuit, "td": g("tipo_doc"),
+            "nd": re.sub(r"\D", "", g("nro_doc")), "em": g("email"), "pv": g("provincia"),
+            "loc": g("localidad"), "dom": g("domicilio"), "tel": g("telefono") or g("celular"),
+            "nf": g("nombre_fantasia"), "cod": g("codigo"),
+        })
+    wb.close()
+    if not colmap:
+        raise HTTPException(400, "No encontré los encabezados esperados (Cliente, Categoría Fiscal, CUIT/CUIL...). ¿Es el export de clientes de Dux?")
+    sql = (
+        "INSERT INTO clientes (owner_user_id, dux_id, razon_social, condicion_iva_id,"
+        " categoria_fiscal, cuit, tipo_doc, nro_doc, email, provincia, localidad,"
+        " domicilio, telefono, nombre_fantasia, codigo, updated_at)"
+        " VALUES (:o,:dux,:rz,:cond,:cat,:cuit,:td,:nd,:em,:pv,:loc,:dom,:tel,:nf,:cod,NOW())"
+        " ON CONFLICT (owner_user_id, cuit) DO UPDATE SET"
+        " razon_social=EXCLUDED.razon_social, condicion_iva_id=EXCLUDED.condicion_iva_id,"
+        " categoria_fiscal=EXCLUDED.categoria_fiscal, tipo_doc=EXCLUDED.tipo_doc,"
+        " nro_doc=EXCLUDED.nro_doc, email=EXCLUDED.email, provincia=EXCLUDED.provincia,"
+        " localidad=EXCLUDED.localidad, domicilio=EXCLUDED.domicilio, telefono=EXCLUDED.telefono,"
+        " nombre_fantasia=EXCLUDED.nombre_fantasia, codigo=EXCLUDED.codigo, updated_at=NOW()"
+    )
+    saved = 0
+    for i in range(0, len(params), 2000):
+        saved += db_executemany(sql, params[i:i + 2000])
+    return {"ok": True, "saved": saved, "descartados_sin_cuit": skipped}
 
 
 @app.get("/pvp", response_class=HTMLResponse)
@@ -8064,6 +8254,7 @@ PAGES = [
     ("stock",       "Stock valorizado"),
     ("base_sku",    "Base SKU"),
     ("pvp",         "PVP"),
+    ("clientes",    "Clientes"),
 ]
 PAGE_KEYS = {k for k, _ in PAGES}
 

@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Clientes · Panel BAE</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Cantarell:ital,wght@0,400;0,700;1,400&amp;display=swap" rel="stylesheet"><link rel="icon" type="image/png" href="/static/bae-favicon.png">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Cantarell', 'Inter', system-ui, sans-serif; background: #fff; color: #111; }
+    nav { background: #fff; border-bottom: 1px solid #e5e5e3; padding: 0 1.5rem; height: 56px; display: flex; align-items: center; justify-content: space-between; }
+    .nav-brand { font-weight: 600; font-size: 15px; display: flex; align-items: center; gap: 8px; }
+    .nav-right { display: flex; align-items: center; gap: 10px; font-size: 13px; flex-wrap: wrap; }
+    .btn-nav { padding: 6px 14px; border: 1px solid #ddd; border-radius: 8px; background: #fff; font-size: 13px; cursor: pointer; text-decoration: none; color: #111; }
+    main { max-width: 1200px; margin: 0 auto; padding: 1.5rem; }
+    h1 { font-size: 20px; font-weight: 600; margin-bottom: 6px; }
+    p.lead { font-size: 13px; color: #888; margin-bottom: 1.25rem; }
+    .card { background: #fff; border: 1px solid #e5e5e3; border-radius: 12px; padding: 1.25rem; margin-bottom: 1.25rem; }
+    .card h3 { font-size: 14px; font-weight: 600; color: #444; margin-bottom: 12px; }
+    .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .row input[type=text], .row input[type=file] { padding: 7px 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 13px; }
+    button.primary { padding: 8px 16px; border: none; border-radius: 8px; background: #005CFF; color: #fff; font-size: 13px; cursor: pointer; }
+    button.primary:disabled { opacity: .5; cursor: default; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 12px; }
+    th { padding: 9px 12px; text-align: left; color: #888; font-weight: 500; border-bottom: 1px solid #eee; font-size: 12px; white-space: nowrap; }
+    td { padding: 8px 12px; border-bottom: 1px solid #f0f0ee; color: #333; }
+    tbody tr:hover { background: #fafaf8; }
+    .empty { padding: 2rem; text-align: center; color: #aaa; font-size: 13px; }
+    .help-box { background: #EAF1FF; border-left: 3px solid #005CFF; padding: 10px 14px; font-size: 12px; color: #666; margin-top: 10px; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: 500; }
+    .b1 { background: #E8F0FE; color: #1a56db; } /* RI */
+    .b6 { background: #E6F4EA; color: #1a8a5a; } /* Mono */
+    .b4 { background: #FEF3E2; color: #b45309; } /* Exento */
+    .b5 { background: #F1F1EF; color: #666; }    /* CF */
+    .pager { display: flex; align-items: center; gap: 10px; justify-content: flex-end; margin-top: 12px; font-size: 13px; }
+    .pager button { padding: 5px 12px; border: 1px solid #ddd; border-radius: 8px; background: #fff; cursor: pointer; font-size: 13px; }
+    .pager button:disabled { opacity: .4; cursor: default; }
+    .no-perms { text-align: center; padding: 4rem; color: #888; font-size: 14px; }
+  </style>
+</head>
+<body>
+<nav>
+  <div class="nav-brand">
+    <img src="/static/bae-icon.png" alt="Tienda Bae" style="height:32px;width:auto;display:block;" />
+    Tienda Bae App
+  </div>
+  <div class="nav-right">
+    {% if 'dashboard' in perms %}<a href="/dashboard" class="btn-nav">Dashboard</a>{% endif %}
+    {% if 'costos' in perms %}<a href="/costos" class="btn-nav">Costos</a>{% endif %}
+    {% if 'descuentos' in perms %}<a href="/descuentos" class="btn-nav">Descuentos</a>{% endif %}
+    {% if 'ranking' in perms %}<a href="/ranking" class="btn-nav">Ranking</a>{% endif %}
+    {% if 'etiquetas' in perms %}<a href="/etiquetas" class="btn-nav">Etiquetas</a>{% endif %}
+    {% if 'stock' in perms %}<a href="/stock" class="btn-nav">Stock valorizado</a>{% endif %}
+    {% if 'base_sku' in perms %}<a href="/base-sku" class="btn-nav">Base SKU</a>{% endif %}
+    {% if 'pvp' in perms %}<a href="/pvp" class="btn-nav">PVP</a>{% endif %}
+    <span style="color:#005CFF;font-weight:500;">Clientes</span>
+    <span style="color:#888;">{{ user.name }}</span>
+    {% if user.is_admin %}<a href="/admin" style="font-size:12px;color:#005CFF;text-decoration:none;">Admin</a>{% endif %}
+    <a href="/logout" class="btn-nav">Salir</a>
+  </div>
+</nav>
+
+<main>
+  <h1>Clientes</h1>
+  <p class="lead">Base de clientes para facturación, compartida entre todas tus cuentas. Los Consumidor Final no se cargan acá: se toman automáticamente de cada venta.</p>
+
+  <div class="card">
+    <h3>Importar de Dux</h3>
+    <div class="row">
+      <input type="file" id="file" accept=".xlsx,.xlsm" />
+      <button class="primary" id="btn-import" onclick="doImport()">Importar clientes</button>
+      <span id="imp-msg" style="font-size:12px;color:#888;"></span>
+    </div>
+    <div class="help-box">Subí el Excel de <b>Listado de Clientes</b> exportado desde Dux. Se importan solo los que tienen <b>CUIT</b> (Responsable Inscripto, Monotributo y Exento). Volver a importar <b>actualiza</b> los existentes (por CUIT).</div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content:space-between;">
+      <input type="text" id="search" placeholder="Buscar por nombre, CUIT o fantasía..." style="width:340px;" oninput="onSearch()" />
+      <span id="count" style="font-size:12px;color:#888;"></span>
+    </div>
+    <div style="overflow-x:auto;">
+      <table>
+        <thead><tr>
+          <th>Razón social</th><th>CUIT</th><th>Cond. IVA</th><th>Provincia</th>
+          <th>Localidad</th><th>Domicilio</th><th>Email</th><th>Teléfono</th>
+        </tr></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+    <div class="pager">
+      <button id="prev" onclick="goPage(-1)">‹ Anterior</button>
+      <span id="pageinfo">–</span>
+      <button id="next" onclick="goPage(1)">Siguiente ›</button>
+    </div>
+  </div>
+</main>
+
+<script>
+let PAGE = 1, PAGE_SIZE = 50, TOTAL = 0, Q = '', searchTimer = null;
+const IVA = {1:['Resp. Inscripto','b1'], 4:['Exento','b4'], 5:['Consumidor Final','b5'], 6:['Monotributo','b6']};
+function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+async function load(){
+  const url = `/api/clientes?q=${encodeURIComponent(Q)}&page=${PAGE}&page_size=${PAGE_SIZE}`;
+  let j;
+  try { j = await (await fetch(url)).json(); } catch(e){ j = {items:[],total:0}; }
+  TOTAL = j.total || 0;
+  const items = j.items || [];
+  document.getElementById('count').textContent = `${TOTAL.toLocaleString('es-AR')} clientes`;
+  const tb = document.getElementById('tbody');
+  tb.innerHTML = items.length ? items.map(c => {
+    const iva = IVA[c.condicion_iva_id] || [c.categoria_fiscal||'', 'b5'];
+    return `<tr>
+      <td><b>${esc(c.razon_social)}</b>${c.nombre_fantasia ? ' <span style="color:#aaa;">('+esc(c.nombre_fantasia)+')</span>' : ''}</td>
+      <td>${esc(c.cuit)}</td>
+      <td><span class="badge ${iva[1]}">${esc(iva[0])}</span></td>
+      <td>${esc(c.provincia)}</td>
+      <td>${esc(c.localidad)}</td>
+      <td>${esc(c.domicilio)}</td>
+      <td>${esc(c.email)}</td>
+      <td>${esc(c.telefono)}</td>
+    </tr>`;
+  }).join('') : '<tr><td colspan="8" class="empty">Sin clientes. Importá el Excel de Dux para empezar.</td></tr>';
+  const pages = Math.max(1, Math.ceil(TOTAL / PAGE_SIZE));
+  document.getElementById('pageinfo').textContent = `Página ${PAGE} de ${pages}`;
+  document.getElementById('prev').disabled = PAGE <= 1;
+  document.getElementById('next').disabled = PAGE >= pages;
+}
+
+function onSearch(){
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => { Q = document.getElementById('search').value.trim(); PAGE = 1; load(); }, 300);
+}
+function goPage(d){ PAGE = Math.max(1, PAGE + d); load(); }
+
+async function doImport(){
+  const f = document.getElementById('file').files[0];
+  const msg = document.getElementById('imp-msg');
+  if(!f){ msg.textContent = 'Elegí el archivo de Dux.'; return; }
+  const btn = document.getElementById('btn-import'); btn.disabled = true;
+  msg.textContent = 'Importando... (puede tardar unos segundos)';
+  const fd = new FormData(); fd.append('file', f);
+  try {
+    const r = await fetch('/api/clientes/import', { method:'POST', body: fd });
+    const j = await r.json();
+    if(!r.ok) throw new Error(j.detail || 'error');
+    msg.textContent = `Listo: ${j.saved} clientes cargados/actualizados${j.descartados_sin_cuit ? ' ('+j.descartados_sin_cuit+' sin CUIT descartados)' : ''}.`;
+    PAGE = 1; load();
+  } catch(e){ msg.textContent = 'Error: ' + e.message; }
+  finally { btn.disabled = false; }
+}
+
+load();
+</script>
+</body>
+</html>
