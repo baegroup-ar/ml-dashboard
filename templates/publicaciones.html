@@ -97,13 +97,14 @@
   <div class="card">
     <h3>Edición masiva</h3>
     <div class="row">
-      <select id="bulk-field">
+      <select id="bulk-field" onchange="onBulkFieldChange()">
         <option value="brand">Marca</option>
         <option value="model">Modelo</option>
         <option value="sku">SKU</option>
         <option value="description">Descripción</option>
       </select>
       <input type="text" id="bulk-value" placeholder="Nuevo valor" style="width:280px;" />
+      <textarea id="bulk-value-textarea" placeholder="Nuevo valor" rows="4" style="display:none;width:420px;min-height:90px;resize:both;padding:7px 10px;border:1px solid #ddd;border-radius:8px;font-size:13px;font-family:'Inter',sans-serif;"></textarea>
       <button class="primary" onclick="applyBulk()" id="btn-bulk" disabled>Aplicar a seleccionados (0)</button>
       <span id="bulk-msg" style="font-size:12px;color:#888;"></span>
     </div>
@@ -259,9 +260,20 @@
     }
   }
 
+  function onBulkFieldChange() {
+    const isDesc = document.getElementById('bulk-field').value === 'description';
+    document.getElementById('bulk-value').style.display = isDesc ? 'none' : '';
+    document.getElementById('bulk-value-textarea').style.display = isDesc ? '' : 'none';
+  }
+
+  function bulkValue() {
+    const isDesc = document.getElementById('bulk-field').value === 'description';
+    return isDesc ? document.getElementById('bulk-value-textarea').value : document.getElementById('bulk-value').value;
+  }
+
   async function applyBulk() {
     const field = document.getElementById('bulk-field').value;
-    const value = document.getElementById('bulk-value').value;
+    const value = bulkValue();
     const selectedItems = pubItems.filter(it => pubSelected.has(it.item_id));
     if(!selectedItems.length) return;
     const isLocked = it => field === 'sku' ? it.locked_sku : it.locked_attrs;
@@ -272,7 +284,8 @@
       document.getElementById('bulk-msg').textContent = `Las ${selectedItems.length} seleccionadas están bloqueadas para ese campo.`;
       return;
     }
-    if(!confirm(`¿Aplicar "${value}" a ${ids.length} publicación(es)?${skipped ? ` (${skipped} bloqueada(s) se van a omitir)` : ''}`)) return;
+    const preview = value.length > 80 ? value.slice(0, 80) + '…' : value;
+    if(!confirm(`¿Aplicar "${preview}" a ${ids.length} publicación(es)?${skipped ? ` (${skipped} bloqueada(s) se van a omitir)` : ''}`)) return;
     const msg = document.getElementById('bulk-msg');
     msg.textContent = 'Aplicando...';
     document.getElementById('btn-bulk').disabled = true;
