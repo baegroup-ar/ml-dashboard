@@ -1204,6 +1204,7 @@ PAGE_ROUTES = {
     "pvp": "/pvp",
     "clientes": "/clientes",
     "publicaciones": "/publicaciones",
+    "fotos_videos": "/fotos-videos",
 }
 
 
@@ -6519,6 +6520,206 @@ async def api_publicaciones_bulk_edit(request: Request, account_id: int):
     return {"results": results, "ok": True}
 
 
+# ─────────────────────────── Fotos y Videos ───────────────────────────
+# Fotos: bien soportado por la API estándar de ML (pictures[].source acepta URL,
+# igual que hacen otras integraciones). Clips: EXPERIMENTAL — ML solo documenta
+# públicamente esto para items CBT/Global Selling (cbt_item_id), no para
+# cuentas locales como esta. Lo intentamos igual y mostramos el error real de
+# ML si el endpoint no aplica, en vez de prometer algo no confirmado.
+FOTOS_ATTRS = "id,title,seller_sku,attributes,variations,catalog_listing,catalog_product_id,pictures,status"
+FOTOS_CACHE_TTL_SECONDS = 600
+FOTOS_CACHE: dict[int, dict] = {}
+
+
+async def _fetch_fotos_items(client, headers, item_ids: list) -> list:
+    if not item_ids:
+        return []
+    info_map: dict = {}
+    mget_sem = asyncio.Semaphore(20)
+
+    async def fetch_batch(chunk):
+        async with mget_sem:
+            try:
+                rb = await client.get(
+                    f"{ML_API_URL}/items", headers=headers,
+                    params={"ids": ",".join(chunk), "attributes": FOTOS_ATTRS})
+                if rb.status_code != 200:
+                    return
+                for entry in rb.json():
+                    if not isinstance(entry, dict):
+                        continue
+                    body = entry.get("body") if entry.get("code") == 200 else None
+                    if isinstance(body, dict) and body.get("id"):
+                        info_map[body["id"]] = body
+            except Exception:
+                pass
+
+    chunks = [item_ids[i:i + 20] for i in range(0, len(item_ids), 20)]
+    await asyncio.gather(*[fetch_batch(c) for c in chunks])
+
+    items = []
+    for item_id in item_ids:
+        info = info_map.get(item_id) or {}
+        is_catalog = bool(info.get("catalog_listing") or info.get("catalog_product_id"))
+        pics = []
+        for p in (info.get("pictures") or []):
+            if isinstance(p, dict):
+                url = p.get("secure_url") or p.get("url")
+                if url:
+                    pics.append(url)
+        items.append({
+            "item_id": item_id,
+            "sku": _extract_item_sku(info),
+            "title": info.get("title") or "",
+            "pictures": pics,
+            "is_catalog": is_catalog,
+        })
+    items.sort(key=lambda x: x["item_id"])
+    return items
+
+
+async def _get_all_fotos(account_id: int, acc: dict, force_refresh: bool = False) -> list:
+    cached = FOTOS_CACHE.get(account_id) if not force_refresh else None
+    if cached and (datetime.utcnow() - cached["at"]).total_seconds() < FOTOS_CACHE_TTL_SECONDS:
+        return cached["items"]
+    token = await refresh_ml_token(account_id)
+    if not token:
+        raise HTTPException(502)
+    headers = {"Authorization": f"Bearer {token}"}
+    debug = []
+    async with httpx.AsyncClient(timeout=180) as client:
+        all_item_ids = await fetch_all_seller_item_ids(client, headers, acc["ml_user_id"], debug)
+        items = await _fetch_fotos_items(client, headers, all_item_ids)
+    FOTOS_CACHE[account_id] = {"at": datetime.utcnow(), "items": items}
+    return items
+
+
+@app.get("/fotos-videos", response_class=HTMLResponse)
+async def fotos_videos_page(request: Request):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse("/")
+    user = get_user(user_id)
+    _r = _page_redirect(user, "fotos_videos")
+    if _r:
+        return _r
+    accounts = get_visible_accounts(user_id, user)
+    accounts = await refresh_visible_account_nicknames(accounts)
+    return templates.TemplateResponse("fotos_videos.html", {
+        "request": request, "user": user, "accounts": accounts,
+        "perms": user_permissions(user),
+    })
+
+
+@app.get("/api/fotos/{account_id}/all")
+async def api_fotos_all(request: Request, account_id: int):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    refresh = (request.query_params.get("refresh") in ("1", "true", "yes"))
+    items = await _get_all_fotos(account_id, acc, force_refresh=refresh)
+    return {"items": items}
+
+
+@app.post("/api/fotos/{account_id}/bulk-apply")
+async def api_fotos_bulk_apply(request: Request, account_id: int):
+    """Reemplaza el set de fotos de las publicaciones seleccionadas por las
+    URLs indicadas (mismas para todas). Body: { source_urls: [...], item_ids: [...] }
+    OJO: reemplaza TODO el set de fotos de cada publicación destino, no agrega."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    if not _account_for_user(account_id, user_id):
+        raise HTTPException(404)
+    body = await request.json()
+    source_urls = [str(u).strip() for u in (body.get("source_urls") or []) if str(u).strip()]
+    item_ids = [str(i).strip() for i in (body.get("item_ids") or []) if str(i).strip()]
+    if not source_urls:
+        raise HTTPException(400, "Faltan las URLs de fotos de origen.")
+    if not item_ids:
+        raise HTTPException(400, "No se indicaron publicaciones destino.")
+    token = await refresh_ml_token(account_id)
+    if not token:
+        raise HTTPException(502)
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    pictures_payload = [{"source": u} for u in source_urls]
+    results = []
+    async with httpx.AsyncClient(timeout=60) as client:
+        sem = asyncio.Semaphore(6)
+
+        async def one(iid):
+            async with sem:
+                try:
+                    r = await client.put(
+                        f"{ML_API_URL}/items/{iid}",
+                        headers=headers, json={"pictures": pictures_payload})
+                except Exception as e:
+                    return {"item_id": iid, "ok": False, "error": str(e)[:300]}
+                if r.status_code in (200, 201):
+                    return {"item_id": iid, "ok": True, "error": None}
+                return {"item_id": iid, "ok": False, "error": f"HTTP {r.status_code}: {r.text[:300]}"}
+
+        results = await asyncio.gather(*[one(iid) for iid in item_ids])
+    cached = FOTOS_CACHE.get(account_id)
+    if cached:
+        for res in results:
+            if res["ok"]:
+                for it in cached["items"]:
+                    if it["item_id"] == res["item_id"]:
+                        it["pictures"] = source_urls
+                        break
+    return {"results": results, "ok": True}
+
+
+@app.post("/api/clips/{account_id}/upload")
+async def api_clips_upload(request: Request, account_id: int):
+    """EXPERIMENTAL: intenta subir un clip de video a varias publicaciones.
+    ML solo documenta este endpoint para items CBT/Global Selling
+    (cbt_item_id); acá lo probamos contra item_id locales y devolvemos el
+    error real de ML si no aplica, en vez de asumir que funciona."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    if not _account_for_user(account_id, user_id):
+        raise HTTPException(404)
+    form = await request.form()
+    upload = form.get("file")
+    if upload is None or not hasattr(upload, "read"):
+        raise HTTPException(400, "Falta el archivo de video.")
+    item_ids = [s.strip() for s in str(form.get("item_ids") or "").split(",") if s.strip()]
+    if not item_ids:
+        raise HTTPException(400, "No se indicaron publicaciones destino.")
+    content = await upload.read()
+    filename = getattr(upload, "filename", "") or "clip.mp4"
+    content_type = getattr(upload, "content_type", "") or "video/mp4"
+    token = await refresh_ml_token(account_id)
+    if not token:
+        raise HTTPException(502)
+    headers = {"Authorization": f"Bearer {token}"}
+    results = []
+    async with httpx.AsyncClient(timeout=180) as client:
+        sem = asyncio.Semaphore(2)  # uploads de video: concurrencia baja a propósito
+
+        async def one(iid):
+            async with sem:
+                try:
+                    files = {"video": (filename, content, content_type)}
+                    r = await client.post(
+                        f"{ML_API_URL}/marketplace/items/{iid}/clips/upload",
+                        headers=headers, files=files)
+                except Exception as e:
+                    return {"item_id": iid, "ok": False, "error": str(e)[:400]}
+                if r.status_code in (200, 201):
+                    return {"item_id": iid, "ok": True, "error": None}
+                return {"item_id": iid, "ok": False, "error": f"HTTP {r.status_code}: {r.text[:400]}"}
+
+        results = await asyncio.gather(*[one(iid) for iid in item_ids])
+    return {"results": results, "ok": True}
+
+
 @app.get("/api/promociones/{account_id}/{promotion_id}/items")
 async def api_promociones_items(
     request: Request, account_id: int, promotion_id: str,
@@ -8911,6 +9112,7 @@ PAGES = [
     ("pvp",         "PVP"),
     ("clientes",    "Clientes"),
     ("publicaciones", "Publicaciones"),
+    ("fotos_videos", "Fotos y Videos"),
 ]
 PAGE_KEYS = {k for k, _ in PAGES}
 

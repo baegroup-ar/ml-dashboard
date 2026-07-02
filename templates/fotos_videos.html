@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Fotos y Videos · Panel BAE</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Cantarell:ital,wght@0,400;0,700;1,400&amp;display=swap" rel="stylesheet"><link rel="icon" type="image/png" href="/static/bae-favicon.png">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Cantarell', 'Inter', system-ui, sans-serif; background: #fff; color: #111; }
+    nav { background: #fff; border-bottom: 1px solid #e5e5e3; padding: 0 1.5rem; height: 56px; display: flex; align-items: center; justify-content: space-between; }
+    .nav-brand { font-weight: 600; font-size: 15px; display: flex; align-items: center; gap: 8px; }
+    .nav-right { display: flex; align-items: center; gap: 10px; font-size: 13px; flex-wrap: wrap; }
+    .btn-nav { padding: 6px 14px; border: 1px solid #ddd; border-radius: 8px; background: #fff; font-size: 13px; cursor: pointer; text-decoration: none; color: #111; }
+    main { max-width: 1400px; margin: 0 auto; padding: 1.5rem; }
+    h1 { font-size: 20px; font-weight: 600; margin-bottom: 6px; }
+    p.lead { font-size: 13px; color: #888; margin-bottom: 1.25rem; }
+    .card { background: #fff; border: 1px solid #e5e5e3; border-radius: 12px; padding: 1.25rem; margin-bottom: 1.25rem; }
+    .card h3 { font-size: 14px; font-weight: 600; color: #444; margin-bottom: 12px; }
+    .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .row label { font-size: 13px; color: #666; }
+    .row input[type=text], .row select { padding: 7px 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 13px; font-family: 'Inter', sans-serif; }
+    .row select { min-width: 160px; }
+    button.primary { padding: 8px 16px; border: none; border-radius: 8px; background: #005CFF; color: #fff; font-size: 13px; cursor: pointer; }
+    button.primary:disabled { background: #ccc; cursor: default; }
+    button.exp { padding: 8px 16px; border: none; border-radius: 8px; background: #6f3499; color: #fff; font-size: 13px; cursor: pointer; }
+    button.exp:disabled { background: #ccc; cursor: default; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 12px; }
+    th { padding: 9px 12px; text-align: left; color: #888; font-weight: 500; border-bottom: 1px solid #eee; font-size: 12px; white-space: nowrap; }
+    td { padding: 6px 12px; border-bottom: 1px solid #f0f0ee; color: #333; vertical-align: top; }
+    tbody tr:hover { background: #fafaf8; }
+    .empty { padding: 2rem; text-align: center; color: #aaa; font-size: 13px; }
+    .help-box { background: #EAF1FF; border-left: 3px solid #005CFF; padding: 10px 14px; font-size: 12px; color: #666; margin-top: 10px; }
+    .warn-box { background: #FEF3E2; border-left: 3px solid #b45309; padding: 10px 14px; font-size: 12px; color: #7a4a0a; margin-top: 10px; }
+    .exp-box { background: #F3EAFB; border-left: 3px solid #6f3499; padding: 10px 14px; font-size: 12px; color: #4a2166; margin-top: 10px; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: 500; }
+    .badge.catalog { background: #FEF3E2; color: #b45309; }
+    .badge.own { background: #E6F4EA; color: #1a8a5a; }
+    .pager { display: flex; align-items: center; gap: 10px; justify-content: flex-end; margin-top: 12px; font-size: 13px; }
+    .pager button { padding: 5px 12px; border: 1px solid #ddd; border-radius: 8px; background: #fff; cursor: pointer; font-size: 13px; }
+    .pager button:disabled { opacity: .4; cursor: default; }
+    .no-accounts { text-align: center; padding: 4rem; color: #888; font-size: 14px; }
+    .msg { padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-top: 10px; }
+    .msg.ok { background: #e6f5ee; color: #1a8a5a; border: 1px solid #c5e9d8; }
+    .msg.err { background: #fce9e9; color: #c0392b; border: 1px solid #f5c6c6; }
+    .thumbs { display: flex; gap: 4px; flex-wrap: wrap; max-width: 220px; }
+    .thumbs img { width: 36px; height: 36px; object-fit: cover; border-radius: 4px; border: 1px solid #eee; }
+    .btn-link { color: #005CFF; background: none; border: none; cursor: pointer; font-size: 12px; padding: 0; }
+    textarea.urls { width: 100%; min-height: 90px; padding: 8px 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 12px; font-family: monospace; resize: vertical; }
+    .results-box { margin-top: 10px; font-size: 12px; max-height: 200px; overflow-y: auto; }
+    .results-box div { padding: 3px 0; }
+    .results-box .r-ok { color: #1a8a5a; }
+    .results-box .r-err { color: #c0392b; }
+  </style>
+</head>
+<body>
+<nav>
+  <div class="nav-brand">
+    <img src="/static/bae-icon.png" alt="Tienda Bae" style="height:32px;width:auto;display:block;" />
+    Tienda Bae App
+  </div>
+  <div class="nav-right">
+    {% if 'dashboard' in perms %}<a href="/dashboard" class="btn-nav">Dashboard</a>{% endif %}
+    {% if 'costos' in perms %}<a href="/costos" class="btn-nav">Costos</a>{% endif %}
+    {% if 'descuentos' in perms %}<a href="/descuentos" class="btn-nav">Descuentos</a>{% endif %}
+    {% if 'ranking' in perms %}<a href="/ranking" class="btn-nav">Ranking</a>{% endif %}
+    {% if 'etiquetas' in perms %}<a href="/etiquetas" class="btn-nav">Etiquetas</a>{% endif %}
+    {% if 'stock' in perms %}<a href="/stock" class="btn-nav">Stock valorizado</a>{% endif %}
+    {% if 'base_sku' in perms %}<a href="/base-sku" class="btn-nav">Base SKU</a>{% endif %}
+    {% if 'pvp' in perms %}<a href="/pvp" class="btn-nav">PVP</a>{% endif %}
+    {% if 'clientes' in perms %}<a href="/clientes" class="btn-nav">Clientes</a>{% endif %}
+    {% if 'publicaciones' in perms %}<a href="/publicaciones" class="btn-nav">Publicaciones</a>{% endif %}
+    <span style="color:#005CFF;font-weight:500;">Fotos y Videos</span>
+    <span style="color:#888;">{{ user.name }}</span>
+    {% if user.is_admin %}<a href="/admin" style="font-size:12px;color:#005CFF;text-decoration:none;">Admin</a>{% endif %}
+    <a href="/logout" class="btn-nav">Salir</a>
+  </div>
+</nav>
+
+<main>
+  <h1>Fotos y Videos</h1>
+  <p class="lead">Cargá tus publicaciones, filtrá por SKU y replicá fotos (o probá subir clips) a varias publicaciones a la vez.</p>
+
+  {% if accounts %}
+  <div class="card">
+    <div class="row">
+      <label>Cuenta ML:</label>
+      <select id="account-select">
+        {% set default_nick = 'TIENDA BAE' %}
+        {% set has_default = accounts | selectattr('nickname', 'equalto', default_nick) | list | length > 0 %}
+        {% for acc in accounts %}
+        <option value="{{ acc.id }}" {% if acc.nickname == default_nick or (not has_default and loop.first) %}selected{% endif %}>{{ acc.nickname }}</option>
+        {% endfor %}
+      </select>
+      <button class="primary" onclick="loadAll(false)" id="btn-load">Cargar publicaciones</button>
+      <a href="#" onclick="loadAll(true);return false;" id="btn-refresh" style="font-size:12px;color:#005CFF;text-decoration:none;">↻ Actualizar</a>
+      <span id="load-status" style="font-size:12px;color:#888;"></span>
+    </div>
+    <div class="row" style="margin-top:10px;">
+      <label>Filtrar por SKU:</label>
+      <input type="text" id="filter-text" placeholder="Contiene..." style="width:260px;" oninput="onFilterChange()" />
+      <span id="filter-count" style="font-size:12px;color:#888;"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Fotos</h3>
+    <p style="font-size:12px;color:#888;margin-bottom:8px;">
+      Pegá las URLs de las fotos que querés replicar (una por línea) o usá "Usar estas fotos" en alguna fila de la tabla para copiarlas acá.
+    </p>
+    <textarea id="foto-urls" class="urls" placeholder="https://http2.mlstatic.com/..."></textarea>
+    <div class="warn-box">Esto <b>reemplaza TODAS</b> las fotos de cada publicación seleccionada (no se agregan, se pisan). Las de catálogo las va a rechazar ML.</div>
+    <div class="row" style="margin-top:10px;">
+      <button class="primary" onclick="applyFotos()" id="btn-fotos" disabled>Aplicar a seleccionados (0)</button>
+      <span id="fotos-msg" style="font-size:12px;color:#888;"></span>
+    </div>
+    <div id="fotos-results" class="results-box"></div>
+  </div>
+
+  <div class="card">
+    <h3>Clips (video) — experimental</h3>
+    <div class="exp-box">
+      MercadoLibre no documenta públicamente este flujo para cuentas locales (solo para Global Selling). Lo probamos igual: si falla, te va a mostrar el error real de ML por cada publicación en vez de algo genérico.
+      El clip queda <b>en revisión de ML</b> después de subirlo, igual que si lo hicieras a mano.
+    </div>
+    <div class="row" style="margin-top:10px;">
+      <input type="file" id="clip-file" accept="video/mp4,video/quicktime,video/mpeg,video/x-msvideo" />
+      <button class="exp" onclick="uploadClip()" id="btn-clip" disabled>Subir y aplicar a seleccionados (0)</button>
+      <span id="clip-msg" style="font-size:12px;color:#888;"></span>
+    </div>
+    <div id="clip-results" class="results-box"></div>
+  </div>
+
+  <div class="card">
+    <div style="overflow-x:auto;">
+      <table>
+        <thead><tr>
+          <th style="width:30px;"><input type="checkbox" id="select-all" onchange="toggleAll(this)" /></th>
+          <th>Publicación</th><th>SKU</th><th>Fotos</th><th style="text-align:right;">Acción</th>
+        </tr></thead>
+        <tbody id="tbody">
+          <tr><td colspan="5" class="empty">Hacé click en "Cargar publicaciones" para empezar.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div id="pager" style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:10px;flex-wrap:wrap;"></div>
+  </div>
+
+  {% else %}
+  <div class="no-accounts">
+    <p style="font-size:18px;font-weight:500;margin-bottom:8px;">No tenés cuentas conectadas</p>
+    <p>Conectá una cuenta desde el <a href="/dashboard" style="color:#005CFF;">Dashboard</a>.</p>
+  </div>
+  {% endif %}
+</main>
+
+<script>
+  const PAGE_SIZE = 15;
+  let ALL_ITEMS = [];
+  let selected = new Set();
+  let page = 1;
+  const esc = v => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const accId = () => document.getElementById('account-select').value;
+
+  async function loadAll(refresh) {
+    const status = document.getElementById('load-status');
+    document.getElementById('btn-load').disabled = true;
+    status.textContent = 'Cargando publicaciones... (puede tardar según el tamaño del catálogo)';
+    document.getElementById('tbody').innerHTML = '<tr><td colspan="5" class="empty">Cargando...</td></tr>';
+    selected = new Set();
+    page = 1;
+    try {
+      const r = await fetch(`/api/fotos/${accId()}/all${refresh ? '?refresh=1' : ''}`);
+      const j = await r.json();
+      if(!r.ok) throw new Error(j.detail || 'error');
+      ALL_ITEMS = j.items || [];
+      status.textContent = `${ALL_ITEMS.length} publicación(es) cargadas.`;
+      render();
+    } catch(e) {
+      status.textContent = 'Error: ' + e.message;
+      ALL_ITEMS = [];
+      render();
+    } finally {
+      document.getElementById('btn-load').disabled = false;
+    }
+  }
+
+  function filteredItems() {
+    const text = (document.getElementById('filter-text').value || '').trim().toLowerCase();
+    if(!text) return ALL_ITEMS;
+    return ALL_ITEMS.filter(it => (it.sku || '').toLowerCase().includes(text));
+  }
+
+  function onFilterChange() { page = 1; render(); }
+
+  function render() {
+    const tbody = document.getElementById('tbody');
+    const pager = document.getElementById('pager');
+    const items = filteredItems();
+    document.getElementById('filter-count').textContent = ALL_ITEMS.length
+      ? `${items.length} de ${ALL_ITEMS.length} publicación(es)` : '';
+    if(!items.length) {
+      tbody.innerHTML = `<tr><td colspan="5" class="empty">${ALL_ITEMS.length ? 'Sin resultados con ese filtro.' : 'Hacé click en "Cargar publicaciones" para empezar.'}</td></tr>`;
+      pager.innerHTML = '';
+      updateActionsUI(items);
+      return;
+    }
+    const totalPages = Math.max(1, Math.ceil(items.length / PAGE_SIZE));
+    if(page > totalPages) page = totalPages;
+    if(page < 1) page = 1;
+    const start = (page - 1) * PAGE_SIZE;
+    const pageItems = items.slice(start, start + PAGE_SIZE);
+    tbody.innerHTML = pageItems.map(it => {
+      const thumbs = (it.pictures || []).slice(0, 4).map(u => `<img src="${esc(u)}" loading="lazy" />`).join('');
+      return `<tr>
+        <td><input type="checkbox" data-id="${it.item_id}" ${selected.has(it.item_id) ? 'checked' : ''} onchange="onRowCheck(this)" /></td>
+        <td>
+          <b>${it.item_id}</b>
+          <div style="color:#888;font-size:11px;max-width:260px;">${esc(it.title)}</div>
+          ${it.is_catalog ? '<span class="badge catalog">Catálogo</span>' : '<span class="badge own">Tradicional</span>'}
+        </td>
+        <td>${esc(it.sku)}</td>
+        <td><div class="thumbs">${thumbs}</div><span style="color:#888;font-size:11px;">${(it.pictures || []).length} foto(s)</span></td>
+        <td style="text-align:right;"><button class="btn-link" onclick="useAsSource('${it.item_id}')">Usar estas fotos</button></td>
+      </tr>`;
+    }).join('');
+    const from = start + 1;
+    const to = start + pageItems.length;
+    const prevDisabled = page <= 1 ? 'disabled' : '';
+    const nextDisabled = page >= totalPages ? 'disabled' : '';
+    pager.innerHTML = `
+      <span style="font-size:12px;color:#888;">${from}–${to} de ${items.length}</span>
+      <div style="display:flex;align-items:center;gap:6px;">
+        <button onclick="goPage(1)" ${prevDisabled}>«</button>
+        <button onclick="goPage(${page - 1})" ${prevDisabled}>‹ Anterior</button>
+        <span style="font-size:12px;color:#555;padding:0 6px;">Página ${page} de ${totalPages}</span>
+        <button onclick="goPage(${page + 1})" ${nextDisabled}>Siguiente ›</button>
+        <button onclick="goPage(${totalPages})" ${nextDisabled}>»</button>
+      </div>`;
+    updateActionsUI(items);
+  }
+
+  function goPage(n) { page = n; render(); }
+
+  function useAsSource(itemId) {
+    const it = ALL_ITEMS.find(i => i.item_id === itemId);
+    if(!it) return;
+    document.getElementById('foto-urls').value = (it.pictures || []).join('\n');
+  }
+
+  function onRowCheck(cb) {
+    const id = cb.getAttribute('data-id');
+    if(cb.checked) selected.add(id); else selected.delete(id);
+    updateActionsUI(filteredItems());
+  }
+  function toggleAll(cb) {
+    for(const it of filteredItems()) { if(cb.checked) selected.add(it.item_id); else selected.delete(it.item_id); }
+    document.querySelectorAll('#tbody input[type=checkbox]').forEach(c => { c.checked = cb.checked; });
+    updateActionsUI(filteredItems());
+  }
+  function updateActionsUI(items) {
+    items = items || filteredItems();
+    const n = selected.size;
+    document.getElementById('btn-fotos').textContent = `Aplicar a seleccionados (${n})`;
+    document.getElementById('btn-fotos').disabled = n === 0;
+    document.getElementById('btn-clip').textContent = `Subir y aplicar a seleccionados (${n})`;
+    document.getElementById('btn-clip').disabled = n === 0;
+    const allCb = document.getElementById('select-all');
+    if(allCb) allCb.checked = items.length > 0 && items.every(it => selected.has(it.item_id));
+  }
+
+  function renderResults(elId, results) {
+    const box = document.getElementById(elId);
+    box.innerHTML = results.map(r => `<div class="${r.ok ? 'r-ok' : 'r-err'}">${r.ok ? '✓' : '✗'} ${r.item_id}${r.error ? ': ' + esc(r.error) : ''}</div>`).join('');
+  }
+
+  async function applyFotos() {
+    const urls = (document.getElementById('foto-urls').value || '').split('\n').map(s => s.trim()).filter(Boolean);
+    const ids = [...selected];
+    if(!urls.length) { document.getElementById('fotos-msg').textContent = 'Pegá al menos una URL de foto.'; return; }
+    if(!ids.length) return;
+    if(!confirm(`¿Reemplazar TODAS las fotos de ${ids.length} publicación(es) por las ${urls.length} URL(s) pegadas?`)) return;
+    const msg = document.getElementById('fotos-msg');
+    msg.textContent = 'Aplicando...';
+    document.getElementById('btn-fotos').disabled = true;
+    try {
+      const r = await fetch(`/api/fotos/${accId()}/bulk-apply`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source_urls: urls, item_ids: ids }) });
+      const j = await r.json();
+      if(!r.ok) throw new Error(j.detail || 'error');
+      const ok = (j.results || []).filter(x => x.ok).length;
+      const fail = (j.results || []).filter(x => !x.ok).length;
+      msg.textContent = `Listo: ${ok} actualizada(s)${fail ? `, ${fail} con error` : ''}.`;
+      renderResults('fotos-results', j.results || []);
+      for(const res of (j.results || [])) {
+        if(res.ok) { const it = ALL_ITEMS.find(i => i.item_id === res.item_id); if(it) it.pictures = urls; }
+      }
+      render();
+    } catch(e) {
+      msg.textContent = 'Error: ' + e.message;
+    } finally {
+      document.getElementById('btn-fotos').disabled = selected.size === 0;
+    }
+  }
+
+  async function uploadClip() {
+    const file = document.getElementById('clip-file').files[0];
+    const ids = [...selected];
+    if(!file) { document.getElementById('clip-msg').textContent = 'Elegí un archivo de video.'; return; }
+    if(!ids.length) return;
+    if(!confirm(`¿Subir este clip y aplicarlo a ${ids.length} publicación(es)? Cada una va a quedar en revisión de ML.`)) return;
+    const msg = document.getElementById('clip-msg');
+    msg.textContent = 'Subiendo... (puede tardar, es un archivo de video)';
+    document.getElementById('btn-clip').disabled = true;
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('item_ids', ids.join(','));
+      const r = await fetch(`/api/clips/${accId()}/upload`, { method: 'POST', body: fd });
+      const j = await r.json();
+      if(!r.ok) throw new Error(j.detail || 'error');
+      const ok = (j.results || []).filter(x => x.ok).length;
+      const fail = (j.results || []).filter(x => !x.ok).length;
+      msg.textContent = `Listo: ${ok} enviada(s) a revisión${fail ? `, ${fail} con error` : ''}.`;
+      renderResults('clip-results', j.results || []);
+    } catch(e) {
+      msg.textContent = 'Error: ' + e.message;
+    } finally {
+      document.getElementById('btn-clip').disabled = selected.size === 0;
+    }
+  }
+</script>
+</body>
+</html>
