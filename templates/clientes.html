@@ -13,21 +13,23 @@
     .nav-brand { font-weight: 600; font-size: 15px; display: flex; align-items: center; gap: 8px; }
     .nav-right { display: flex; align-items: center; gap: 10px; font-size: 13px; flex-wrap: wrap; }
     .btn-nav { padding: 6px 14px; border: 1px solid #ddd; border-radius: 8px; background: #fff; font-size: 13px; cursor: pointer; text-decoration: none; color: #111; }
-    main { max-width: 1200px; margin: 0 auto; padding: 1.5rem; }
+    main { max-width: 1300px; margin: 0 auto; padding: 1.5rem; }
     h1 { font-size: 20px; font-weight: 600; margin-bottom: 6px; }
     p.lead { font-size: 13px; color: #888; margin-bottom: 1.25rem; }
     .card { background: #fff; border: 1px solid #e5e5e3; border-radius: 12px; padding: 1.25rem; margin-bottom: 1.25rem; }
     .card h3 { font-size: 14px; font-weight: 600; color: #444; margin-bottom: 12px; }
     .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-    .row input[type=text], .row input[type=file] { padding: 7px 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 13px; }
+    .row input[type=text], .row input[type=file], .row select { padding: 7px 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 13px; font-family: 'Inter', sans-serif; }
     button.primary { padding: 8px 16px; border: none; border-radius: 8px; background: #005CFF; color: #fff; font-size: 13px; cursor: pointer; }
     button.primary:disabled { opacity: .5; cursor: default; }
+    button.green { padding: 8px 16px; border: none; border-radius: 8px; background: #1a8a5a; color: #fff; font-size: 13px; cursor: pointer; }
     table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 12px; }
     th { padding: 9px 12px; text-align: left; color: #888; font-weight: 500; border-bottom: 1px solid #eee; font-size: 12px; white-space: nowrap; }
-    td { padding: 8px 12px; border-bottom: 1px solid #f0f0ee; color: #333; }
+    td { padding: 6px 12px; border-bottom: 1px solid #f0f0ee; color: #333; }
     tbody tr:hover { background: #fafaf8; }
     .empty { padding: 2rem; text-align: center; color: #aaa; font-size: 13px; }
     .help-box { background: #EAF1FF; border-left: 3px solid #005CFF; padding: 10px 14px; font-size: 12px; color: #666; margin-top: 10px; }
+    .help-box code { background: #fff; padding: 1px 6px; border-radius: 4px; border: 1px solid #e5e5e3; font-family: monospace; }
     .badge { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: 500; }
     .b1 { background: #E8F0FE; color: #1a56db; } /* RI */
     .b6 { background: #E6F4EA; color: #1a8a5a; } /* Mono */
@@ -37,6 +39,11 @@
     .pager button { padding: 5px 12px; border: 1px solid #ddd; border-radius: 8px; background: #fff; cursor: pointer; font-size: 13px; }
     .pager button:disabled { opacity: .4; cursor: default; }
     .no-perms { text-align: center; padding: 4rem; color: #888; font-size: 14px; }
+    .btn-delete { color: #c0392b; background: none; border: none; cursor: pointer; font-size: 12px; }
+    .cell-input { width: 100%; min-width: 90px; border: 1px solid transparent; background: transparent; font-size: 13px; font-family: 'Inter', sans-serif; padding: 5px 6px; border-radius: 6px; color: #333; }
+    .cell-input:hover { border-color: #ddd; }
+    .cell-input:focus { border-color: #005CFF; background: #fff; outline: none; }
+    select.cell-input { cursor: pointer; }
   </style>
 </head>
 <body>
@@ -66,25 +73,47 @@
   <p class="lead">Base de clientes para facturación, compartida entre todas tus cuentas. Los Consumidor Final no se cargan acá: se toman automáticamente de cada venta.</p>
 
   <div class="card">
-    <h3>Importar de Dux</h3>
-    <div class="row">
+    <h3>Alta y Actualización de Clientes</h3>
+    <div class="row" style="flex-wrap:wrap;">
       <input type="file" id="file" accept=".xlsx,.xlsm" />
-      <button class="primary" id="btn-import" onclick="doImport()">Importar clientes</button>
+      <button class="green" id="btn-import" onclick="doImport()">Importar desde Dux</button>
+      <a href="#" onclick="downloadExport(event)" style="padding:8px 14px;border:1px solid #1a8a5a;border-radius:8px;background:#fff;color:#1a8a5a;font-size:13px;text-decoration:none;">⬇ Descargar cargados</a>
+      <a href="/api/clientes/template" download="plantilla_clientes.xlsx" style="padding:8px 14px;border:1px solid #005CFF;border-radius:8px;background:#fff;color:#005CFF;font-size:13px;text-decoration:none;">Descargar plantilla</a>
       <span id="imp-msg" style="font-size:12px;color:#888;"></span>
     </div>
-    <div class="help-box">Subí el Excel de <b>Listado de Clientes</b> exportado desde Dux. Se importan solo los que tienen <b>CUIT</b> (Responsable Inscripto, Monotributo y Exento). Volver a importar <b>actualiza</b> los existentes (por CUIT).</div>
+    <div class="help-box">Subí el Excel de <b>Listado de Clientes</b> exportado desde Dux (se importan solo RI, Monotributo y Exento con CUIT) o la <b>plantilla</b> de esta página. Volver a importar <b>actualiza</b> los existentes (por CUIT).</div>
+    <div class="row" style="margin-top:14px;flex-wrap:wrap;">
+      <input type="text" id="m-rz" placeholder="Razón social" style="width:220px;" />
+      <input type="text" id="m-cuit" placeholder="CUIT" style="width:140px;" />
+      <select id="m-cond" style="width:170px;">
+        <option value="1">Resp. Inscripto</option>
+        <option value="6">Monotributo</option>
+        <option value="4">Exento</option>
+      </select>
+      <input type="text" id="m-pv" placeholder="Provincia" style="width:150px;" />
+      <input type="text" id="m-loc" placeholder="Localidad" style="width:150px;" />
+      <input type="text" id="m-dom" placeholder="Domicilio" style="width:180px;" />
+      <input type="text" id="m-nf" placeholder="Nombre fantasía" style="width:160px;" />
+      <button class="primary" onclick="addOne()">Agregar / actualizar</button>
+      <span id="msg" style="font-size:12px;color:#888;"></span>
+    </div>
   </div>
 
   <div class="card">
-    <div class="row" style="justify-content:space-between;">
-      <input type="text" id="search" placeholder="Buscar por nombre, CUIT o fantasía..." style="width:340px;" oninput="onSearch()" />
-      <span id="count" style="font-size:12px;color:#888;"></span>
+    <div class="row" style="justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:8px;">
+      <input type="text" id="search" placeholder="Buscar por nombre, CUIT o fantasía..." style="width:300px;" oninput="onSearch()" />
+      <div class="row" style="gap:10px;">
+        <button class="btn-delete" style="border:1px solid #c0392b;border-radius:8px;padding:6px 12px;" onclick="deleteSelected()" id="btn-del-sel">Eliminar seleccionados (0)</button>
+        <button class="btn-delete" style="border:1px solid #c0392b;border-radius:8px;padding:6px 12px;" onclick="deleteAll()">Eliminar TODO</button>
+        <span id="count" style="font-size:12px;color:#888;"></span>
+      </div>
     </div>
     <div style="overflow-x:auto;">
       <table>
         <thead><tr>
+          <th style="width:30px;"><input type="checkbox" id="check-all" onchange="toggleAll(this)" /></th>
           <th>Razón social</th><th>CUIT</th><th>Cond. IVA</th><th>Provincia</th>
-          <th>Localidad</th><th>Domicilio</th><th>Email</th><th>Teléfono</th>
+          <th>Localidad</th><th>Domicilio</th><th>Nombre fantasía</th><th style="text-align:right;">Acción</th>
         </tr></thead>
         <tbody id="tbody"></tbody>
       </table>
@@ -99,6 +128,8 @@
 
 <script>
 let PAGE = 1, PAGE_SIZE = 50, TOTAL = 0, Q = '', searchTimer = null;
+let ITEMS = [];
+let SELECTED = new Set();
 const IVA = {1:['Resp. Inscripto','b1'], 4:['Exento','b4'], 5:['Consumidor Final','b5'], 6:['Monotributo','b6']};
 function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 
@@ -107,26 +138,110 @@ async function load(){
   let j;
   try { j = await (await fetch(url)).json(); } catch(e){ j = {items:[],total:0}; }
   TOTAL = j.total || 0;
-  const items = j.items || [];
+  ITEMS = j.items || [];
+  SELECTED.clear();
   document.getElementById('count').textContent = `${TOTAL.toLocaleString('es-AR')} clientes`;
-  const tb = document.getElementById('tbody');
-  tb.innerHTML = items.length ? items.map(c => {
-    const iva = IVA[c.condicion_iva_id] || [c.categoria_fiscal||'', 'b5'];
-    return `<tr>
-      <td><b>${esc(c.razon_social)}</b>${c.nombre_fantasia ? ' <span style="color:#aaa;">('+esc(c.nombre_fantasia)+')</span>' : ''}</td>
-      <td>${esc(c.cuit)}</td>
-      <td><span class="badge ${iva[1]}">${esc(iva[0])}</span></td>
-      <td>${esc(c.provincia)}</td>
-      <td>${esc(c.localidad)}</td>
-      <td>${esc(c.domicilio)}</td>
-      <td>${esc(c.email)}</td>
-      <td>${esc(c.telefono)}</td>
-    </tr>`;
-  }).join('') : '<tr><td colspan="8" class="empty">Sin clientes. Importá el Excel de Dux para empezar.</td></tr>';
+  renderList();
   const pages = Math.max(1, Math.ceil(TOTAL / PAGE_SIZE));
   document.getElementById('pageinfo').textContent = `Página ${PAGE} de ${pages}`;
   document.getElementById('prev').disabled = PAGE <= 1;
   document.getElementById('next').disabled = PAGE >= pages;
+}
+
+function ivaSelect(id, cur){
+  const opts = [[1,'Resp. Inscripto'],[6,'Monotributo'],[4,'Exento'],[5,'Consumidor Final']];
+  return `<select class="cell-input" onchange="saveField(${id},'condicion_iva_id',this.value,this)">` +
+    opts.map(([v,l]) => `<option value="${v}" ${String(cur)===String(v)?'selected':''}>${l}</option>`).join('') +
+    `</select>`;
+}
+
+function renderList(){
+  const tb = document.getElementById('tbody');
+  tb.innerHTML = ITEMS.length ? ITEMS.map(c => `<tr>
+      <td><input type="checkbox" class="row-check" data-id="${c.id}" ${SELECTED.has(c.id)?'checked':''} onchange="onRowCheck(this)" /></td>
+      <td><input class="cell-input" value="${esc(c.razon_social)}" onblur="saveField(${c.id},'razon_social',this.value,this)" onkeydown="if(event.key==='Enter')this.blur()" /></td>
+      <td><input class="cell-input" value="${esc(c.cuit)}" style="width:120px;" onblur="saveField(${c.id},'cuit',this.value,this)" onkeydown="if(event.key==='Enter')this.blur()" /></td>
+      <td>${ivaSelect(c.id, c.condicion_iva_id)}</td>
+      <td><input class="cell-input" value="${esc(c.provincia)}" onblur="saveField(${c.id},'provincia',this.value,this)" onkeydown="if(event.key==='Enter')this.blur()" /></td>
+      <td><input class="cell-input" value="${esc(c.localidad)}" onblur="saveField(${c.id},'localidad',this.value,this)" onkeydown="if(event.key==='Enter')this.blur()" /></td>
+      <td><input class="cell-input" value="${esc(c.domicilio)}" onblur="saveField(${c.id},'domicilio',this.value,this)" onkeydown="if(event.key==='Enter')this.blur()" /></td>
+      <td><input class="cell-input" value="${esc(c.nombre_fantasia)}" onblur="saveField(${c.id},'nombre_fantasia',this.value,this)" onkeydown="if(event.key==='Enter')this.blur()" /></td>
+      <td style="text-align:right;"><button class="btn-delete" onclick="delOne(${c.id})">Eliminar</button></td>
+    </tr>`).join('') : '<tr><td colspan="9" class="empty">Sin clientes. Importá el Excel de Dux o cargá uno manualmente para empezar.</td></tr>';
+  updateBulkUI();
+}
+
+async function saveField(id, field, value, el){
+  const it = ITEMS.find(i => i.id === id);
+  if (!it) return;
+  const cur = field === 'condicion_iva_id' ? String(it[field]) : (it[field] || '');
+  if (String(value) === String(cur)) return;
+  try {
+    const r = await fetch(`/api/clientes/${id}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ [field]: value }) });
+    if (r.ok) {
+      it[field] = field === 'condicion_iva_id' ? parseInt(value) : value;
+      if (el) { el.style.background = '#eafaf0'; setTimeout(() => { el.style.background = ''; }, 800); }
+    } else {
+      const j = await r.json().catch(()=>({}));
+      alert('Error: ' + (j.detail || 'no se pudo guardar'));
+      renderList();
+    }
+  } catch(e){ alert('Error: ' + e.message); }
+}
+
+function onRowCheck(cb){
+  const id = parseInt(cb.getAttribute('data-id'));
+  if (cb.checked) SELECTED.add(id); else SELECTED.delete(id);
+  updateBulkUI();
+}
+function toggleAll(cb){
+  for (const it of ITEMS) { if (cb.checked) SELECTED.add(it.id); else SELECTED.delete(it.id); }
+  document.querySelectorAll('.row-check').forEach(c => { c.checked = cb.checked; });
+  updateBulkUI();
+}
+function updateBulkUI(){
+  const n = SELECTED.size;
+  const btn = document.getElementById('btn-del-sel');
+  btn.textContent = `Eliminar seleccionados (${n})`;
+  btn.disabled = n === 0;
+  const allCb = document.getElementById('check-all');
+  if (allCb) allCb.checked = ITEMS.length > 0 && ITEMS.every(it => SELECTED.has(it.id));
+}
+
+async function deleteSelected(){
+  const ids = [...SELECTED];
+  if (!ids.length) return;
+  if (!confirm(`¿Eliminar ${ids.length} cliente(s) seleccionado(s)?`)) return;
+  try {
+    const r = await fetch('/api/clientes/delete-bulk', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids }) });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.detail || 'error');
+    load();
+  } catch(e){ alert('Error: ' + e.message); }
+}
+async function deleteAll(){
+  if (!TOTAL) return;
+  if (!confirm(`¿Eliminar TODOS los ${TOTAL} clientes? Esta acción no se puede deshacer.`)) return;
+  try {
+    const r = await fetch('/api/clientes/delete-bulk', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ all: true }) });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.detail || 'error');
+    PAGE = 1; load();
+  } catch(e){ alert('Error: ' + e.message); }
+}
+
+async function delOne(id){
+  if (!confirm('¿Eliminar este cliente?')) return;
+  try {
+    await fetch(`/api/clientes/${id}`, { method: 'DELETE' });
+    load();
+  } catch(e){}
 }
 
 function onSearch(){
@@ -134,6 +249,8 @@ function onSearch(){
   searchTimer = setTimeout(() => { Q = document.getElementById('search').value.trim(); PAGE = 1; load(); }, 300);
 }
 function goPage(d){ PAGE = Math.max(1, PAGE + d); load(); }
+
+function downloadExport(e){ if (e) e.preventDefault(); window.location = '/api/clientes/export'; }
 
 async function doImport(){
   const f = document.getElementById('file').files[0];
@@ -150,6 +267,30 @@ async function doImport(){
     PAGE = 1; load();
   } catch(e){ msg.textContent = 'Error: ' + e.message; }
   finally { btn.disabled = false; }
+}
+
+async function addOne(){
+  const msg = document.getElementById('msg');
+  const body = {
+    razon_social: document.getElementById('m-rz').value.trim(),
+    cuit: document.getElementById('m-cuit').value.trim(),
+    condicion_iva_id: document.getElementById('m-cond').value,
+    provincia: document.getElementById('m-pv').value.trim(),
+    localidad: document.getElementById('m-loc').value.trim(),
+    domicilio: document.getElementById('m-dom').value.trim(),
+    nombre_fantasia: document.getElementById('m-nf').value.trim(),
+  };
+  if (!body.razon_social || !body.cuit) { msg.textContent = 'Completá razón social y CUIT.'; return; }
+  try {
+    const r = await fetch('/api/clientes', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body) });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.detail || 'error');
+    msg.textContent = 'Guardado.';
+    ['m-rz','m-cuit','m-pv','m-loc','m-dom','m-nf'].forEach(id => document.getElementById(id).value = '');
+    load();
+  } catch(e){ msg.textContent = 'Error: ' + e.message; }
 }
 
 load();

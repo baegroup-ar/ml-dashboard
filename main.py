@@ -2688,6 +2688,9 @@ _CONDICION_IVA_MAP = {
     "CONSUMIDOR FINAL": 5,
     "MONOTRIBUTISTA": 6, "MONOTRIBUTO": 6, "RESPONSABLE MONOTRIBUTO": 6,
 }
+_CONDICION_IVA_LABEL = {
+    1: "RESPONSABLE INSCRIPTO", 4: "EXENTO", 5: "CONSUMIDOR FINAL", 6: "MONOTRIBUTO",
+}
 
 
 def _clientes_owner_id(user: dict) -> int:
@@ -2734,9 +2737,191 @@ async def api_clientes_list(request: Request, q: str = "", page: int = 1, page_s
     params["lim"], params["off"] = page_size, (page - 1) * page_size
     rows = db_fetchall(
         "SELECT id, razon_social, cuit, condicion_iva_id, categoria_fiscal, tipo_doc, nro_doc,"
-        " email, provincia, localidad, domicilio, telefono, nombre_fantasia"
+        " provincia, localidad, domicilio, nombre_fantasia, codigo"
         f" FROM clientes WHERE {where} ORDER BY razon_social LIMIT :lim OFFSET :off", params)
     return {"items": rows, "total": total, "page": page, "page_size": page_size}
+
+
+_CLIENTE_EDITABLE_FIELDS = (
+    "razon_social", "cuit", "condicion_iva_id", "provincia", "localidad",
+    "domicilio", "nombre_fantasia", "codigo",
+)
+
+
+@app.post("/api/clientes")
+async def api_clientes_upsert(request: Request):
+    """Alta manual / actualización de un cliente (upsert por CUIT, como el import)."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    owner = _clientes_owner_id(get_user(user_id))
+    body = await request.json()
+    razon = str(body.get("razon_social") or "").strip()
+    import re
+    cuit = re.sub(r"\D", "", str(body.get("cuit") or ""))
+    if not razon or len(cuit) != 11:
+        raise HTTPException(400, "Razón social y CUIT (11 dígitos) son obligatorios.")
+    try:
+        cond = int(body["condicion_iva_id"]) if body.get("condicion_iva_id") not in (None, "") else None
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Condición IVA inválida.")
+    params = {
+        "o": owner, "rz": razon, "cond": cond,
+        "cat": _CONDICION_IVA_LABEL.get(cond, ""), "cuit": cuit,
+        "pv": str(body.get("provincia") or "").strip(),
+        "loc": str(body.get("localidad") or "").strip(),
+        "dom": str(body.get("domicilio") or "").strip(),
+        "nf": str(body.get("nombre_fantasia") or "").strip(),
+        "cod": str(body.get("codigo") or "").strip(),
+    }
+    with engine.begin() as conn:
+        row = conn.execute(text(
+            "INSERT INTO clientes (owner_user_id, razon_social, condicion_iva_id, categoria_fiscal,"
+            " cuit, provincia, localidad, domicilio, nombre_fantasia, codigo, updated_at)"
+            " VALUES (:o,:rz,:cond,:cat,:cuit,:pv,:loc,:dom,:nf,:cod,NOW())"
+            " ON CONFLICT (owner_user_id, cuit) DO UPDATE SET"
+            " razon_social=EXCLUDED.razon_social, condicion_iva_id=EXCLUDED.condicion_iva_id,"
+            " categoria_fiscal=EXCLUDED.categoria_fiscal, provincia=EXCLUDED.provincia,"
+            " localidad=EXCLUDED.localidad, domicilio=EXCLUDED.domicilio,"
+            " nombre_fantasia=EXCLUDED.nombre_fantasia, codigo=EXCLUDED.codigo, updated_at=NOW()"
+            " RETURNING id"), params).fetchone()
+    return {"ok": True, "id": row[0]}
+
+
+@app.patch("/api/clientes/{cliente_id:int}")
+async def api_clientes_patch(request: Request, cliente_id: int):
+    """Edición inline de un campo (o varios) de un cliente existente."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    owner = _clientes_owner_id(get_user(user_id))
+    body = await request.json()
+    sets, params = [], {"id": cliente_id, "o": owner}
+    for f in _CLIENTE_EDITABLE_FIELDS:
+        if f in body:
+            v = body[f]
+            if f == "cuit":
+                import re
+                v = re.sub(r"\D", "", str(v or ""))
+                if len(v) != 11:
+                    raise HTTPException(400, "CUIT inválido (11 dígitos).")
+            elif f == "condicion_iva_id":
+                v = int(v) if v not in (None, "") else None
+            else:
+                v = str(v or "").strip()
+            sets.append(f"{f}=:{f}")
+            params[f] = v
+    if "condicion_iva_id" in params:
+        sets.append("categoria_fiscal=:cat")
+        params["cat"] = _CONDICION_IVA_LABEL.get(params["condicion_iva_id"], "")
+    if not sets:
+        raise HTTPException(400, "Nada para actualizar.")
+    sets.append("updated_at=NOW()")
+    db_execute(
+        f"UPDATE clientes SET {', '.join(sets)} WHERE id=:id AND owner_user_id=:o", params)
+    return {"ok": True}
+
+
+@app.delete("/api/clientes/{cliente_id:int}")
+async def api_clientes_delete(request: Request, cliente_id: int):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    owner = _clientes_owner_id(get_user(user_id))
+    db_execute("DELETE FROM clientes WHERE id=:id AND owner_user_id=:o",
+               {"id": cliente_id, "o": owner})
+    return {"ok": True}
+
+
+@app.post("/api/clientes/delete-bulk")
+async def api_clientes_delete_bulk(request: Request):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    owner = _clientes_owner_id(get_user(user_id))
+    body = await request.json()
+    if body.get("all"):
+        db_execute("DELETE FROM clientes WHERE owner_user_id=:o", {"o": owner})
+        return {"ok": True, "deleted": "all"}
+    ids = [int(i) for i in (body.get("ids") or []) if str(i).strip().isdigit()]
+    if not ids:
+        raise HTTPException(400, "No se indicaron clientes para borrar.")
+    for i in ids:
+        db_execute("DELETE FROM clientes WHERE owner_user_id=:o AND id=:id", {"o": owner, "id": i})
+    return {"ok": True, "deleted": len(ids)}
+
+
+@app.get("/api/clientes/template")
+async def api_clientes_template(request: Request):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    import io
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from fastapi.responses import StreamingResponse
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Clientes"
+    headers = ["Razón social", "CUIT", "Condición IVA", "Provincia", "Localidad", "Domicilio", "Nombre fantasía", "Código"]
+    ws.append(headers)
+    fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
+    for col in range(1, len(headers) + 1):
+        c = ws.cell(row=1, column=col)
+        c.fill = fill
+        c.font = Font(bold=True)
+        c.alignment = Alignment(horizontal="center")
+    ws.append(["Empresa Ejemplo SRL", "30712345678", "RESPONSABLE INSCRIPTO", "Buenos Aires", "CABA", "Av. Siempre Viva 123", "Ejemplo", ""])
+    widths = [28, 16, 22, 18, 18, 26, 20, 12]
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = w
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return StreamingResponse(
+        buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="plantilla_clientes.xlsx"'})
+
+
+@app.get("/api/clientes/export")
+async def api_clientes_export(request: Request):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    owner = _clientes_owner_id(get_user(user_id))
+    rows = db_fetchall(
+        "SELECT razon_social, cuit, condicion_iva_id, categoria_fiscal, provincia, localidad,"
+        " domicilio, nombre_fantasia, codigo FROM clientes WHERE owner_user_id=:o ORDER BY razon_social",
+        {"o": owner})
+    import io
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from fastapi.responses import StreamingResponse
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Clientes"
+    headers = ["Razón social", "CUIT", "Condición IVA", "Provincia", "Localidad", "Domicilio", "Nombre fantasía", "Código"]
+    ws.append(headers)
+    fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
+    for col in range(1, len(headers) + 1):
+        c = ws.cell(row=1, column=col)
+        c.fill = fill
+        c.font = Font(bold=True)
+        c.alignment = Alignment(horizontal="center")
+    for r in rows:
+        cond_label = _CONDICION_IVA_LABEL.get(r.get("condicion_iva_id"), r.get("categoria_fiscal") or "")
+        ws.append([r.get("razon_social") or "", r.get("cuit") or "", cond_label,
+                   r.get("provincia") or "", r.get("localidad") or "", r.get("domicilio") or "",
+                   r.get("nombre_fantasia") or "", r.get("codigo") or ""])
+    widths = [28, 16, 22, 18, 18, 26, 20, 12]
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = w
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return StreamingResponse(
+        buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="clientes.xlsx"'})
 
 
 @app.post("/api/clientes/import")
