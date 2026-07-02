@@ -262,7 +262,7 @@
       <td><input type="checkbox" data-id="${it.item_id}" ${pubSelected.has(it.item_id) ? 'checked' : ''} onchange="onRowCheck(this)" /></td>
       <td>
         <b>${it.item_id}</b><br>
-        ${it.is_catalog ? '<span class="badge catalog">Catálogo</span>' : '<span class="badge own">Propia</span>'}
+        ${it.is_catalog ? '<span class="badge catalog">Catálogo</span>' : '<span class="badge own">Tradicional</span>'}
         ${it.has_variations ? '<span class="badge" style="background:#eee;color:#666;margin-left:4px;">Con variantes</span>' : ''}
       </td>
       <td>${fieldCell(it, 'title', it.title)}</td>
