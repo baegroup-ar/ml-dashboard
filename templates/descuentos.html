@@ -247,6 +247,36 @@
     </div>
   </div>
 
+  <!-- ─── PROMOCIONES POR SKU ─── -->
+  <div class="card">
+    <h3>Promociones por SKU</h3>
+    <p style="font-size:12px;color:#888;margin-bottom:10px;">
+      Buscá un SKU y mirá en qué promociones está PARTICIPANDO ACTUALMENTE (activas o programadas)
+      cada una de sus publicaciones, para dar de baja las que quieras sin entrar promo por promo.
+    </p>
+    <div class="row">
+      <input type="text" id="sku-search-input" placeholder="SKU" style="width:220px;text-transform:uppercase;" onkeydown="if(event.key==='Enter')searchBySku()" />
+      <button onclick="searchBySku()" id="btn-sku-search">Buscar</button>
+      <span id="sku-search-status" style="font-size:12px;color:#888;"></span>
+    </div>
+    <div class="row" style="margin-top:10px;justify-content:space-between;">
+      <span id="sku-selected-info" style="font-size:12px;color:#888;"></span>
+      <button onclick="removeBySkuSelected()" id="btn-sku-remove" disabled style="border:1px solid #c0392b;background:#fff;color:#c0392b;padding:8px 14px;border-radius:8px;font-size:13px;cursor:pointer;">Dejar de participar (seleccionados)</button>
+    </div>
+    <div style="overflow-x:auto;margin-top:8px;">
+      <table>
+        <thead><tr>
+          <th style="width:30px;"><input type="checkbox" id="sku-select-all" onchange="toggleSkuAll(this)" /></th>
+          <th>Publicación</th><th>SKU</th><th>Promoción</th><th>Tipo</th><th>Estado</th><th class="num">Descuento</th>
+        </tr></thead>
+        <tbody id="sku-tbody">
+          <tr><td colspan="7" class="empty">Buscá un SKU para ver sus promociones activas.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div id="sku-remove-msg"></div>
+  </div>
+
   {% else %}
   <div class="no-accounts">
     <p style="font-size:18px;font-weight:500;margin-bottom:8px;">No tenés cuentas conectadas</p>
@@ -1280,6 +1310,111 @@
     const promoName = (currentPromo?.name || 'preview').replace(/[^a-zA-Z0-9_\- ]/g, '').trim();
     a.href = url; a.download = `preview_${promoName}.csv`; a.click();
     URL.revokeObjectURL(url);
+  }
+
+  // ── PROMOCIONES POR SKU ──
+  let skuRows = [];
+  let skuSelected = new Set(); // claves "item_id|promotion_id"
+  const skuRowKey = r => `${r.item_id}|${r.promotion_id}`;
+  const SKU_STATUS_LABEL = { started: 'Activa', pending: 'Programada', programmed: 'Programada', scheduled: 'Programada' };
+
+  async function searchBySku() {
+    const sku = (document.getElementById('sku-search-input').value || '').trim();
+    const status = document.getElementById('sku-search-status');
+    const tbody = document.getElementById('sku-tbody');
+    if(!sku) { status.textContent = 'Ingresá un SKU.'; return; }
+    if(!currentAccountId) return;
+    document.getElementById('btn-sku-search').disabled = true;
+    status.textContent = 'Buscando...';
+    tbody.innerHTML = `<tr><td colspan="7" class="empty">Buscando...</td></tr>`;
+    skuSelected = new Set();
+    try {
+      const r = await fetch(`/api/promociones/${currentAccountId}/by-sku?sku=${encodeURIComponent(sku)}`);
+      const j = await r.json();
+      if(!r.ok) throw new Error(j.detail || 'error');
+      skuRows = j.rows || [];
+      if(!j.items_found) {
+        status.textContent = 'No se encontraron publicaciones activas con ese SKU.';
+      } else if(!skuRows.length) {
+        status.textContent = `${j.items_found} publicación(es) encontradas, ninguna participando en promociones ahora.`;
+      } else {
+        status.textContent = `${skuRows.length} promoción(es) activas en ${j.items_found} publicación(es).`;
+      }
+      renderSkuRows();
+    } catch(e) {
+      status.textContent = 'Error: ' + e.message;
+      skuRows = [];
+      renderSkuRows();
+    } finally {
+      document.getElementById('btn-sku-search').disabled = false;
+    }
+  }
+
+  function renderSkuRows() {
+    const tbody = document.getElementById('sku-tbody');
+    tbody.innerHTML = skuRows.length ? skuRows.map(row => {
+      const key = skuRowKey(row);
+      const checked = skuSelected.has(key) ? 'checked' : '';
+      const statusLabel = SKU_STATUS_LABEL[(row.status||'').toLowerCase()] || row.status || '—';
+      const badgeClass = (row.status||'').toLowerCase() === 'started' ? 'ok' : 'gray';
+      return `<tr>
+        <td><input type="checkbox" data-key="${key}" ${checked} onchange="onSkuRowCheck(this)" /></td>
+        <td><b>${row.item_id}</b>${row.title ? '<div style="color:#888;font-size:11px;">'+row.title.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))+'</div>' : ''}</td>
+        <td>${row.sku || '—'}</td>
+        <td>${(row.name||row.promotion_id||'').toString().replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}</td>
+        <td>${row.promotion_type || '—'}</td>
+        <td><span class="badge ${badgeClass}">${statusLabel}</span></td>
+        <td class="num">${row.discount_pct != null ? row.discount_pct + '%' : '—'}</td>
+      </tr>`;
+    }).join('') : '<tr><td colspan="7" class="empty">Sin resultados.</td></tr>';
+    updateSkuSelectionUI();
+  }
+
+  function onSkuRowCheck(cb) {
+    const key = cb.getAttribute('data-key');
+    if(cb.checked) skuSelected.add(key); else skuSelected.delete(key);
+    updateSkuSelectionUI();
+  }
+  function toggleSkuAll(cb) {
+    for(const row of skuRows) { if(cb.checked) skuSelected.add(skuRowKey(row)); else skuSelected.delete(skuRowKey(row)); }
+    document.querySelectorAll('#sku-tbody input[type=checkbox]').forEach(c => { c.checked = cb.checked; });
+    updateSkuSelectionUI();
+  }
+  function updateSkuSelectionUI() {
+    const n = skuSelected.size;
+    document.getElementById('sku-selected-info').textContent = n ? `${n} seleccionada(s)` : '';
+    document.getElementById('btn-sku-remove').disabled = n === 0;
+    const allCb = document.getElementById('sku-select-all');
+    if(allCb) allCb.checked = skuRows.length > 0 && skuRows.every(r => skuSelected.has(skuRowKey(r)));
+  }
+
+  async function removeBySkuSelected() {
+    const selectedRows = skuRows.filter(r => skuSelected.has(skuRowKey(r)));
+    if(!selectedRows.length) return;
+    if(!confirm(`¿Dejar de participar en ${selectedRows.length} promoción(es) seleccionada(s)?`)) return;
+    const msg = document.getElementById('sku-remove-msg');
+    msg.innerHTML = `<div class="msg ok">Procesando...</div>`;
+    document.getElementById('btn-sku-remove').disabled = true;
+    // Agrupar por promotion_id: el endpoint de baja es por promoción.
+    const byPromo = {};
+    for(const row of selectedRows) {
+      (byPromo[row.promotion_id] = byPromo[row.promotion_id] || []).push(row);
+    }
+    let ok = 0, fail = 0;
+    for(const [promotionId, rows] of Object.entries(byPromo)) {
+      try {
+        const r = await fetch(`/api/promociones/${currentAccountId}/${encodeURIComponent(promotionId)}/remove`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ items: rows.map(row => ({
+            item_id: row.item_id, promotion_type: row.promotion_type, offer_id: row.offer_id })) }),
+        });
+        const j = await r.json();
+        for(const res of (j.results || [])) { if(res.ok) ok++; else fail++; }
+        if(!r.ok) fail += rows.length;
+      } catch(e) { fail += rows.length; }
+    }
+    msg.innerHTML = `<div class="msg ${fail ? 'err' : 'ok'}">Listo: ${ok} dado(s) de baja${fail ? `, ${fail} con error` : ''}.</div>`;
+    searchBySku();
   }
 
   if(currentAccountId) loadBase();

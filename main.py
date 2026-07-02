@@ -6060,6 +6060,161 @@ async def api_promociones_list(request: Request, account_id: int):
     return result
 
 
+def _extract_item_sku(info: Optional[dict]) -> str:
+    """Igual que el extractor usado en la vista por promoción: busca el
+    SELLER_SKU top-level, en attributes[] o en variations[]."""
+    if not info:
+        return ""
+    sku = (info.get("seller_sku") or "").strip()
+    if sku:
+        return sku
+    for attr in (info.get("attributes") or []):
+        if isinstance(attr, dict) and attr.get("id") in ("SELLER_SKU", "SELLER_CUSTOM_FIELD"):
+            v = (attr.get("value_name") or attr.get("value") or "").strip()
+            if v:
+                return v
+    for var in (info.get("variations") or []):
+        if not isinstance(var, dict):
+            continue
+        v = (var.get("seller_sku") or "").strip()
+        if v:
+            return v
+        for attr in (var.get("attributes") or []):
+            if isinstance(attr, dict) and attr.get("id") in ("SELLER_SKU", "SELLER_CUSTOM_FIELD"):
+                vv = (attr.get("value_name") or attr.get("value") or "").strip()
+                if vv:
+                    return vv
+    return ""
+
+
+def _by_sku_offer_pct(offer: dict) -> Optional[float]:
+    """Extracción best-effort del % de descuento de una oferta de promo,
+    para mostrar en la vista 'Promociones por SKU' (no exige la precisión
+    del flujo de aplicación, solo referencia)."""
+    for k in ("discount_percentage", "percentage_off", "meli_percentage", "seller_percentage"):
+        v = offer.get(k)
+        if v is not None:
+            try:
+                return round(float(v), 2)
+            except (TypeError, ValueError):
+                pass
+    price = offer.get("price") if offer.get("price") is not None else offer.get("deal_price")
+    orig = offer.get("regular_price") if offer.get("regular_price") is not None else offer.get("original_price")
+    if price is not None and orig is not None:
+        try:
+            p, o = float(price), float(orig)
+            if o > 0 and 0 <= p < o:
+                return round((1 - p / o) * 100, 2)
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+@app.get("/api/promociones/{account_id}/by-sku")
+async def api_promociones_by_sku(request: Request, account_id: int, sku: str = ""):
+    """Busca las publicaciones que coinciden con un SKU y lista las
+    promociones en las que ESTÁN PARTICIPANDO ACTUALMENTE (started/pending/
+    programmed, no candidatos elegibles), para poder darlas de baja en bloque
+    sin tener que entrar promo por promo."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    sku = (sku or "").strip()
+    if not sku:
+        raise HTTPException(400, "Falta el SKU a buscar.")
+    token = await refresh_ml_token(account_id)
+    if not token:
+        raise HTTPException(502)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        try:
+            r = await client.get(
+                f"{ML_API_URL}/users/{acc['ml_user_id']}/items/search",
+                headers=headers, params={"seller_sku": sku, "status": "active"},
+            )
+        except Exception as e:
+            raise HTTPException(502, f"Error consultando ML: {str(e)[:200]}")
+        if r.status_code != 200:
+            raise HTTPException(502, f"ML respondió {r.status_code}: {r.text[:200]}")
+        item_ids = (r.json().get("results") or [])
+        if not item_ids:
+            return {"sku": sku, "rows": [], "items_found": 0}
+
+        # Multiget para título y SKU real de cada item/variación.
+        info_map: dict = {}
+        mget_sem = asyncio.Semaphore(20)
+
+        async def fetch_batch(chunk):
+            async with mget_sem:
+                try:
+                    rb = await client.get(
+                        f"{ML_API_URL}/items", headers=headers,
+                        params={"ids": ",".join(chunk),
+                                "attributes": "id,title,seller_sku,status,attributes,variations"})
+                    if rb.status_code != 200:
+                        return
+                    for entry in rb.json():
+                        if not isinstance(entry, dict):
+                            continue
+                        body = entry.get("body") if entry.get("code") == 200 else None
+                        if isinstance(body, dict) and body.get("id"):
+                            info_map[body["id"]] = body
+                except Exception:
+                    pass
+
+        chunks = [item_ids[i:i + 20] for i in range(0, len(item_ids), 20)]
+        await asyncio.gather(*[fetch_batch(c) for c in chunks])
+
+        # Promos activas de cada item (mismo endpoint que usa el descubridor
+        # general, pero acotado a los pocos items de este SKU).
+        promo_sem = asyncio.Semaphore(15)
+
+        async def fetch_item_promos(item_id):
+            async with promo_sem:
+                try:
+                    rp = await client.get(
+                        f"{ML_API_URL}/seller-promotions/items/{item_id}",
+                        headers=headers, params={"app_version": "v2"})
+                except Exception:
+                    return item_id, []
+                if rp.status_code != 200:
+                    return item_id, []
+                return item_id, promo_offers_from_response(rp.json())
+
+        outcomes = await asyncio.gather(*[fetch_item_promos(i) for i in item_ids])
+
+    rows = []
+    for item_id, offers in outcomes:
+        info = info_map.get(item_id)
+        item_sku = _extract_item_sku(info) or sku
+        title = (info or {}).get("title") or ""
+        for offer in offers:
+            if not isinstance(offer, dict):
+                continue
+            status = (offer.get("status") or "").lower()
+            if status in ("", "candidate"):
+                continue  # solo las que YA participan (started/pending/programmed)
+            pid = promo_offer_id(offer)
+            if not pid:
+                continue
+            rows.append({
+                "item_id": item_id,
+                "sku": item_sku,
+                "title": title,
+                "promotion_id": pid,
+                "promotion_type": offer.get("type") or offer.get("promotion_type") or offer.get("campaign_type"),
+                "name": offer.get("name") or offer.get("description") or offer.get("title") or str(pid),
+                "status": offer.get("status"),
+                "offer_id": offer.get("offer_id") or offer.get("ref_id"),
+                "discount_pct": _by_sku_offer_pct(offer),
+            })
+    return {"sku": sku, "rows": rows, "items_found": len(item_ids)}
+
+
 @app.get("/api/promociones/{account_id}/{promotion_id}/items")
 async def api_promociones_items(
     request: Request, account_id: int, promotion_id: str,
