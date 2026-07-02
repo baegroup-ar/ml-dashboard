@@ -6738,6 +6738,28 @@ async def api_clips_upload(request: Request, account_id: int):
     return {"results": results, "ok": True}
 
 
+@app.get("/api/clips/{account_id}/test-read/{item_id}")
+async def api_clips_test_read(request: Request, account_id: int, item_id: str):
+    """Diagnóstico de solo lectura: intenta LISTAR los clips de una
+    publicación (sin subir nada) para saber si el bloqueo de ML es sobre
+    toda la API de Clips para esta cuenta/app, o solo sobre la subida."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    if not _account_for_user(account_id, user_id):
+        raise HTTPException(404)
+    token = await refresh_ml_token(account_id)
+    if not token:
+        raise HTTPException(502)
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(timeout=30) as client:
+        try:
+            r = await client.get(f"{ML_API_URL}/marketplace/items/{item_id}/clips", headers=headers)
+        except Exception as e:
+            return {"ok": False, "status": None, "body": str(e)[:500]}
+    return {"ok": r.status_code in (200, 201), "status": r.status_code, "body": r.text[:1500]}
+
+
 @app.get("/api/promociones/{account_id}/{promotion_id}/items")
 async def api_promociones_items(
     request: Request, account_id: int, promotion_id: str,

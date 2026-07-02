@@ -128,6 +128,11 @@
       <span id="clip-msg" style="font-size:12px;color:#888;"></span>
     </div>
     <div id="clip-results" class="results-box"></div>
+    <div class="row" style="margin-top:14px;padding-top:10px;border-top:1px solid #f0f0ee;">
+      <button onclick="testClipsRead()" id="btn-clip-test" disabled style="padding:7px 12px;border:1px solid #6f3499;background:#fff;color:#6f3499;border-radius:8px;font-size:12px;cursor:pointer;">Probar lectura de clips (diagnóstico, no sube nada)</button>
+      <span id="clip-test-msg" style="font-size:12px;color:#888;"></span>
+    </div>
+    <pre id="clip-test-json" style="display:none;margin-top:8px;background:#f7f7f5;padding:10px;border-radius:8px;font-size:11px;white-space:pre-wrap;word-break:break-all;"></pre>
   </div>
 
   <div class="card">
@@ -251,8 +256,31 @@
     const n = selected.size;
     document.getElementById('btn-clip').textContent = `Subir y aplicar a seleccionados (${n})`;
     document.getElementById('btn-clip').disabled = n === 0;
+    document.getElementById('btn-clip-test').disabled = n === 0;
     const allCb = document.getElementById('select-all');
     if(allCb) allCb.checked = items.length > 0 && items.every(it => selected.has(it.item_id));
+  }
+
+  async function testClipsRead() {
+    const ids = [...selected];
+    if(!ids.length) return;
+    const itemId = ids[0];
+    const msg = document.getElementById('clip-test-msg');
+    const box = document.getElementById('clip-test-json');
+    msg.textContent = `Probando lectura de clips en ${itemId}...`;
+    box.style.display = 'none';
+    document.getElementById('btn-clip-test').disabled = true;
+    try {
+      const r = await fetch(`/api/clips/${accId()}/test-read/${itemId}`);
+      const j = await r.json();
+      msg.textContent = `${itemId} → HTTP ${j.status ?? '?'} (${j.ok ? 'OK, se puede leer' : 'bloqueado / error'})`;
+      box.textContent = j.body || JSON.stringify(j);
+      box.style.display = 'block';
+    } catch(e) {
+      msg.textContent = 'Error: ' + e.message;
+    } finally {
+      document.getElementById('btn-clip-test').disabled = selected.size === 0;
+    }
   }
 
   function renderResults(elId, results) {
