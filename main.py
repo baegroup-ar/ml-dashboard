@@ -2758,11 +2758,13 @@ async def api_clientes_import(request: Request):
     import io
     from openpyxl import load_workbook
     try:
-        wb = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+        # Carga COMPLETA (no read_only): el export de Dux declara mal el rango de
+        # celdas (1x1) y read_only+reset_dimensions solo lee 1 fila. El archivo
+        # ronda 12MB, la carga completa es segura.
+        wb = load_workbook(io.BytesIO(content), data_only=True)
     except Exception as e:
         raise HTTPException(400, f"No pude leer el archivo: {e}")
     ws = wb.active
-    ws.reset_dimensions = True  # el export de Dux declara mal el rango de celdas
 
     def _norm(s):
         s = str(s or "").strip().lower()
