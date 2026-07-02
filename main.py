@@ -6130,18 +6130,16 @@ async def api_promociones_by_sku(request: Request, account_id: int, sku: str = "
         raise HTTPException(502)
     headers = {"Authorization": f"Bearer {token}"}
 
-    async with httpx.AsyncClient(timeout=60) as client:
-        try:
-            r = await client.get(
-                f"{ML_API_URL}/users/{acc['ml_user_id']}/items/search",
-                headers=headers, params={"seller_sku": sku, "status": "active"},
-            )
-        except Exception as e:
-            raise HTTPException(502, f"Error consultando ML: {str(e)[:200]}")
-        if r.status_code != 200:
-            raise HTTPException(502, f"ML respondió {r.status_code}: {r.text[:200]}")
-        item_ids = (r.json().get("results") or [])
-        if not item_ids:
+    sku_norm = sku.upper()
+    debug = []
+    async with httpx.AsyncClient(timeout=90) as client:
+        # OJO: el parámetro `seller_sku` de /users/{id}/items/search no es
+        # confiable (devuelve vacío para SKUs que sí existen). En cambio
+        # escaneamos TODAS las publicaciones activas (cacheado 5min, mismo
+        # scan que usa "Promociones disponibles") y filtramos por SKU acá,
+        # igual que hace el resto del panel (PVP, Base SKU, Stock).
+        all_item_ids = await fetch_all_seller_item_ids(client, headers, acc["ml_user_id"], debug)
+        if not all_item_ids:
             return {"sku": sku, "rows": [], "items_found": 0}
 
         # Multiget para título y SKU real de cada item/variación.
@@ -6166,8 +6164,18 @@ async def api_promociones_by_sku(request: Request, account_id: int, sku: str = "
                 except Exception:
                     pass
 
-        chunks = [item_ids[i:i + 20] for i in range(0, len(item_ids), 20)]
+        chunks = [all_item_ids[i:i + 20] for i in range(0, len(all_item_ids), 20)]
         await asyncio.gather(*[fetch_batch(c) for c in chunks])
+
+        # Filtramos por SKU exacto o variante (mismo criterio que Base SKU:
+        # "SKU-COLOR", "SKU-TALLE", etc. cuelgan del SKU base con un guion).
+        def _matches(item_sku: str) -> bool:
+            s = (item_sku or "").upper()
+            return s == sku_norm or s.startswith(sku_norm + "-")
+
+        item_ids = [iid for iid in all_item_ids if _matches(_extract_item_sku(info_map.get(iid)))]
+        if not item_ids:
+            return {"sku": sku, "rows": [], "items_found": 0}
 
         # Promos activas de cada item (mismo endpoint que usa el descubridor
         # general, pero acotado a los pocos items de este SKU).
