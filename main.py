@@ -2737,14 +2737,14 @@ async def api_clientes_list(request: Request, q: str = "", page: int = 1, page_s
     params["lim"], params["off"] = page_size, (page - 1) * page_size
     rows = db_fetchall(
         "SELECT id, razon_social, cuit, condicion_iva_id, categoria_fiscal, tipo_doc, nro_doc,"
-        " provincia, localidad, domicilio, nombre_fantasia, codigo"
+        " provincia, localidad, domicilio, codigo"
         f" FROM clientes WHERE {where} ORDER BY razon_social LIMIT :lim OFFSET :off", params)
     return {"items": rows, "total": total, "page": page, "page_size": page_size}
 
 
 _CLIENTE_EDITABLE_FIELDS = (
     "razon_social", "cuit", "condicion_iva_id", "provincia", "localidad",
-    "domicilio", "nombre_fantasia", "codigo",
+    "domicilio", "codigo",
 )
 
 
@@ -2759,31 +2759,31 @@ async def api_clientes_upsert(request: Request):
     razon = str(body.get("razon_social") or "").strip()
     import re
     cuit = re.sub(r"\D", "", str(body.get("cuit") or ""))
-    if not razon or len(cuit) != 11:
-        raise HTTPException(400, "Razón social y CUIT (11 dígitos) son obligatorios.")
+    provincia = str(body.get("provincia") or "").strip()
     try:
         cond = int(body["condicion_iva_id"]) if body.get("condicion_iva_id") not in (None, "") else None
     except (TypeError, ValueError):
         raise HTTPException(400, "Condición IVA inválida.")
+    if not razon or len(cuit) != 11 or cond is None or not provincia:
+        raise HTTPException(400, "Razón social, CUIT (11 dígitos), Condición IVA y Provincia son obligatorios.")
     params = {
         "o": owner, "rz": razon, "cond": cond,
         "cat": _CONDICION_IVA_LABEL.get(cond, ""), "cuit": cuit,
-        "pv": str(body.get("provincia") or "").strip(),
+        "pv": provincia,
         "loc": str(body.get("localidad") or "").strip(),
         "dom": str(body.get("domicilio") or "").strip(),
-        "nf": str(body.get("nombre_fantasia") or "").strip(),
         "cod": str(body.get("codigo") or "").strip(),
     }
     with engine.begin() as conn:
         row = conn.execute(text(
             "INSERT INTO clientes (owner_user_id, razon_social, condicion_iva_id, categoria_fiscal,"
-            " cuit, provincia, localidad, domicilio, nombre_fantasia, codigo, updated_at)"
-            " VALUES (:o,:rz,:cond,:cat,:cuit,:pv,:loc,:dom,:nf,:cod,NOW())"
+            " cuit, provincia, localidad, domicilio, codigo, updated_at)"
+            " VALUES (:o,:rz,:cond,:cat,:cuit,:pv,:loc,:dom,:cod,NOW())"
             " ON CONFLICT (owner_user_id, cuit) DO UPDATE SET"
             " razon_social=EXCLUDED.razon_social, condicion_iva_id=EXCLUDED.condicion_iva_id,"
             " categoria_fiscal=EXCLUDED.categoria_fiscal, provincia=EXCLUDED.provincia,"
             " localidad=EXCLUDED.localidad, domicilio=EXCLUDED.domicilio,"
-            " nombre_fantasia=EXCLUDED.nombre_fantasia, codigo=EXCLUDED.codigo, updated_at=NOW()"
+            " codigo=EXCLUDED.codigo, updated_at=NOW()"
             " RETURNING id"), params).fetchone()
     return {"ok": True, "id": row[0]}
 
@@ -2807,8 +2807,12 @@ async def api_clientes_patch(request: Request, cliente_id: int):
                     raise HTTPException(400, "CUIT inválido (11 dígitos).")
             elif f == "condicion_iva_id":
                 v = int(v) if v not in (None, "") else None
+                if v is None:
+                    raise HTTPException(400, "Condición IVA es obligatoria.")
             else:
                 v = str(v or "").strip()
+                if f in ("razon_social", "provincia") and not v:
+                    raise HTTPException(400, "Ese campo es obligatorio.")
             sets.append(f"{f}=:{f}")
             params[f] = v
     if "condicion_iva_id" in params:
@@ -2863,7 +2867,7 @@ async def api_clientes_template(request: Request):
     wb = Workbook()
     ws = wb.active
     ws.title = "Clientes"
-    headers = ["Razón social", "CUIT", "Condición IVA", "Provincia", "Localidad", "Domicilio", "Nombre fantasía", "Código"]
+    headers = ["CUIT", "Razón social", "Condición IVA", "Provincia", "Localidad", "Domicilio", "Código"]
     ws.append(headers)
     fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
     for col in range(1, len(headers) + 1):
@@ -2871,8 +2875,8 @@ async def api_clientes_template(request: Request):
         c.fill = fill
         c.font = Font(bold=True)
         c.alignment = Alignment(horizontal="center")
-    ws.append(["Empresa Ejemplo SRL", "30712345678", "RESPONSABLE INSCRIPTO", "Buenos Aires", "CABA", "Av. Siempre Viva 123", "Ejemplo", ""])
-    widths = [28, 16, 22, 18, 18, 26, 20, 12]
+    ws.append(["30712345678", "Empresa Ejemplo SRL", "RESPONSABLE INSCRIPTO", "Buenos Aires", "CABA", "Av. Siempre Viva 123", ""])
+    widths = [16, 28, 22, 18, 18, 26, 12]
     for i, w in enumerate(widths, start=1):
         ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = w
     buf = io.BytesIO()
@@ -2891,7 +2895,7 @@ async def api_clientes_export(request: Request):
     owner = _clientes_owner_id(get_user(user_id))
     rows = db_fetchall(
         "SELECT razon_social, cuit, condicion_iva_id, categoria_fiscal, provincia, localidad,"
-        " domicilio, nombre_fantasia, codigo FROM clientes WHERE owner_user_id=:o ORDER BY razon_social",
+        " domicilio, codigo FROM clientes WHERE owner_user_id=:o ORDER BY razon_social",
         {"o": owner})
     import io
     from openpyxl import Workbook
@@ -2900,7 +2904,7 @@ async def api_clientes_export(request: Request):
     wb = Workbook()
     ws = wb.active
     ws.title = "Clientes"
-    headers = ["Razón social", "CUIT", "Condición IVA", "Provincia", "Localidad", "Domicilio", "Nombre fantasía", "Código"]
+    headers = ["CUIT", "Razón social", "Condición IVA", "Provincia", "Localidad", "Domicilio", "Código"]
     ws.append(headers)
     fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
     for col in range(1, len(headers) + 1):
@@ -2910,10 +2914,10 @@ async def api_clientes_export(request: Request):
         c.alignment = Alignment(horizontal="center")
     for r in rows:
         cond_label = _CONDICION_IVA_LABEL.get(r.get("condicion_iva_id"), r.get("categoria_fiscal") or "")
-        ws.append([r.get("razon_social") or "", r.get("cuit") or "", cond_label,
+        ws.append([r.get("cuit") or "", r.get("razon_social") or "", cond_label,
                    r.get("provincia") or "", r.get("localidad") or "", r.get("domicilio") or "",
-                   r.get("nombre_fantasia") or "", r.get("codigo") or ""])
-    widths = [28, 16, 22, 18, 18, 26, 20, 12]
+                   r.get("codigo") or ""])
+    widths = [16, 28, 22, 18, 18, 26, 12]
     for i, w in enumerate(widths, start=1):
         ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = w
     buf = io.BytesIO()
@@ -2958,8 +2962,10 @@ async def api_clientes_import(request: Request):
             s = s.replace(a, b)
         return s
     WANT = {
-        "id": "dux_id", "cliente": "razon_social", "categoria fiscal": "categoria_fiscal",
-        "tipo documento": "tipo_doc", "numero documento": "nro_doc", "cuit/cuil": "cuit",
+        "id": "dux_id", "cliente": "razon_social", "razon social": "razon_social",
+        "categoria fiscal": "categoria_fiscal", "condicion iva": "categoria_fiscal",
+        "tipo documento": "tipo_doc", "numero documento": "nro_doc",
+        "cuit/cuil": "cuit", "cuit": "cuit",
         "correo electronico": "email", "provincia": "provincia", "localidad": "localidad",
         "domicilio": "domicilio", "telefono": "telefono", "celular": "celular",
         "nombre de fantasia": "nombre_fantasia", "codigo": "codigo",
@@ -2968,7 +2974,9 @@ async def api_clientes_import(request: Request):
     for row in ws.iter_rows(values_only=True):
         if not colmap:
             nrow = [_norm(c) for c in row]
-            if "cliente" in nrow and "categoria fiscal" in nrow:
+            is_dux = "cliente" in nrow and "categoria fiscal" in nrow
+            is_plantilla = "razon social" in nrow and "cuit" in nrow
+            if is_dux or is_plantilla:
                 for i, name in enumerate(nrow):
                     if name in WANT:
                         colmap[WANT[name]] = i

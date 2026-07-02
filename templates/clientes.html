@@ -76,32 +76,33 @@
     <h3>Alta y Actualización de Clientes</h3>
     <div class="row" style="flex-wrap:wrap;">
       <input type="file" id="file" accept=".xlsx,.xlsm" />
-      <button class="green" id="btn-import" onclick="doImport()">Importar desde Dux</button>
+      <button class="green" id="btn-import" onclick="doImport()">Importar</button>
       <a href="#" onclick="downloadExport(event)" style="padding:8px 14px;border:1px solid #1a8a5a;border-radius:8px;background:#fff;color:#1a8a5a;font-size:13px;text-decoration:none;">⬇ Descargar cargados</a>
       <a href="/api/clientes/template" download="plantilla_clientes.xlsx" style="padding:8px 14px;border:1px solid #005CFF;border-radius:8px;background:#fff;color:#005CFF;font-size:13px;text-decoration:none;">Descargar plantilla</a>
       <span id="imp-msg" style="font-size:12px;color:#888;"></span>
     </div>
     <div class="help-box">Subí el Excel de <b>Listado de Clientes</b> exportado desde Dux (se importan solo RI, Monotributo y Exento con CUIT) o la <b>plantilla</b> de esta página. Volver a importar <b>actualiza</b> los existentes (por CUIT).</div>
     <div class="row" style="margin-top:14px;flex-wrap:wrap;">
-      <input type="text" id="m-rz" placeholder="Razón social" style="width:220px;" />
-      <input type="text" id="m-cuit" placeholder="CUIT" style="width:140px;" />
+      <input type="text" id="m-cuit" placeholder="CUIT *" style="width:140px;" />
+      <input type="text" id="m-rz" placeholder="Razón social *" style="width:220px;" />
       <select id="m-cond" style="width:170px;">
         <option value="1">Resp. Inscripto</option>
         <option value="6">Monotributo</option>
         <option value="4">Exento</option>
+        <option value="5">Consumidor Final</option>
       </select>
-      <input type="text" id="m-pv" placeholder="Provincia" style="width:150px;" />
+      <input type="text" id="m-pv" placeholder="Provincia *" style="width:150px;" />
       <input type="text" id="m-loc" placeholder="Localidad" style="width:150px;" />
       <input type="text" id="m-dom" placeholder="Domicilio" style="width:180px;" />
-      <input type="text" id="m-nf" placeholder="Nombre fantasía" style="width:160px;" />
       <button class="primary" onclick="addOne()">Agregar / actualizar</button>
       <span id="msg" style="font-size:12px;color:#888;"></span>
     </div>
+    <div class="help-box">* Obligatorios: CUIT, Razón social, Condición IVA y Provincia. El resto es opcional.</div>
   </div>
 
   <div class="card">
     <div class="row" style="justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:8px;">
-      <input type="text" id="search" placeholder="Buscar por nombre, CUIT o fantasía..." style="width:300px;" oninput="onSearch()" />
+      <input type="text" id="search" placeholder="Buscar por nombre o CUIT..." style="width:300px;" oninput="onSearch()" />
       <div class="row" style="gap:10px;">
         <button class="btn-delete" style="border:1px solid #c0392b;border-radius:8px;padding:6px 12px;" onclick="deleteSelected()" id="btn-del-sel">Eliminar seleccionados (0)</button>
         <button class="btn-delete" style="border:1px solid #c0392b;border-radius:8px;padding:6px 12px;" onclick="deleteAll()">Eliminar TODO</button>
@@ -112,8 +113,8 @@
       <table>
         <thead><tr>
           <th style="width:30px;"><input type="checkbox" id="check-all" onchange="toggleAll(this)" /></th>
-          <th>Razón social</th><th>CUIT</th><th>Cond. IVA</th><th>Provincia</th>
-          <th>Localidad</th><th>Domicilio</th><th>Nombre fantasía</th><th style="text-align:right;">Acción</th>
+          <th>CUIT</th><th>Razón social</th><th>Cond. IVA</th><th>Provincia</th>
+          <th>Localidad</th><th>Domicilio</th><th style="text-align:right;">Acción</th>
         </tr></thead>
         <tbody id="tbody"></tbody>
       </table>
@@ -159,15 +160,14 @@ function renderList(){
   const tb = document.getElementById('tbody');
   tb.innerHTML = ITEMS.length ? ITEMS.map(c => `<tr>
       <td><input type="checkbox" class="row-check" data-id="${c.id}" ${SELECTED.has(c.id)?'checked':''} onchange="onRowCheck(this)" /></td>
-      <td><input class="cell-input" value="${esc(c.razon_social)}" onblur="saveField(${c.id},'razon_social',this.value,this)" onkeydown="if(event.key==='Enter')this.blur()" /></td>
       <td><input class="cell-input" value="${esc(c.cuit)}" style="width:120px;" onblur="saveField(${c.id},'cuit',this.value,this)" onkeydown="if(event.key==='Enter')this.blur()" /></td>
+      <td><input class="cell-input" value="${esc(c.razon_social)}" onblur="saveField(${c.id},'razon_social',this.value,this)" onkeydown="if(event.key==='Enter')this.blur()" /></td>
       <td>${ivaSelect(c.id, c.condicion_iva_id)}</td>
       <td><input class="cell-input" value="${esc(c.provincia)}" onblur="saveField(${c.id},'provincia',this.value,this)" onkeydown="if(event.key==='Enter')this.blur()" /></td>
       <td><input class="cell-input" value="${esc(c.localidad)}" onblur="saveField(${c.id},'localidad',this.value,this)" onkeydown="if(event.key==='Enter')this.blur()" /></td>
       <td><input class="cell-input" value="${esc(c.domicilio)}" onblur="saveField(${c.id},'domicilio',this.value,this)" onkeydown="if(event.key==='Enter')this.blur()" /></td>
-      <td><input class="cell-input" value="${esc(c.nombre_fantasia)}" onblur="saveField(${c.id},'nombre_fantasia',this.value,this)" onkeydown="if(event.key==='Enter')this.blur()" /></td>
       <td style="text-align:right;"><button class="btn-delete" onclick="delOne(${c.id})">Eliminar</button></td>
-    </tr>`).join('') : '<tr><td colspan="9" class="empty">Sin clientes. Importá el Excel de Dux o cargá uno manualmente para empezar.</td></tr>';
+    </tr>`).join('') : '<tr><td colspan="8" class="empty">Sin clientes. Importá el Excel de Dux o cargá uno manualmente para empezar.</td></tr>';
   updateBulkUI();
 }
 
@@ -278,9 +278,8 @@ async function addOne(){
     provincia: document.getElementById('m-pv').value.trim(),
     localidad: document.getElementById('m-loc').value.trim(),
     domicilio: document.getElementById('m-dom').value.trim(),
-    nombre_fantasia: document.getElementById('m-nf').value.trim(),
   };
-  if (!body.razon_social || !body.cuit) { msg.textContent = 'Completá razón social y CUIT.'; return; }
+  if (!body.razon_social || !body.cuit || !body.provincia) { msg.textContent = 'Completá CUIT, razón social y provincia.'; return; }
   try {
     const r = await fetch('/api/clientes', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -288,7 +287,7 @@ async function addOne(){
     const j = await r.json();
     if (!r.ok) throw new Error(j.detail || 'error');
     msg.textContent = 'Guardado.';
-    ['m-rz','m-cuit','m-pv','m-loc','m-dom','m-nf'].forEach(id => document.getElementById(id).value = '');
+    ['m-rz','m-cuit','m-pv','m-loc','m-dom'].forEach(id => document.getElementById(id).value = '');
     load();
   } catch(e){ msg.textContent = 'Error: ' + e.message; }
 }
