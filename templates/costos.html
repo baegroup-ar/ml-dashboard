@@ -14,6 +14,13 @@
     .nav-brand span { background: #EAF1FF; color: #005CFF; border-radius: 6px; padding: 2px 8px; font-size: 12px; }
     .nav-right { display: flex; align-items: center; gap: 10px; font-size: 13px; }
     .btn-nav { padding: 6px 14px; border: 1px solid #ddd; border-radius: 8px; background: #fff; font-size: 13px; cursor: pointer; text-decoration: none; color: #111; }
+    .nav-dropdown { position: relative; display: inline-block; }
+    .nav-dropdown .dropdown-trigger.active { color: #005CFF; font-weight: 500; border-color: #005CFF; }
+    .nav-dropdown .dropdown-menu { display: none; position: absolute; top: calc(100% + 4px); left: 0; background: #fff; border: 1px solid #ddd; border-radius: 8px; min-width: 170px; z-index: 100; box-shadow: 0 6px 16px rgba(0,0,0,0.10); padding: 6px; flex-direction: column; }
+    .nav-dropdown:hover .dropdown-menu { display: flex; }
+    .dropdown-menu a.dropdown-item, .dropdown-menu span.dropdown-item { display: block; padding: 8px 10px; font-size: 13px; color: #111; text-decoration: none; border-radius: 6px; white-space: nowrap; cursor: pointer; }
+    .dropdown-menu a.dropdown-item:hover { background: #f5f5f3; }
+    .dropdown-menu span.dropdown-item.active { color: #005CFF; font-weight: 500; background: #EAF1FF; cursor: default; }
     .btn-blue { background: #005CFF; color: #fff !important; border-color: #005CFF; }
     .btn-blue:hover { background: #2970e0 !important; }
     main { max-width: 1100px; margin: 0 auto; padding: 1.5rem; }
@@ -68,15 +75,22 @@
   </div>
   <div class="nav-right">
     {% if 'dashboard' in perms %}<a href="/dashboard" class="btn-nav">Dashboard</a>{% endif %}
-    <span style="color:#005CFF;font-weight:500;">Costos</span>
+    {% if 'costos' in perms or 'pvp' in perms or 'clientes' in perms or 'base_sku' in perms %}
+    <div class="nav-dropdown">
+      <span class="btn-nav dropdown-trigger active">Base de Datos ▾</span>
+      <div class="dropdown-menu">
+        <span class="dropdown-item active">Costos (CMV)</span>
+        {% if 'pvp' in perms %}<a href="/pvp" class="dropdown-item">PVP</a>{% endif %}
+        {% if 'clientes' in perms %}<a href="/clientes" class="dropdown-item">Clientes</a>{% endif %}
+        {% if 'base_sku' in perms %}<a href="/base-sku" class="dropdown-item">Base SKU</a>{% endif %}
+      </div>
+    </div>
+    {% endif %}
     {% if 'envios_flex' in perms %}<a href="/costos/envios-flex" class="btn-nav">Envíos Flex</a>{% endif %}
     {% if 'descuentos' in perms %}<a href="/descuentos" class="btn-nav">Descuentos</a>{% endif %}
     {% if 'ranking' in perms %}<a href="/ranking" class="btn-nav">Ranking</a>{% endif %}
     {% if 'etiquetas' in perms %}<a href="/etiquetas" class="btn-nav">Etiquetas</a>{% endif %}
     {% if 'stock' in perms %}<a href="/stock" class="btn-nav">Stock valorizado</a>{% endif %}
-    {% if 'base_sku' in perms %}<a href="/base-sku" class="btn-nav">Base SKU</a>{% endif %}
-    {% if 'pvp' in perms %}<a href="/pvp" class="btn-nav">PVP</a>{% endif %}
-    {% if 'clientes' in perms %}<a href="/clientes" class="btn-nav">Clientes</a>{% endif %}
     {% if 'publicaciones' in perms %}<a href="/publicaciones" class="btn-nav">Publicaciones</a>{% endif %}
     {% if 'fotos_videos' in perms %}<a href="/fotos-videos" class="btn-nav">Fotos y Videos</a>{% endif %}
     <span style="color:#888;">{{ user.name }}</span>
