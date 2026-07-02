@@ -70,28 +70,37 @@
     Tienda Bae App
   </div>
   <div class="nav-right">
-    {% if 'dashboard' in perms %}<a href="/dashboard" class="btn-nav">Dashboard</a>{% endif %}
-    {% if 'costos' in perms or 'pvp' in perms or 'clientes' in perms or 'base_sku' in perms %}
+    {% if 'dashboard' in perms or 'descuentos' in perms or 'ranking' in perms or 'etiquetas' in perms or 'publicaciones' in perms or 'fotos' in perms or 'videos' in perms %}
     <div class="nav-dropdown">
-      <span class="btn-nav dropdown-trigger">Base de Datos ▾</span>
+      <span class="btn-nav dropdown-trigger">Mercadolibre ▾</span>
+      <div class="dropdown-menu">
+        {% if 'dashboard' in perms %}<a href="/dashboard" class="dropdown-item">Dashboard</a>{% endif %}
+        {% if 'descuentos' in perms %}<a href="/descuentos" class="dropdown-item">Descuentos</a>{% endif %}
+        {% if 'ranking' in perms %}<a href="/ranking" class="dropdown-item">Ranking</a>{% endif %}
+        {% if 'etiquetas' in perms %}<a href="/etiquetas" class="dropdown-item">Etiquetas</a>{% endif %}
+        {% if 'publicaciones' in perms %}<a href="/publicaciones" class="dropdown-item">Publicaciones</a>{% endif %}
+        {% if 'fotos' in perms %}<a href="/fotos" class="dropdown-item">Fotos</a>{% endif %}
+        {% if 'videos' in perms %}<a href="/videos" class="dropdown-item">Videos</a>{% endif %}
+      </div>
+    </div>
+    {% endif %}
+    {% if 'costos' in perms or 'pvp' in perms or 'clientes' in perms or 'base_sku' in perms or 'envios_flex' in perms %}
+    <div class="nav-dropdown">
+      <span class="btn-nav dropdown-trigger active">Base de Datos ▾</span>
       <div class="dropdown-menu">
         {% if 'costos' in perms %}<a href="/costos" class="dropdown-item">Costos (CMV)</a>{% endif %}
         {% if 'pvp' in perms %}<a href="/pvp" class="dropdown-item">PVP</a>{% endif %}
         {% if 'clientes' in perms %}<a href="/clientes" class="dropdown-item">Clientes</a>{% endif %}
-        {% if 'base_sku' in perms %}<a href="/base-sku" class="dropdown-item">Base SKU</a>{% endif %}
+        {% if 'base_sku' in perms %}<a href="/base-sku" class="dropdown-item">SKUs</a>{% endif %}
+        <span class="dropdown-item active">Envíos Flex</span>
       </div>
     </div>
     {% endif %}
-    <span style="color:#005CFF;font-weight:500;">Envíos Flex</span>
-    {% if 'descuentos' in perms %}<a href="/descuentos" class="btn-nav">Descuentos</a>{% endif %}
-    {% if 'ranking' in perms %}<a href="/ranking" class="btn-nav">Ranking</a>{% endif %}
-    {% if 'etiquetas' in perms %}<a href="/etiquetas" class="btn-nav">Etiquetas</a>{% endif %}
     {% if 'stock' in perms %}<a href="/stock" class="btn-nav">Stock valorizado</a>{% endif %}
-    {% if 'publicaciones' in perms %}<a href="/publicaciones" class="btn-nav">Publicaciones</a>{% endif %}
-    {% if 'fotos_videos' in perms %}<a href="/fotos-videos" class="btn-nav">Fotos y Videos</a>{% endif %}
     <span style="color:#888;">{{ user.name }}</span>
     {% if user.is_admin %}<a href="/admin" style="font-size:12px;color:#005CFF;text-decoration:none;">Admin</a>{% endif %}
     <a href="/logout" class="btn-nav">Salir</a>
+
   </div>
 </nav>
 

@@ -1204,7 +1204,8 @@ PAGE_ROUTES = {
     "pvp": "/pvp",
     "clientes": "/clientes",
     "publicaciones": "/publicaciones",
-    "fotos_videos": "/fotos-videos",
+    "fotos": "/fotos",
+    "videos": "/videos",
 }
 
 
@@ -6594,18 +6595,35 @@ async def _get_all_fotos(account_id: int, acc: dict, force_refresh: bool = False
     return items
 
 
-@app.get("/fotos-videos", response_class=HTMLResponse)
-async def fotos_videos_page(request: Request):
+@app.get("/fotos", response_class=HTMLResponse)
+async def fotos_page(request: Request):
     user_id = get_session_user_id(request)
     if not user_id:
         return RedirectResponse("/")
     user = get_user(user_id)
-    _r = _page_redirect(user, "fotos_videos")
+    _r = _page_redirect(user, "fotos")
     if _r:
         return _r
     accounts = get_visible_accounts(user_id, user)
     accounts = await refresh_visible_account_nicknames(accounts)
-    return templates.TemplateResponse("fotos_videos.html", {
+    return templates.TemplateResponse("fotos.html", {
+        "request": request, "user": user, "accounts": accounts,
+        "perms": user_permissions(user),
+    })
+
+
+@app.get("/videos", response_class=HTMLResponse)
+async def videos_page(request: Request):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse("/")
+    user = get_user(user_id)
+    _r = _page_redirect(user, "videos")
+    if _r:
+        return _r
+    accounts = get_visible_accounts(user_id, user)
+    accounts = await refresh_visible_account_nicknames(accounts)
+    return templates.TemplateResponse("videos.html", {
         "request": request, "user": user, "accounts": accounts,
         "perms": user_permissions(user),
     })
@@ -9108,11 +9126,12 @@ PAGES = [
     ("ranking",     "Ranking por SKU"),
     ("etiquetas",   "Etiquetas"),
     ("stock",       "Stock valorizado"),
-    ("base_sku",    "Base SKU"),
+    ("base_sku",    "SKUs"),
     ("pvp",         "PVP"),
     ("clientes",    "Clientes"),
     ("publicaciones", "Publicaciones"),
-    ("fotos_videos", "Fotos y Videos"),
+    ("fotos", "Fotos"),
+    ("videos", "Videos"),
 ]
 PAGE_KEYS = {k for k, _ in PAGES}
 
