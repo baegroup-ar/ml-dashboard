@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Publicaciones · Panel BAE</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Cantarell:ital,wght@0,400;0,700;1,400&amp;display=swap" rel="stylesheet"><link rel="icon" type="image/png" href="/static/bae-favicon.png">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Cantarell', 'Inter', system-ui, sans-serif; background: #fff; color: #111; }
+    nav { background: #fff; border-bottom: 1px solid #e5e5e3; padding: 0 1.5rem; height: 56px; display: flex; align-items: center; justify-content: space-between; }
+    .nav-brand { font-weight: 600; font-size: 15px; display: flex; align-items: center; gap: 8px; }
+    .nav-right { display: flex; align-items: center; gap: 10px; font-size: 13px; flex-wrap: wrap; }
+    .btn-nav { padding: 6px 14px; border: 1px solid #ddd; border-radius: 8px; background: #fff; font-size: 13px; cursor: pointer; text-decoration: none; color: #111; }
+    main { max-width: 1400px; margin: 0 auto; padding: 1.5rem; }
+    h1 { font-size: 20px; font-weight: 600; margin-bottom: 6px; }
+    p.lead { font-size: 13px; color: #888; margin-bottom: 1.25rem; }
+    .card { background: #fff; border: 1px solid #e5e5e3; border-radius: 12px; padding: 1.25rem; margin-bottom: 1.25rem; }
+    .card h3 { font-size: 14px; font-weight: 600; color: #444; margin-bottom: 12px; }
+    .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .row label { font-size: 13px; color: #666; }
+    .row input[type=text], .row select { padding: 7px 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 13px; font-family: 'Inter', sans-serif; }
+    .row select { min-width: 160px; }
+    button.primary { padding: 8px 16px; border: none; border-radius: 8px; background: #005CFF; color: #fff; font-size: 13px; cursor: pointer; }
+    button.primary:disabled { background: #ccc; cursor: default; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 12px; }
+    th { padding: 9px 12px; text-align: left; color: #888; font-weight: 500; border-bottom: 1px solid #eee; font-size: 12px; white-space: nowrap; }
+    td { padding: 6px 12px; border-bottom: 1px solid #f0f0ee; color: #333; vertical-align: top; }
+    tbody tr:hover { background: #fafaf8; }
+    .empty { padding: 2rem; text-align: center; color: #aaa; font-size: 13px; }
+    .help-box { background: #EAF1FF; border-left: 3px solid #005CFF; padding: 10px 14px; font-size: 12px; color: #666; margin-top: 10px; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: 500; }
+    .badge.catalog { background: #FEF3E2; color: #b45309; }
+    .badge.own { background: #E6F4EA; color: #1a8a5a; }
+    .pager { display: flex; align-items: center; gap: 10px; justify-content: flex-end; margin-top: 12px; font-size: 13px; }
+    .pager button { padding: 5px 12px; border: 1px solid #ddd; border-radius: 8px; background: #fff; cursor: pointer; font-size: 13px; }
+    .pager button:disabled { opacity: .4; cursor: default; }
+    .no-accounts { text-align: center; padding: 4rem; color: #888; font-size: 14px; }
+    .cell-input { width: 100%; min-width: 100px; border: 1px solid transparent; background: transparent; font-size: 13px; font-family: 'Inter', sans-serif; padding: 5px 6px; border-radius: 6px; color: #333; }
+    .cell-input:hover { border-color: #ddd; }
+    .cell-input:focus { border-color: #005CFF; background: #fff; outline: none; }
+    .cell-input:disabled { background: #f5f5f3; color: #aaa; cursor: not-allowed; border-color: transparent; }
+    .msg { padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-top: 10px; }
+    .msg.ok { background: #e6f5ee; color: #1a8a5a; border: 1px solid #c5e9d8; }
+    .msg.err { background: #fce9e9; color: #c0392b; border: 1px solid #f5c6c6; }
+  </style>
+</head>
+<body>
+<nav>
+  <div class="nav-brand">
+    <img src="/static/bae-icon.png" alt="Tienda Bae" style="height:32px;width:auto;display:block;" />
+    Tienda Bae App
+  </div>
+  <div class="nav-right">
+    {% if 'dashboard' in perms %}<a href="/dashboard" class="btn-nav">Dashboard</a>{% endif %}
+    {% if 'costos' in perms %}<a href="/costos" class="btn-nav">Costos</a>{% endif %}
+    {% if 'descuentos' in perms %}<a href="/descuentos" class="btn-nav">Descuentos</a>{% endif %}
+    {% if 'ranking' in perms %}<a href="/ranking" class="btn-nav">Ranking</a>{% endif %}
+    {% if 'etiquetas' in perms %}<a href="/etiquetas" class="btn-nav">Etiquetas</a>{% endif %}
+    {% if 'stock' in perms %}<a href="/stock" class="btn-nav">Stock valorizado</a>{% endif %}
+    {% if 'base_sku' in perms %}<a href="/base-sku" class="btn-nav">Base SKU</a>{% endif %}
+    {% if 'pvp' in perms %}<a href="/pvp" class="btn-nav">PVP</a>{% endif %}
+    {% if 'clientes' in perms %}<a href="/clientes" class="btn-nav">Clientes</a>{% endif %}
+    <span style="color:#005CFF;font-weight:500;">Publicaciones</span>
+    <span style="color:#888;">{{ user.name }}</span>
+    {% if user.is_admin %}<a href="/admin" style="font-size:12px;color:#005CFF;text-decoration:none;">Admin</a>{% endif %}
+    <a href="/logout" class="btn-nav">Salir</a>
+  </div>
+</nav>
+
+<main>
+  <h1>Publicaciones</h1>
+  <p class="lead">Buscá por SKU y editá marca, modelo, SKU y descripción de tus publicaciones, una por una o en bloque.</p>
+
+  {% if accounts %}
+  <div class="card">
+    <div class="row">
+      <label>Cuenta ML:</label>
+      <select id="account-select">
+        {% set default_nick = 'TIENDA BAE' %}
+        {% set has_default = accounts | selectattr('nickname', 'equalto', default_nick) | list | length > 0 %}
+        {% for acc in accounts %}
+        <option value="{{ acc.id }}" {% if acc.nickname == default_nick or (not has_default and loop.first) %}selected{% endif %}>{{ acc.nickname }}</option>
+        {% endfor %}
+      </select>
+      <input type="text" id="sku-search-input" placeholder="SKU" style="width:220px;text-transform:uppercase;" onkeydown="if(event.key==='Enter')searchBySku()" />
+      <button class="primary" onclick="searchBySku()" id="btn-search">Buscar</button>
+      <span id="search-status" style="font-size:12px;color:#888;"></span>
+    </div>
+    <div class="help-box">
+      Las publicaciones de <b>catálogo</b> (badge naranja) comparten la ficha con otros vendedores: ML no deja editar marca, modelo ni descripción
+      desde acá. El <b>SKU</b> es tuyo y se puede editar siempre, salvo que la publicación tenga variantes (cada variante tiene su propio SKU).
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Edición masiva</h3>
+    <div class="row">
+      <select id="bulk-field">
+        <option value="brand">Marca</option>
+        <option value="model">Modelo</option>
+        <option value="sku">SKU</option>
+        <option value="description">Descripción</option>
+      </select>
+      <input type="text" id="bulk-value" placeholder="Nuevo valor" style="width:280px;" />
+      <button class="primary" onclick="applyBulk()" id="btn-bulk" disabled>Aplicar a seleccionados (0)</button>
+      <span id="bulk-msg" style="font-size:12px;color:#888;"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div style="overflow-x:auto;">
+      <table>
+        <thead><tr>
+          <th style="width:30px;"><input type="checkbox" id="select-all" onchange="toggleAll(this)" /></th>
+          <th>Publicación</th><th>SKU</th><th>Marca</th><th>Modelo</th><th style="min-width:220px;">Descripción</th>
+        </tr></thead>
+        <tbody id="tbody">
+          <tr><td colspan="6" class="empty">Buscá un SKU para ver sus publicaciones.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div id="pager" style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:10px;flex-wrap:wrap;"></div>
+    <div id="save-msg"></div>
+  </div>
+
+  {% else %}
+  <div class="no-accounts">
+    <p style="font-size:18px;font-weight:500;margin-bottom:8px;">No tenés cuentas conectadas</p>
+    <p>Conectá una cuenta desde el <a href="/dashboard" style="color:#005CFF;">Dashboard</a>.</p>
+  </div>
+  {% endif %}
+</main>
+
+<script>
+  const PAGE_SIZE = 15;
+  let pubItems = [];
+  let pubSelected = new Set();
+  let pubPage = 1;
+  const esc = v => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const accId = () => document.getElementById('account-select').value;
+
+  async function searchBySku() {
+    const sku = (document.getElementById('sku-search-input').value || '').trim();
+    const status = document.getElementById('search-status');
+    if(!sku) { status.textContent = 'Ingresá un SKU.'; return; }
+    document.getElementById('btn-search').disabled = true;
+    status.textContent = 'Buscando...';
+    document.getElementById('tbody').innerHTML = '<tr><td colspan="6" class="empty">Buscando...</td></tr>';
+    pubSelected = new Set();
+    pubPage = 1;
+    try {
+      const r = await fetch(`/api/publicaciones/${accId()}/by-sku?sku=${encodeURIComponent(sku)}`);
+      const j = await r.json();
+      if(!r.ok) throw new Error(j.detail || 'error');
+      pubItems = j.items || [];
+      status.textContent = pubItems.length ? `${pubItems.length} publicación(es) encontradas.` : 'No se encontraron publicaciones activas con ese SKU.';
+      render();
+    } catch(e) {
+      status.textContent = 'Error: ' + e.message;
+      pubItems = [];
+      render();
+    } finally {
+      document.getElementById('btn-search').disabled = false;
+    }
+  }
+
+  function fieldCell(it, field, value) {
+    const locked = field === 'sku' ? it.locked_sku : it.locked_attrs;
+    const title = locked
+      ? (field === 'sku' ? 'Tiene variantes: editá el SKU por variante en ML.' : 'Publicación de catálogo: campo bloqueado por ML.')
+      : '';
+    if(field === 'description') {
+      return `<textarea class="cell-input" rows="2" ${locked ? 'disabled' : ''} title="${title}"
+        onblur="saveField('${it.item_id}','description',this.value,this)">${esc(value)}</textarea>`;
+    }
+    return `<input class="cell-input" value="${esc(value)}" ${locked ? 'disabled' : ''} title="${title}"
+      onblur="saveField('${it.item_id}','${field}',this.value,this)" onkeydown="if(event.key==='Enter')this.blur()" />`;
+  }
+
+  function render() {
+    const tbody = document.getElementById('tbody');
+    const pager = document.getElementById('pager');
+    if(!pubItems.length) {
+      tbody.innerHTML = '<tr><td colspan="6" class="empty">Sin resultados.</td></tr>';
+      pager.innerHTML = '';
+      updateBulkUI();
+      return;
+    }
+    const totalPages = Math.max(1, Math.ceil(pubItems.length / PAGE_SIZE));
+    if(pubPage > totalPages) pubPage = totalPages;
+    if(pubPage < 1) pubPage = 1;
+    const start = (pubPage - 1) * PAGE_SIZE;
+    const pageItems = pubItems.slice(start, start + PAGE_SIZE);
+    tbody.innerHTML = pageItems.map(it => `<tr>
+      <td><input type="checkbox" data-id="${it.item_id}" ${pubSelected.has(it.item_id) ? 'checked' : ''} onchange="onRowCheck(this)" /></td>
+      <td>
+        <b>${it.permalink ? `<a href="${esc(it.permalink)}" target="_blank" style="color:#111;text-decoration:none;">${it.item_id}</a>` : it.item_id}</b>
+        <div style="color:#888;font-size:11px;max-width:260px;">${esc(it.title)}</div>
+        ${it.is_catalog ? '<span class="badge catalog">Catálogo</span>' : '<span class="badge own">Propia</span>'}
+        ${it.has_variations ? '<span class="badge" style="background:#eee;color:#666;margin-left:4px;">Con variantes</span>' : ''}
+      </td>
+      <td>${fieldCell(it, 'sku', it.sku)}</td>
+      <td>${fieldCell(it, 'brand', it.brand)}</td>
+      <td>${fieldCell(it, 'model', it.model)}</td>
+      <td>${fieldCell(it, 'description', it.description)}</td>
+    </tr>`).join('');
+    const from = start + 1;
+    const to = start + pageItems.length;
+    const prevDisabled = pubPage <= 1 ? 'disabled' : '';
+    const nextDisabled = pubPage >= totalPages ? 'disabled' : '';
+    pager.innerHTML = `
+      <span style="font-size:12px;color:#888;">${from}–${to} de ${pubItems.length}</span>
+      <div style="display:flex;align-items:center;gap:6px;">
+        <button onclick="goPage(1)" ${prevDisabled}>«</button>
+        <button onclick="goPage(${pubPage - 1})" ${prevDisabled}>‹ Anterior</button>
+        <span style="font-size:12px;color:#555;padding:0 6px;">Página ${pubPage} de ${totalPages}</span>
+        <button onclick="goPage(${pubPage + 1})" ${nextDisabled}>Siguiente ›</button>
+        <button onclick="goPage(${totalPages})" ${nextDisabled}>»</button>
+      </div>`;
+    updateBulkUI();
+  }
+
+  function goPage(n) { pubPage = n; render(); }
+
+  function onRowCheck(cb) {
+    const id = cb.getAttribute('data-id');
+    if(cb.checked) pubSelected.add(id); else pubSelected.delete(id);
+    updateBulkUI();
+  }
+  function toggleAll(cb) {
+    for(const it of pubItems) { if(cb.checked) pubSelected.add(it.item_id); else pubSelected.delete(it.item_id); }
+    document.querySelectorAll('#tbody input[type=checkbox]').forEach(c => { c.checked = cb.checked; });
+    updateBulkUI();
+  }
+  function updateBulkUI() {
+    const n = pubSelected.size;
+    const btn = document.getElementById('btn-bulk');
+    btn.textContent = `Aplicar a seleccionados (${n})`;
+    btn.disabled = n === 0;
+    const allCb = document.getElementById('select-all');
+    if(allCb) allCb.checked = pubItems.length > 0 && pubItems.every(it => pubSelected.has(it.item_id));
+  }
+
+  async function saveField(itemId, field, value, el) {
+    const msg = document.getElementById('save-msg');
+    try {
+      const r = await fetch(`/api/publicaciones/${accId()}/${itemId}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ field, value }) });
+      const j = await r.json().catch(() => ({}));
+      if(!r.ok) throw new Error(j.detail || 'error');
+      const it = pubItems.find(i => i.item_id === itemId);
+      if(it) it[field] = value;
+      if(el) { el.style.background = '#eafaf0'; setTimeout(() => { el.style.background = ''; }, 800); }
+    } catch(e) {
+      msg.innerHTML = `<div class="msg err">Error en ${itemId}: ${esc(e.message)}</div>`;
+    }
+  }
+
+  async function applyBulk() {
+    const field = document.getElementById('bulk-field').value;
+    const value = document.getElementById('bulk-value').value;
+    const selectedItems = pubItems.filter(it => pubSelected.has(it.item_id));
+    if(!selectedItems.length) return;
+    const isLocked = it => field === 'sku' ? it.locked_sku : it.locked_attrs;
+    const editable = selectedItems.filter(it => !isLocked(it));
+    const skipped = selectedItems.length - editable.length;
+    const ids = editable.map(it => it.item_id);
+    if(!ids.length) {
+      document.getElementById('bulk-msg').textContent = `Las ${selectedItems.length} seleccionadas están bloqueadas para ese campo.`;
+      return;
+    }
+    if(!confirm(`¿Aplicar "${value}" a ${ids.length} publicación(es)?${skipped ? ` (${skipped} bloqueada(s) se van a omitir)` : ''}`)) return;
+    const msg = document.getElementById('bulk-msg');
+    msg.textContent = 'Aplicando...';
+    document.getElementById('btn-bulk').disabled = true;
+    try {
+      const r = await fetch(`/api/publicaciones/${accId()}/bulk-edit`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ field, value, item_ids: ids }) });
+      const j = await r.json();
+      if(!r.ok) throw new Error(j.detail || 'error');
+      const ok = (j.results || []).filter(x => x.ok).length;
+      const fail = (j.results || []).filter(x => !x.ok).length;
+      msg.textContent = `Listo: ${ok} actualizada(s)${fail ? `, ${fail} con error` : ''}${skipped ? `, ${skipped} bloqueada(s) omitida(s)` : ''}.`;
+      for(const res of (j.results || [])) {
+        if(res.ok) { const it = pubItems.find(i => i.item_id === res.item_id); if(it) it[field] = value; }
+      }
+      render();
+    } catch(e) {
+      msg.textContent = 'Error: ' + e.message;
+    } finally {
+      document.getElementById('btn-bulk').disabled = pubSelected.size === 0;
+    }
+  }
+</script>
+</body>
+</html>

@@ -1196,6 +1196,8 @@ PAGE_ROUTES = {
     "stock": "/stock",
     "base_sku": "/base-sku",
     "pvp": "/pvp",
+    "clientes": "/clientes",
+    "publicaciones": "/publicaciones",
 }
 
 
@@ -6237,6 +6239,223 @@ async def api_promociones_by_sku(request: Request, account_id: int, sku: str = "
     return {"sku": sku, "rows": rows, "items_found": len(item_ids)}
 
 
+# ─────────────────────────── Publicaciones (edición de atributos) ───────────────────────────
+# Permite editar marca/modelo/SKU/descripción por SKU, en bloque. Las
+# publicaciones de CATÁLOGO tienen la ficha (marca/modelo/descripción)
+# compartida entre vendedores y ML no deja tocarla vía API — se marcan y
+# se bloquean en la UI. El SKU es un dato propio del vendedor, así que se
+# puede editar siempre que la publicación no tenga variantes (cada variante
+# tiene su propio SKU y no lo tocamos automáticamente para no romper el
+# mapeo de variantes).
+PUBLICACIONES_ATTRS = "id,title,seller_sku,attributes,variations,catalog_listing,catalog_product_id,permalink,status"
+
+
+def _pub_attr(info: dict, attr_id: str) -> str:
+    for attr in (info.get("attributes") or []):
+        if isinstance(attr, dict) and attr.get("id") == attr_id:
+            return (attr.get("value_name") or "").strip()
+    return ""
+
+
+@app.get("/publicaciones", response_class=HTMLResponse)
+async def publicaciones_page(request: Request):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse("/")
+    user = get_user(user_id)
+    _r = _page_redirect(user, "publicaciones")
+    if _r:
+        return _r
+    accounts = get_visible_accounts(user_id, user)
+    accounts = await refresh_visible_account_nicknames(accounts)
+    return templates.TemplateResponse("publicaciones.html", {
+        "request": request, "user": user, "accounts": accounts,
+        "perms": user_permissions(user),
+    })
+
+
+@app.get("/api/publicaciones/{account_id}/by-sku")
+async def api_publicaciones_by_sku(request: Request, account_id: int, sku: str = ""):
+    """Busca publicaciones por SKU (exacto o variante SKU-ALGO) para editar
+    marca/modelo/SKU/descripción en bloque. Igual criterio de búsqueda que
+    Promociones por SKU: escanea las publicaciones activas (cacheado 5min)
+    y filtra localmente, porque el filtro seller_sku de ML no es confiable."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    sku = (sku or "").strip()
+    if not sku:
+        raise HTTPException(400, "Falta el SKU a buscar.")
+    sku_norm = sku.upper()
+    token = await refresh_ml_token(account_id)
+    if not token:
+        raise HTTPException(502)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    debug = []
+    async with httpx.AsyncClient(timeout=90) as client:
+        all_item_ids = await fetch_all_seller_item_ids(client, headers, acc["ml_user_id"], debug)
+        if not all_item_ids:
+            return {"sku": sku, "items": []}
+
+        info_map: dict = {}
+        mget_sem = asyncio.Semaphore(20)
+
+        async def fetch_batch(chunk):
+            async with mget_sem:
+                try:
+                    rb = await client.get(
+                        f"{ML_API_URL}/items", headers=headers,
+                        params={"ids": ",".join(chunk), "attributes": PUBLICACIONES_ATTRS})
+                    if rb.status_code != 200:
+                        return
+                    for entry in rb.json():
+                        if not isinstance(entry, dict):
+                            continue
+                        body = entry.get("body") if entry.get("code") == 200 else None
+                        if isinstance(body, dict) and body.get("id"):
+                            info_map[body["id"]] = body
+                except Exception:
+                    pass
+
+        chunks = [all_item_ids[i:i + 20] for i in range(0, len(all_item_ids), 20)]
+        await asyncio.gather(*[fetch_batch(c) for c in chunks])
+
+        def _matches(item_sku: str) -> bool:
+            s = (item_sku or "").upper()
+            return s == sku_norm or s.startswith(sku_norm + "-")
+
+        matched_ids = [iid for iid in all_item_ids if _matches(_extract_item_sku(info_map.get(iid)))]
+        if not matched_ids:
+            return {"sku": sku, "items": []}
+
+        # Descripción: endpoint aparte por item.
+        desc_map: dict = {}
+        desc_sem = asyncio.Semaphore(20)
+
+        async def fetch_desc(item_id):
+            async with desc_sem:
+                try:
+                    rd = await client.get(f"{ML_API_URL}/items/{item_id}/description", headers=headers)
+                    if rd.status_code == 200:
+                        desc_map[item_id] = (rd.json().get("plain_text") or "").strip()
+                except Exception:
+                    pass
+
+        await asyncio.gather(*[fetch_desc(i) for i in matched_ids])
+
+    items = []
+    for item_id in matched_ids:
+        info = info_map.get(item_id) or {}
+        has_variations = bool(info.get("variations"))
+        is_catalog = bool(info.get("catalog_listing") or info.get("catalog_product_id"))
+        items.append({
+            "item_id": item_id,
+            "sku": _extract_item_sku(info),
+            "title": info.get("title") or "",
+            "brand": _pub_attr(info, "BRAND"),
+            "model": _pub_attr(info, "MODEL"),
+            "description": desc_map.get(item_id, ""),
+            "permalink": info.get("permalink") or "",
+            "is_catalog": is_catalog,
+            "has_variations": has_variations,
+            "locked_sku": has_variations,
+            "locked_attrs": is_catalog,  # marca / modelo / descripción
+        })
+    items.sort(key=lambda x: x["item_id"])
+    return {"sku": sku, "items": items}
+
+
+async def _pub_update_field(client, headers, item_id, field, value):
+    """PUT a ML para un solo campo. Devuelve (ok, error_str|None)."""
+    try:
+        if field == "description":
+            r = await client.put(
+                f"{ML_API_URL}/items/{item_id}/description",
+                headers=headers, json={"plain_text": value})
+        elif field in ("brand", "model"):
+            attr_id = "BRAND" if field == "brand" else "MODEL"
+            r = await client.put(
+                f"{ML_API_URL}/items/{item_id}",
+                headers=headers, json={"attributes": [{"id": attr_id, "value_name": value}]})
+        elif field == "sku":
+            r = await client.put(
+                f"{ML_API_URL}/items/{item_id}",
+                headers=headers, json={"attributes": [{"id": "SELLER_SKU", "value_name": value}]})
+        else:
+            return False, f"Campo desconocido: {field}"
+    except Exception as e:
+        return False, str(e)[:300]
+    if r.status_code in (200, 201):
+        return True, None
+    return False, f"HTTP {r.status_code}: {r.text[:300]}"
+
+
+@app.patch("/api/publicaciones/{account_id}/{item_id}")
+async def api_publicaciones_patch(request: Request, account_id: int, item_id: str):
+    """Edita un campo de una publicación individual."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    if not _account_for_user(account_id, user_id):
+        raise HTTPException(404)
+    body = await request.json()
+    field = (body.get("field") or "").strip()
+    value = body.get("value")
+    if field not in ("sku", "brand", "model", "description"):
+        raise HTTPException(400, "Campo inválido.")
+    if value is None:
+        raise HTTPException(400, "Falta el valor.")
+    token = await refresh_ml_token(account_id)
+    if not token:
+        raise HTTPException(502)
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    async with httpx.AsyncClient(timeout=30) as client:
+        ok, err = await _pub_update_field(client, headers, item_id, field, value)
+    if not ok:
+        raise HTTPException(502, err or "Error al actualizar en ML.")
+    return {"ok": True}
+
+
+@app.post("/api/publicaciones/{account_id}/bulk-edit")
+async def api_publicaciones_bulk_edit(request: Request, account_id: int):
+    """Edita un campo en bloque para varias publicaciones. Body:
+    { field: 'brand'|'model'|'sku'|'description', value: str, item_ids: [...] }"""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    if not _account_for_user(account_id, user_id):
+        raise HTTPException(404)
+    body = await request.json()
+    field = (body.get("field") or "").strip()
+    value = body.get("value")
+    item_ids = [str(i).strip() for i in (body.get("item_ids") or []) if str(i).strip()]
+    if field not in ("sku", "brand", "model", "description"):
+        raise HTTPException(400, "Campo inválido.")
+    if value is None:
+        raise HTTPException(400, "Falta el valor.")
+    if not item_ids:
+        raise HTTPException(400, "No se indicaron publicaciones.")
+    token = await refresh_ml_token(account_id)
+    if not token:
+        raise HTTPException(502)
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    results = []
+    async with httpx.AsyncClient(timeout=60) as client:
+        sem = asyncio.Semaphore(8)
+
+        async def one(iid):
+            async with sem:
+                ok, err = await _pub_update_field(client, headers, iid, field, value)
+                return {"item_id": iid, "ok": ok, "error": err}
+
+        results = await asyncio.gather(*[one(iid) for iid in item_ids])
+    return {"results": results, "ok": True}
+
+
 @app.get("/api/promociones/{account_id}/{promotion_id}/items")
 async def api_promociones_items(
     request: Request, account_id: int, promotion_id: str,
@@ -8628,6 +8847,7 @@ PAGES = [
     ("base_sku",    "Base SKU"),
     ("pvp",         "PVP"),
     ("clientes",    "Clientes"),
+    ("publicaciones", "Publicaciones"),
 ]
 PAGE_KEYS = {k for k, _ in PAGES}
 
