@@ -6253,7 +6253,7 @@ async def api_promociones_by_sku(request: Request, account_id: int, sku: str = "
 # puede editar siempre que la publicación no tenga variantes (cada variante
 # tiene su propio SKU y no lo tocamos automáticamente para no romper el
 # mapeo de variantes).
-PUBLICACIONES_ATTRS = "id,title,seller_sku,attributes,variations,catalog_listing,catalog_product_id,permalink,status"
+PUBLICACIONES_ATTRS = "id,title,seller_sku,attributes,variations,catalog_listing,catalog_product_id,permalink,status,family_name"
 
 
 def _pub_attr(info: dict, attr_id: str) -> str:
@@ -6328,6 +6328,11 @@ async def _fetch_publicaciones_items(client, headers, item_ids: list) -> list:
         info = info_map.get(item_id) or {}
         has_variations = bool(info.get("variations"))
         is_catalog = bool(info.get("catalog_listing") or info.get("catalog_product_id"))
+        # ML también bloquea el TÍTULO (no marca/modelo/descripción) cuando el
+        # item tiene `family_name`: pertenece a una familia de variaciones
+        # (agrupador de "Soporte Tv 32/40/50..." con título compartido), aunque
+        # no sea de catálogo ni tenga `variations` cargadas en este payload.
+        has_family = bool(info.get("family_name"))
         items.append({
             "item_id": item_id,
             "sku": _extract_item_sku(info),
@@ -6340,6 +6345,7 @@ async def _fetch_publicaciones_items(client, headers, item_ids: list) -> list:
             "has_variations": has_variations,
             "locked_sku": has_variations,
             "locked_attrs": is_catalog,  # marca / modelo / descripción
+            "locked_title": is_catalog or has_family,
         })
     items.sort(key=lambda x: x["item_id"])
     return items

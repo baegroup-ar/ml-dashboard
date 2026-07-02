@@ -214,11 +214,20 @@
     render();
   }
 
+  function fieldLocked(it, field) {
+    if(field === 'sku') return it.locked_sku;
+    if(field === 'title') return it.locked_title;
+    return it.locked_attrs;
+  }
+  function fieldLockedReason(it, field) {
+    if(field === 'sku') return 'Tiene variantes: editá el SKU por variante en ML.';
+    if(field === 'title' && it.locked_title && !it.is_catalog) return 'Pertenece a una familia de variaciones: ML no deja editar el título.';
+    return 'Publicación de catálogo: campo bloqueado por ML.';
+  }
+
   function fieldCell(it, field, value) {
-    const locked = field === 'sku' ? it.locked_sku : it.locked_attrs;
-    const title = locked
-      ? (field === 'sku' ? 'Tiene variantes: editá el SKU por variante en ML.' : 'Publicación de catálogo: campo bloqueado por ML.')
-      : '';
+    const locked = fieldLocked(it, field);
+    const title = locked ? fieldLockedReason(it, field) : '';
     if(field === 'description') {
       return `<textarea class="cell-input" rows="2" ${locked ? 'disabled' : ''} title="${title}"
         onblur="saveField('${it.item_id}','description',this.value,this)">${esc(value)}</textarea>`;
@@ -340,8 +349,7 @@
     const value = bulkValue();
     const selectedItems = ALL_ITEMS.filter(it => pubSelected.has(it.item_id));
     if(!selectedItems.length) return;
-    const isLocked = it => field === 'sku' ? it.locked_sku : it.locked_attrs;
-    const editable = selectedItems.filter(it => !isLocked(it));
+    const editable = selectedItems.filter(it => !fieldLocked(it, field));
     const skipped = selectedItems.length - editable.length;
     const ids = editable.map(it => it.item_id);
     if(!ids.length) {
