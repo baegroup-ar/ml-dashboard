@@ -6328,10 +6328,12 @@ async def _fetch_publicaciones_items(client, headers, item_ids: list) -> list:
         info = info_map.get(item_id) or {}
         has_variations = bool(info.get("variations"))
         is_catalog = bool(info.get("catalog_listing") or info.get("catalog_product_id"))
-        # ML también bloquea el TÍTULO (no marca/modelo/descripción) cuando el
-        # item tiene `family_name`: pertenece a una familia de variaciones
-        # (agrupador de "Soporte Tv 32/40/50..." con título compartido), aunque
-        # no sea de catálogo ni tenga `variations` cargadas en este payload.
+        # `family_name` (agrupador de variaciones) también puede bloquear el
+        # título en ML, pero en la práctica está poblado en la MAYORÍA de las
+        # publicaciones (ML agrupa por similitud, no solo variantes reales), así
+        # que bloquear por esto dejaba casi todo gris. Lo mandamos como aviso
+        # (no bloqueo) y dejamos que el intento real contra ML confirme si se
+        # puede o no — el error de ML ya se muestra igual si lo rechaza.
         has_family = bool(info.get("family_name"))
         items.append({
             "item_id": item_id,
@@ -6343,9 +6345,10 @@ async def _fetch_publicaciones_items(client, headers, item_ids: list) -> list:
             "permalink": info.get("permalink") or "",
             "is_catalog": is_catalog,
             "has_variations": has_variations,
+            "has_family": has_family,
             "locked_sku": has_variations,
             "locked_attrs": is_catalog,  # marca / modelo / descripción
-            "locked_title": is_catalog or has_family,
+            "locked_title": is_catalog,
         })
     items.sort(key=lambda x: x["item_id"])
     return items

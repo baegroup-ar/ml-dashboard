@@ -221,18 +221,22 @@
   }
   function fieldLockedReason(it, field) {
     if(field === 'sku') return 'Tiene variantes: editá el SKU por variante en ML.';
-    if(field === 'title' && it.locked_title && !it.is_catalog) return 'Pertenece a una familia de variaciones: ML no deja editar el título.';
     return 'Publicación de catálogo: campo bloqueado por ML.';
   }
 
   function fieldCell(it, field, value) {
     const locked = fieldLocked(it, field);
-    const title = locked ? fieldLockedReason(it, field) : '';
+    // El título con family_name a veces lo bloquea ML y a veces no (depende
+    // de si la familia comparte título) — no lo trabamos, solo avisamos.
+    const familyWarn = field === 'title' && !locked && it.has_family;
+    const title = locked ? fieldLockedReason(it, field)
+      : (familyWarn ? 'Pertenece a una familia de variaciones: ML puede rechazar el cambio de título.' : '');
     if(field === 'description') {
       return `<textarea class="cell-input" rows="2" ${locked ? 'disabled' : ''} title="${title}"
         onblur="saveField('${it.item_id}','description',this.value,this)">${esc(value)}</textarea>`;
     }
-    return `<input class="cell-input" value="${esc(value)}" ${locked ? 'disabled' : ''} title="${title}"
+    const warnStyle = familyWarn ? 'border-color:#f0c36d;' : '';
+    return `<input class="cell-input" style="${warnStyle}" value="${esc(value)}" ${locked ? 'disabled' : ''} title="${title}"
       onblur="saveField('${it.item_id}','${field}',this.value,this)" onkeydown="if(event.key==='Enter')this.blur()" />`;
   }
 
