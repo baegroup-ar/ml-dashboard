@@ -274,6 +274,7 @@
         </tbody>
       </table>
     </div>
+    <div id="sku-pager" style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:10px;flex-wrap:wrap;"></div>
     <div id="sku-remove-msg"></div>
   </div>
 
@@ -1315,8 +1316,21 @@
   // ── PROMOCIONES POR SKU ──
   let skuRows = [];
   let skuSelected = new Set(); // claves "item_id|promotion_id"
+  let skuExpanded = new Set(); // item_id desplegados
+  let skuPage = 1;
+  const SKU_PAGE_SIZE = 15;
   const skuRowKey = r => `${r.item_id}|${r.promotion_id}`;
   const SKU_STATUS_LABEL = { started: 'Activa', pending: 'Programada', programmed: 'Programada', scheduled: 'Programada' };
+  const skuEsc = v => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  function groupSkuRows() {
+    const map = new Map();
+    for(const r of skuRows) {
+      if(!map.has(r.item_id)) map.set(r.item_id, { item_id: r.item_id, sku: r.sku, title: r.title, promos: [] });
+      map.get(r.item_id).promos.push(r);
+    }
+    return Array.from(map.values()).sort((a, b) => (a.item_id || '').localeCompare(b.item_id || ''));
+  }
 
   async function searchBySku() {
     const sku = (document.getElementById('sku-search-input').value || '').trim();
@@ -1328,6 +1342,8 @@
     status.textContent = 'Buscando...';
     tbody.innerHTML = `<tr><td colspan="7" class="empty">Buscando...</td></tr>`;
     skuSelected = new Set();
+    skuExpanded = new Set();
+    skuPage = 1;
     try {
       const r = await fetch(`/api/promociones/${currentAccountId}/by-sku?sku=${encodeURIComponent(sku)}`);
       const j = await r.json();
@@ -1350,39 +1366,106 @@
     }
   }
 
-  function renderSkuRows() {
-    const tbody = document.getElementById('sku-tbody');
-    tbody.innerHTML = skuRows.length ? skuRows.map(row => {
+  function skuBadge(status) {
+    const label = SKU_STATUS_LABEL[(status||'').toLowerCase()] || status || '—';
+    const cls = (status||'').toLowerCase() === 'started' ? 'ok' : 'gray';
+    return `<span class="badge ${cls}">${label}</span>`;
+  }
+
+  function renderSkuGroup(g) {
+    const expanded = skuExpanded.has(g.item_id);
+    const groupChecked = g.promos.every(p => skuSelected.has(skuRowKey(p)));
+    const pcts = g.promos.map(p => p.discount_pct).filter(v => v != null);
+    const pctSummary = pcts.length ? (Math.min(...pcts) === Math.max(...pcts) ? `${pcts[0]}%` : `${Math.min(...pcts)}%–${Math.max(...pcts)}%`) : '—';
+    const chevron = expanded ? '▾' : '▸';
+    const mainRow = `<tr style="background:#fbfbfa;">
+      <td><input type="checkbox" data-group="${g.item_id}" ${groupChecked ? 'checked' : ''} onchange="onSkuGroupCheck(this)" /></td>
+      <td style="cursor:pointer;" onclick="toggleSkuGroup('${g.item_id}')">
+        <span style="display:inline-block;width:14px;color:#888;">${chevron}</span><b>${g.item_id}</b>
+        ${g.title ? `<div style="color:#888;font-size:11px;margin-left:20px;">${skuEsc(g.title)}</div>` : ''}
+      </td>
+      <td>${skuEsc(g.sku) || '—'}</td>
+      <td colspan="3" style="color:#888;cursor:pointer;" onclick="toggleSkuGroup('${g.item_id}')">${g.promos.length} promoción${g.promos.length === 1 ? '' : 'es'} activa${g.promos.length === 1 ? '' : 's'}</td>
+      <td class="num">${pctSummary}</td>
+    </tr>`;
+    if(!expanded) return mainRow;
+    const subRows = g.promos.map(row => {
       const key = skuRowKey(row);
       const checked = skuSelected.has(key) ? 'checked' : '';
-      const statusLabel = SKU_STATUS_LABEL[(row.status||'').toLowerCase()] || row.status || '—';
-      const badgeClass = (row.status||'').toLowerCase() === 'started' ? 'ok' : 'gray';
-      return `<tr>
+      return `<tr style="background:#fafaf8;">
         <td><input type="checkbox" data-key="${key}" ${checked} onchange="onSkuRowCheck(this)" /></td>
-        <td><b>${row.item_id}</b>${row.title ? '<div style="color:#888;font-size:11px;">'+row.title.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))+'</div>' : ''}</td>
-        <td>${row.sku || '—'}</td>
-        <td>${(row.name||row.promotion_id||'').toString().replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}</td>
-        <td>${row.promotion_type || '—'}</td>
-        <td><span class="badge ${badgeClass}">${statusLabel}</span></td>
+        <td style="color:#bbb;padding-left:34px;">↳</td>
+        <td></td>
+        <td>${skuEsc(row.name || row.promotion_id)}</td>
+        <td>${skuEsc(row.promotion_type) || '—'}</td>
+        <td>${skuBadge(row.status)}</td>
         <td class="num">${row.discount_pct != null ? row.discount_pct + '%' : '—'}</td>
       </tr>`;
-    }).join('') : '<tr><td colspan="7" class="empty">Sin resultados.</td></tr>';
+    }).join('');
+    return mainRow + subRows;
+  }
+
+  function renderSkuRows() {
+    const tbody = document.getElementById('sku-tbody');
+    const pager = document.getElementById('sku-pager');
+    const groups = groupSkuRows();
+    if(!groups.length) {
+      tbody.innerHTML = '<tr><td colspan="7" class="empty">Sin resultados.</td></tr>';
+      pager.innerHTML = '';
+      updateSkuSelectionUI();
+      return;
+    }
+    const totalPages = Math.max(1, Math.ceil(groups.length / SKU_PAGE_SIZE));
+    if(skuPage > totalPages) skuPage = totalPages;
+    if(skuPage < 1) skuPage = 1;
+    const start = (skuPage - 1) * SKU_PAGE_SIZE;
+    const pageGroups = groups.slice(start, start + SKU_PAGE_SIZE);
+    tbody.innerHTML = pageGroups.map(renderSkuGroup).join('');
+    const from = start + 1;
+    const to = start + pageGroups.length;
+    const prevDisabled = skuPage <= 1 ? 'disabled' : '';
+    const nextDisabled = skuPage >= totalPages ? 'disabled' : '';
+    pager.innerHTML = `
+      <span style="font-size:12px;color:#888;">${from}–${to} de ${groups.length} publicaciones</span>
+      <div style="display:flex;align-items:center;gap:6px;">
+        <button onclick="goSkuPage(1)" ${prevDisabled} style="padding:5px 10px;border:1px solid #ddd;border-radius:6px;background:#fff;font-size:12px;cursor:pointer;">«</button>
+        <button onclick="goSkuPage(${skuPage - 1})" ${prevDisabled} style="padding:5px 10px;border:1px solid #ddd;border-radius:6px;background:#fff;font-size:12px;cursor:pointer;">‹ Anterior</button>
+        <span style="font-size:12px;color:#555;padding:0 6px;">Página ${skuPage} de ${totalPages}</span>
+        <button onclick="goSkuPage(${skuPage + 1})" ${nextDisabled} style="padding:5px 10px;border:1px solid #ddd;border-radius:6px;background:#fff;font-size:12px;cursor:pointer;">Siguiente ›</button>
+        <button onclick="goSkuPage(${totalPages})" ${nextDisabled} style="padding:5px 10px;border:1px solid #ddd;border-radius:6px;background:#fff;font-size:12px;cursor:pointer;">»</button>
+      </div>`;
     updateSkuSelectionUI();
+  }
+
+  function goSkuPage(n) {
+    skuPage = n;
+    renderSkuRows();
+  }
+
+  function toggleSkuGroup(itemId) {
+    if(skuExpanded.has(itemId)) skuExpanded.delete(itemId); else skuExpanded.add(itemId);
+    renderSkuRows();
   }
 
   function onSkuRowCheck(cb) {
     const key = cb.getAttribute('data-key');
     if(cb.checked) skuSelected.add(key); else skuSelected.delete(key);
-    updateSkuSelectionUI();
+    renderSkuRows();
+  }
+  function onSkuGroupCheck(cb) {
+    const itemId = cb.getAttribute('data-group');
+    const group = groupSkuRows().find(g => g.item_id === itemId);
+    if(!group) return;
+    for(const row of group.promos) { if(cb.checked) skuSelected.add(skuRowKey(row)); else skuSelected.delete(skuRowKey(row)); }
+    renderSkuRows();
   }
   function toggleSkuAll(cb) {
     for(const row of skuRows) { if(cb.checked) skuSelected.add(skuRowKey(row)); else skuSelected.delete(skuRowKey(row)); }
-    document.querySelectorAll('#sku-tbody input[type=checkbox]').forEach(c => { c.checked = cb.checked; });
-    updateSkuSelectionUI();
+    renderSkuRows();
   }
   function updateSkuSelectionUI() {
     const n = skuSelected.size;
-    document.getElementById('sku-selected-info').textContent = n ? `${n} seleccionada(s)` : '';
+    document.getElementById('sku-selected-info').textContent = n ? `${n} promoción(es) seleccionada(s)` : '';
     document.getElementById('btn-sku-remove').disabled = n === 0;
     const allCb = document.getElementById('sku-select-all');
     if(allCb) allCb.checked = skuRows.length > 0 && skuRows.every(r => skuSelected.has(skuRowKey(r)));
