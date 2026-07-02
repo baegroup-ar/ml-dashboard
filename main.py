@@ -2756,6 +2756,7 @@ async def api_clientes_import(request: Request):
         raise HTTPException(400, "Falta el archivo")
     content = await upload.read()
     import io
+    import re
     from openpyxl import load_workbook
     try:
         # Carga COMPLETA (no read_only): el export de Dux declara mal el rango de
