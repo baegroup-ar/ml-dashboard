@@ -6090,8 +6090,16 @@ def _extract_item_sku(info: Optional[dict]) -> str:
 def _by_sku_offer_pct(offer: dict) -> Optional[float]:
     """Extracción best-effort del % de descuento de una oferta de promo,
     para mostrar en la vista 'Promociones por SKU' (no exige la precisión
-    del flujo de aplicación, solo referencia)."""
-    for k in ("discount_percentage", "percentage_off", "meli_percentage", "seller_percentage"):
+    del flujo de aplicación, solo referencia).
+
+    OJO: NO usar `meli_percentage` (ni similares) como primera opción — ese
+    campo es el APORTE de ML en promos co-fondeadas (SMART), no el descuento
+    del vendedor. Priorizamos los campos que representan lo que pone el
+    vendedor (`seller_percentage` y variantes, `discount_percentage`) y
+    dejamos el precio (que en el payload de items ya viene neto sin el aporte
+    de ML) como respaldo antes de tocar meli_percentage."""
+    for k in ("seller_percentage", "seller_min_discount_percentage", "min_seller_discount_percentage",
+              "nudge_seller_percentage", "discount_percentage", "percentage_off"):
         v = offer.get(k)
         if v is not None:
             try:
@@ -6105,6 +6113,12 @@ def _by_sku_offer_pct(offer: dict) -> Optional[float]:
             p, o = float(price), float(orig)
             if o > 0 and 0 <= p < o:
                 return round((1 - p / o) * 100, 2)
+        except (TypeError, ValueError):
+            pass
+    v = offer.get("meli_percentage")
+    if v is not None:
+        try:
+            return round(float(v), 2)
         except (TypeError, ValueError):
             pass
     return None
