@@ -226,17 +226,12 @@
 
   function fieldCell(it, field, value) {
     const locked = fieldLocked(it, field);
-    // El título con family_name a veces lo bloquea ML y a veces no (depende
-    // de si la familia comparte título) — no lo trabamos, solo avisamos.
-    const familyWarn = field === 'title' && !locked && it.has_family;
-    const title = locked ? fieldLockedReason(it, field)
-      : (familyWarn ? 'Pertenece a una familia de variaciones: ML puede rechazar el cambio de título.' : '');
+    const title = locked ? fieldLockedReason(it, field) : '';
     if(field === 'description') {
       return `<textarea class="cell-input" rows="2" ${locked ? 'disabled' : ''} title="${title}"
         onblur="saveField('${it.item_id}','description',this.value,this)">${esc(value)}</textarea>`;
     }
-    const warnStyle = familyWarn ? 'border-color:#f0c36d;' : '';
-    return `<input class="cell-input" style="${warnStyle}" value="${esc(value)}" ${locked ? 'disabled' : ''} title="${title}"
+    return `<input class="cell-input" value="${esc(value)}" ${locked ? 'disabled' : ''} title="${title}"
       onblur="saveField('${it.item_id}','${field}',this.value,this)" onkeydown="if(event.key==='Enter')this.blur()" />`;
   }
 
