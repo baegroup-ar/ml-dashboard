@@ -101,11 +101,13 @@
       <label>Filtrar por:</label>
       <select id="filter-field" onchange="onFilterChange()">
         <option value="sku">SKU</option>
+        <option value="title">Título</option>
         <option value="brand">Marca</option>
         <option value="model">Modelo</option>
         <option value="description">Descripción</option>
       </select>
       <input type="text" id="filter-text" placeholder="Contiene..." style="width:260px;" oninput="onFilterChange()" />
+      <textarea id="filter-text-textarea" placeholder="Contiene..." rows="3" style="display:none;width:320px;min-height:70px;resize:both;padding:7px 10px;border:1px solid #ddd;border-radius:8px;font-size:13px;font-family:'Inter',sans-serif;" oninput="onFilterChange()"></textarea>
       <span id="filter-count" style="font-size:12px;color:#888;"></span>
     </div>
     <div class="row" id="replace-row" style="display:none;margin-top:10px;padding-top:10px;border-top:1px solid #f0f0ee;">
@@ -123,6 +125,7 @@
         <option value="brand">Marca</option>
         <option value="model">Modelo</option>
         <option value="sku">SKU</option>
+        <option value="title">Título</option>
         <option value="description">Descripción</option>
       </select>
       <input type="text" id="bulk-value" placeholder="Nuevo valor" style="width:280px;" />
@@ -137,10 +140,10 @@
       <table>
         <thead><tr>
           <th style="width:30px;"><input type="checkbox" id="select-all" onchange="toggleAll(this)" /></th>
-          <th>Publicación</th><th>SKU</th><th>Marca</th><th>Modelo</th><th style="min-width:220px;">Descripción</th>
+          <th>Publicación</th><th style="min-width:200px;">Título</th><th>SKU</th><th>Marca</th><th>Modelo</th><th style="min-width:220px;">Descripción</th>
         </tr></thead>
         <tbody id="tbody">
-          <tr><td colspan="6" class="empty">Hacé click en "Cargar publicaciones" para empezar.</td></tr>
+          <tr><td colspan="7" class="empty">Hacé click en "Cargar publicaciones" para empezar.</td></tr>
         </tbody>
       </table>
     </div>
@@ -169,7 +172,7 @@
     const status = document.getElementById('load-status');
     document.getElementById('btn-load').disabled = true;
     status.textContent = 'Cargando publicaciones... (puede tardar según el tamaño del catálogo)';
-    document.getElementById('tbody').innerHTML = '<tr><td colspan="6" class="empty">Cargando...</td></tr>';
+    document.getElementById('tbody').innerHTML = '<tr><td colspan="7" class="empty">Cargando...</td></tr>';
     pubSelected = new Set();
     pubPage = 1;
     try {
@@ -188,14 +191,25 @@
     }
   }
 
+  function filterText() {
+    const field = document.getElementById('filter-field').value;
+    const el = field === 'description'
+      ? document.getElementById('filter-text-textarea')
+      : document.getElementById('filter-text');
+    return (el.value || '').trim();
+  }
+
   function filteredItems() {
     const field = document.getElementById('filter-field').value;
-    const text = (document.getElementById('filter-text').value || '').trim().toLowerCase();
+    const text = filterText().toLowerCase();
     if(!text) return ALL_ITEMS;
     return ALL_ITEMS.filter(it => (it[field] || '').toString().toLowerCase().includes(text));
   }
 
   function onFilterChange() {
+    const isDesc = document.getElementById('filter-field').value === 'description';
+    document.getElementById('filter-text').style.display = isDesc ? 'none' : '';
+    document.getElementById('filter-text-textarea').style.display = isDesc ? '' : 'none';
     pubPage = 1;
     render();
   }
@@ -221,7 +235,7 @@
       ? `${items.length} de ${ALL_ITEMS.length} publicación(es)` : '';
     updateReplaceUI(items);
     if(!items.length) {
-      tbody.innerHTML = `<tr><td colspan="6" class="empty">${ALL_ITEMS.length ? 'Sin resultados con ese filtro.' : 'Hacé click en "Cargar publicaciones" para empezar.'}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="7" class="empty">${ALL_ITEMS.length ? 'Sin resultados con ese filtro.' : 'Hacé click en "Cargar publicaciones" para empezar.'}</td></tr>`;
       pager.innerHTML = '';
       updateBulkUI(items);
       return;
@@ -234,11 +248,11 @@
     tbody.innerHTML = pageItems.map(it => `<tr>
       <td><input type="checkbox" data-id="${it.item_id}" ${pubSelected.has(it.item_id) ? 'checked' : ''} onchange="onRowCheck(this)" /></td>
       <td>
-        <b>${it.item_id}</b>
-        <div style="color:#888;font-size:11px;max-width:260px;">${esc(it.title)}</div>
+        <b>${it.item_id}</b><br>
         ${it.is_catalog ? '<span class="badge catalog">Catálogo</span>' : '<span class="badge own">Propia</span>'}
         ${it.has_variations ? '<span class="badge" style="background:#eee;color:#666;margin-left:4px;">Con variantes</span>' : ''}
       </td>
+      <td>${fieldCell(it, 'title', it.title)}</td>
       <td>${fieldCell(it, 'sku', it.sku)}</td>
       <td>${fieldCell(it, 'brand', it.brand)}</td>
       <td>${fieldCell(it, 'model', it.model)}</td>
@@ -262,7 +276,7 @@
 
   function updateReplaceUI(items) {
     const field = document.getElementById('filter-field').value;
-    const text = (document.getElementById('filter-text').value || '').trim();
+    const text = filterText();
     const show = field === 'description' && text.length > 0;
     document.getElementById('replace-row').style.display = show ? '' : 'none';
     if(show) {
@@ -373,7 +387,7 @@
   }
 
   async function doFindReplace() {
-    const find = (document.getElementById('filter-text').value || '').trim();
+    const find = filterText();
     const replaceVal = document.getElementById('replace-value').value || '';
     if(!find) return;
     const candidates = filteredItems();

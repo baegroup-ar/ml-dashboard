@@ -6419,6 +6419,10 @@ async def _pub_update_field(client, headers, item_id, field, value):
             r = await client.put(
                 f"{ML_API_URL}/items/{item_id}",
                 headers=headers, json={"attributes": [{"id": "SELLER_SKU", "value_name": value}]})
+        elif field == "title":
+            r = await client.put(
+                f"{ML_API_URL}/items/{item_id}",
+                headers=headers, json={"title": value})
         else:
             return False, f"Campo desconocido: {field}"
     except Exception as e:
@@ -6451,7 +6455,7 @@ async def api_publicaciones_patch(request: Request, account_id: int, item_id: st
     body = await request.json()
     field = (body.get("field") or "").strip()
     value = body.get("value")
-    if field not in ("sku", "brand", "model", "description"):
+    if field not in ("sku", "brand", "model", "description", "title"):
         raise HTTPException(400, "Campo inválido.")
     if value is None:
         raise HTTPException(400, "Falta el valor.")
@@ -6480,7 +6484,7 @@ async def api_publicaciones_bulk_edit(request: Request, account_id: int):
     field = (body.get("field") or "").strip()
     value = body.get("value")
     item_ids = [str(i).strip() for i in (body.get("item_ids") or []) if str(i).strip()]
-    if field not in ("sku", "brand", "model", "description"):
+    if field not in ("sku", "brand", "model", "description", "title"):
         raise HTTPException(400, "Campo inválido.")
     if value is None:
         raise HTTPException(400, "Falta el valor.")
