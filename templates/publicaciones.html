@@ -196,7 +196,7 @@
     tbody.innerHTML = pageItems.map(it => `<tr>
       <td><input type="checkbox" data-id="${it.item_id}" ${pubSelected.has(it.item_id) ? 'checked' : ''} onchange="onRowCheck(this)" /></td>
       <td>
-        <b>${it.permalink ? `<a href="${esc(it.permalink)}" target="_blank" style="color:#111;text-decoration:none;">${it.item_id}</a>` : it.item_id}</b>
+        <b>${it.item_id}</b>
         <div style="color:#888;font-size:11px;max-width:260px;">${esc(it.title)}</div>
         ${it.is_catalog ? '<span class="badge catalog">Catálogo</span>' : '<span class="badge own">Propia</span>'}
         ${it.has_variations ? '<span class="badge" style="background:#eee;color:#666;margin-left:4px;">Con variantes</span>' : ''}
