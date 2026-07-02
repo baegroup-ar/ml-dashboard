@@ -84,18 +84,40 @@
         <option value="{{ acc.id }}" {% if acc.nickname == default_nick or (not has_default and loop.first) %}selected{% endif %}>{{ acc.nickname }}</option>
         {% endfor %}
       </select>
-      <input type="text" id="sku-search-input" placeholder="SKU" style="width:220px;text-transform:uppercase;" onkeydown="if(event.key==='Enter')searchBySku()" />
-      <button class="primary" onclick="searchBySku()" id="btn-search">Buscar</button>
-      <span id="search-status" style="font-size:12px;color:#888;"></span>
+      <button class="primary" onclick="loadAll(false)" id="btn-load">Cargar publicaciones</button>
+      <a href="#" onclick="loadAll(true);return false;" id="btn-refresh" style="font-size:12px;color:#005CFF;text-decoration:none;">↻ Actualizar</a>
+      <span id="load-status" style="font-size:12px;color:#888;"></span>
     </div>
     <div class="help-box">
       Las publicaciones de <b>catálogo</b> (badge naranja) comparten la ficha con otros vendedores: ML no deja editar marca, modelo ni descripción
       desde acá. El <b>SKU</b> es tuyo y se puede editar siempre, salvo que la publicación tenga variantes (cada variante tiene su propio SKU).
+      El listado queda guardado unos minutos así no hay que recargarlo todo el tiempo — usá "Actualizar" si necesitás los datos más frescos de ML.
     </div>
   </div>
 
   <div class="card">
-    <h3>Edición masiva</h3>
+    <h3>Filtrar</h3>
+    <div class="row">
+      <label>Filtrar por:</label>
+      <select id="filter-field" onchange="onFilterChange()">
+        <option value="sku">SKU</option>
+        <option value="brand">Marca</option>
+        <option value="model">Modelo</option>
+        <option value="description">Descripción</option>
+      </select>
+      <input type="text" id="filter-text" placeholder="Contiene..." style="width:260px;" oninput="onFilterChange()" />
+      <span id="filter-count" style="font-size:12px;color:#888;"></span>
+    </div>
+    <div class="row" id="replace-row" style="display:none;margin-top:10px;padding-top:10px;border-top:1px solid #f0f0ee;">
+      <label>Reemplazar por:</label>
+      <input type="text" id="replace-value" placeholder="(vacío = borra el texto encontrado)" style="width:300px;" />
+      <button class="primary" onclick="doFindReplace()" id="btn-replace">Reemplazar</button>
+      <span id="replace-msg" style="font-size:12px;color:#888;"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Edición masiva (valor nuevo)</h3>
     <div class="row">
       <select id="bulk-field" onchange="onBulkFieldChange()">
         <option value="brand">Marca</option>
@@ -118,7 +140,7 @@
           <th>Publicación</th><th>SKU</th><th>Marca</th><th>Modelo</th><th style="min-width:220px;">Descripción</th>
         </tr></thead>
         <tbody id="tbody">
-          <tr><td colspan="6" class="empty">Buscá un SKU para ver sus publicaciones.</td></tr>
+          <tr><td colspan="6" class="empty">Hacé click en "Cargar publicaciones" para empezar.</td></tr>
         </tbody>
       </table>
     </div>
@@ -136,35 +158,46 @@
 
 <script>
   const PAGE_SIZE = 15;
-  let pubItems = [];
+  let ALL_ITEMS = [];
   let pubSelected = new Set();
   let pubPage = 1;
   const esc = v => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const accId = () => document.getElementById('account-select').value;
+  const escapeRegExp = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-  async function searchBySku() {
-    const sku = (document.getElementById('sku-search-input').value || '').trim();
-    const status = document.getElementById('search-status');
-    if(!sku) { status.textContent = 'Ingresá un SKU.'; return; }
-    document.getElementById('btn-search').disabled = true;
-    status.textContent = 'Buscando...';
-    document.getElementById('tbody').innerHTML = '<tr><td colspan="6" class="empty">Buscando...</td></tr>';
+  async function loadAll(refresh) {
+    const status = document.getElementById('load-status');
+    document.getElementById('btn-load').disabled = true;
+    status.textContent = 'Cargando publicaciones... (puede tardar según el tamaño del catálogo)';
+    document.getElementById('tbody').innerHTML = '<tr><td colspan="6" class="empty">Cargando...</td></tr>';
     pubSelected = new Set();
     pubPage = 1;
     try {
-      const r = await fetch(`/api/publicaciones/${accId()}/by-sku?sku=${encodeURIComponent(sku)}`);
+      const r = await fetch(`/api/publicaciones/${accId()}/all${refresh ? '?refresh=1' : ''}`);
       const j = await r.json();
       if(!r.ok) throw new Error(j.detail || 'error');
-      pubItems = j.items || [];
-      status.textContent = pubItems.length ? `${pubItems.length} publicación(es) encontradas.` : 'No se encontraron publicaciones activas con ese SKU.';
+      ALL_ITEMS = j.items || [];
+      status.textContent = `${ALL_ITEMS.length} publicación(es) cargadas.`;
       render();
     } catch(e) {
       status.textContent = 'Error: ' + e.message;
-      pubItems = [];
+      ALL_ITEMS = [];
       render();
     } finally {
-      document.getElementById('btn-search').disabled = false;
+      document.getElementById('btn-load').disabled = false;
     }
+  }
+
+  function filteredItems() {
+    const field = document.getElementById('filter-field').value;
+    const text = (document.getElementById('filter-text').value || '').trim().toLowerCase();
+    if(!text) return ALL_ITEMS;
+    return ALL_ITEMS.filter(it => (it[field] || '').toString().toLowerCase().includes(text));
+  }
+
+  function onFilterChange() {
+    pubPage = 1;
+    render();
   }
 
   function fieldCell(it, field, value) {
@@ -183,17 +216,21 @@
   function render() {
     const tbody = document.getElementById('tbody');
     const pager = document.getElementById('pager');
-    if(!pubItems.length) {
-      tbody.innerHTML = '<tr><td colspan="6" class="empty">Sin resultados.</td></tr>';
+    const items = filteredItems();
+    document.getElementById('filter-count').textContent = ALL_ITEMS.length
+      ? `${items.length} de ${ALL_ITEMS.length} publicación(es)` : '';
+    updateReplaceUI(items);
+    if(!items.length) {
+      tbody.innerHTML = `<tr><td colspan="6" class="empty">${ALL_ITEMS.length ? 'Sin resultados con ese filtro.' : 'Hacé click en "Cargar publicaciones" para empezar.'}</td></tr>`;
       pager.innerHTML = '';
-      updateBulkUI();
+      updateBulkUI(items);
       return;
     }
-    const totalPages = Math.max(1, Math.ceil(pubItems.length / PAGE_SIZE));
+    const totalPages = Math.max(1, Math.ceil(items.length / PAGE_SIZE));
     if(pubPage > totalPages) pubPage = totalPages;
     if(pubPage < 1) pubPage = 1;
     const start = (pubPage - 1) * PAGE_SIZE;
-    const pageItems = pubItems.slice(start, start + PAGE_SIZE);
+    const pageItems = items.slice(start, start + PAGE_SIZE);
     tbody.innerHTML = pageItems.map(it => `<tr>
       <td><input type="checkbox" data-id="${it.item_id}" ${pubSelected.has(it.item_id) ? 'checked' : ''} onchange="onRowCheck(this)" /></td>
       <td>
@@ -212,7 +249,7 @@
     const prevDisabled = pubPage <= 1 ? 'disabled' : '';
     const nextDisabled = pubPage >= totalPages ? 'disabled' : '';
     pager.innerHTML = `
-      <span style="font-size:12px;color:#888;">${from}–${to} de ${pubItems.length}</span>
+      <span style="font-size:12px;color:#888;">${from}–${to} de ${items.length}</span>
       <div style="display:flex;align-items:center;gap:6px;">
         <button onclick="goPage(1)" ${prevDisabled}>«</button>
         <button onclick="goPage(${pubPage - 1})" ${prevDisabled}>‹ Anterior</button>
@@ -220,7 +257,19 @@
         <button onclick="goPage(${pubPage + 1})" ${nextDisabled}>Siguiente ›</button>
         <button onclick="goPage(${totalPages})" ${nextDisabled}>»</button>
       </div>`;
-    updateBulkUI();
+    updateBulkUI(items);
+  }
+
+  function updateReplaceUI(items) {
+    const field = document.getElementById('filter-field').value;
+    const text = (document.getElementById('filter-text').value || '').trim();
+    const show = field === 'description' && text.length > 0;
+    document.getElementById('replace-row').style.display = show ? '' : 'none';
+    if(show) {
+      const editable = items.filter(it => !it.locked_attrs).length;
+      document.getElementById('btn-replace').textContent = `Reemplazar en ${editable} publicación(es)`;
+      document.getElementById('btn-replace').disabled = editable === 0;
+    }
   }
 
   function goPage(n) { pubPage = n; render(); }
@@ -228,20 +277,21 @@
   function onRowCheck(cb) {
     const id = cb.getAttribute('data-id');
     if(cb.checked) pubSelected.add(id); else pubSelected.delete(id);
-    updateBulkUI();
+    updateBulkUI(filteredItems());
   }
   function toggleAll(cb) {
-    for(const it of pubItems) { if(cb.checked) pubSelected.add(it.item_id); else pubSelected.delete(it.item_id); }
+    for(const it of filteredItems()) { if(cb.checked) pubSelected.add(it.item_id); else pubSelected.delete(it.item_id); }
     document.querySelectorAll('#tbody input[type=checkbox]').forEach(c => { c.checked = cb.checked; });
-    updateBulkUI();
+    updateBulkUI(filteredItems());
   }
-  function updateBulkUI() {
+  function updateBulkUI(items) {
+    items = items || filteredItems();
     const n = pubSelected.size;
     const btn = document.getElementById('btn-bulk');
     btn.textContent = `Aplicar a seleccionados (${n})`;
     btn.disabled = n === 0;
     const allCb = document.getElementById('select-all');
-    if(allCb) allCb.checked = pubItems.length > 0 && pubItems.every(it => pubSelected.has(it.item_id));
+    if(allCb) allCb.checked = items.length > 0 && items.every(it => pubSelected.has(it.item_id));
   }
 
   async function saveField(itemId, field, value, el) {
@@ -252,7 +302,7 @@
         body: JSON.stringify({ field, value }) });
       const j = await r.json().catch(() => ({}));
       if(!r.ok) throw new Error(j.detail || 'error');
-      const it = pubItems.find(i => i.item_id === itemId);
+      const it = ALL_ITEMS.find(i => i.item_id === itemId);
       if(it) it[field] = value;
       if(el) { el.style.background = '#eafaf0'; setTimeout(() => { el.style.background = ''; }, 800); }
     } catch(e) {
@@ -274,7 +324,7 @@
   async function applyBulk() {
     const field = document.getElementById('bulk-field').value;
     const value = bulkValue();
-    const selectedItems = pubItems.filter(it => pubSelected.has(it.item_id));
+    const selectedItems = ALL_ITEMS.filter(it => pubSelected.has(it.item_id));
     if(!selectedItems.length) return;
     const isLocked = it => field === 'sku' ? it.locked_sku : it.locked_attrs;
     const editable = selectedItems.filter(it => !isLocked(it));
@@ -299,7 +349,7 @@
       const fail = (j.results || []).filter(x => !x.ok).length;
       msg.textContent = `Listo: ${ok} actualizada(s)${fail ? `, ${fail} con error` : ''}${skipped ? `, ${skipped} bloqueada(s) omitida(s)` : ''}.`;
       for(const res of (j.results || [])) {
-        if(res.ok) { const it = pubItems.find(i => i.item_id === res.item_id); if(it) it[field] = value; }
+        if(res.ok) { const it = ALL_ITEMS.find(i => i.item_id === res.item_id); if(it) it[field] = value; }
       }
       render();
     } catch(e) {
@@ -307,6 +357,47 @@
     } finally {
       document.getElementById('btn-bulk').disabled = pubSelected.size === 0;
     }
+  }
+
+  async function runWithConcurrency(items, worker, limit) {
+    let idx = 0;
+    const results = [];
+    async function next() {
+      while(idx < items.length) {
+        const i = idx++;
+        results[i] = await worker(items[i]);
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(limit, items.length) }, next));
+    return results;
+  }
+
+  async function doFindReplace() {
+    const find = (document.getElementById('filter-text').value || '').trim();
+    const replaceVal = document.getElementById('replace-value').value || '';
+    if(!find) return;
+    const candidates = filteredItems();
+    const targets = candidates.filter(it => !it.locked_attrs);
+    const skipped = candidates.length - targets.length;
+    if(!targets.length) return;
+    const preview = replaceVal.length > 60 ? replaceVal.slice(0, 60) + '…' : replaceVal;
+    if(!confirm(`¿Reemplazar "${find}" por "${preview || '(vacío)'}" en la descripción de ${targets.length} publicación(es)?${skipped ? ` (${skipped} de catálogo se van a omitir)` : ''}`)) return;
+    const msg = document.getElementById('replace-msg');
+    msg.textContent = 'Aplicando...';
+    document.getElementById('btn-replace').disabled = true;
+    const re = new RegExp(escapeRegExp(find), 'gi');
+    let ok = 0, fail = 0;
+    await runWithConcurrency(targets, async (it) => {
+      const newDesc = (it.description || '').replace(re, replaceVal);
+      try {
+        const r = await fetch(`/api/publicaciones/${accId()}/${it.item_id}`, {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ field: 'description', value: newDesc }) });
+        if(r.ok) { it.description = newDesc; ok++; } else { fail++; }
+      } catch(e) { fail++; }
+    }, 5);
+    msg.textContent = `Listo: ${ok} actualizada(s)${fail ? `, ${fail} con error` : ''}${skipped ? `, ${skipped} de catálogo omitida(s)` : ''}.`;
+    render();
   }
 </script>
 </body>

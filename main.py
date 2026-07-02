@@ -44,6 +44,12 @@ PROMO_ITEMS_RESULT_CACHE: dict[str, dict] = {}
 # que cachear el resultado evita re-escanear en cada apertura/refresh.
 PROMO_LIST_TTL_SECONDS = 300
 PROMO_LIST_CACHE: dict[int, dict] = {}
+# Cache del catálogo completo de "Publicaciones" (marca/modelo/sku/descripción).
+# Traer la descripción es 1 request por item, así que cachear evita repetir
+# el escaneo completo en cada búsqueda/filtro. TTL más largo porque estos
+# datos cambian poco; el botón "Cargar publicaciones" fuerza refresh.
+PUBLICACIONES_CACHE_TTL_SECONDS = 600
+PUBLICACIONES_CACHE: dict[int, dict] = {}
 # Mínimo de descuento MÁS BAJO que ML reportó alguna vez por (promo, item).
 # La API de ML para campañas FLEXIBLE_PERCENTAGE es eventualmente consistente:
 # devuelve un `max_discounted_price` distinto entre llamadas (a veces 10%, a
@@ -6274,81 +6280,51 @@ async def publicaciones_page(request: Request):
     })
 
 
-@app.get("/api/publicaciones/{account_id}/by-sku")
-async def api_publicaciones_by_sku(request: Request, account_id: int, sku: str = ""):
-    """Busca publicaciones por SKU (exacto o variante SKU-ALGO) para editar
-    marca/modelo/SKU/descripción en bloque. Igual criterio de búsqueda que
-    Promociones por SKU: escanea las publicaciones activas (cacheado 5min)
-    y filtra localmente, porque el filtro seller_sku de ML no es confiable."""
-    user_id = get_session_user_id(request)
-    if not user_id:
-        raise HTTPException(401)
-    acc = _account_for_user(account_id, user_id)
-    if not acc:
-        raise HTTPException(404)
-    sku = (sku or "").strip()
-    if not sku:
-        raise HTTPException(400, "Falta el SKU a buscar.")
-    sku_norm = sku.upper()
-    token = await refresh_ml_token(account_id)
-    if not token:
-        raise HTTPException(502)
-    headers = {"Authorization": f"Bearer {token}"}
+async def _fetch_publicaciones_items(client, headers, item_ids: list) -> list:
+    """Multiget de atributos + descripción para una lista de item_ids y arma
+    el shape que consume el frontend de Publicaciones."""
+    if not item_ids:
+        return []
+    info_map: dict = {}
+    mget_sem = asyncio.Semaphore(20)
 
-    debug = []
-    async with httpx.AsyncClient(timeout=90) as client:
-        all_item_ids = await fetch_all_seller_item_ids(client, headers, acc["ml_user_id"], debug)
-        if not all_item_ids:
-            return {"sku": sku, "items": []}
+    async def fetch_batch(chunk):
+        async with mget_sem:
+            try:
+                rb = await client.get(
+                    f"{ML_API_URL}/items", headers=headers,
+                    params={"ids": ",".join(chunk), "attributes": PUBLICACIONES_ATTRS})
+                if rb.status_code != 200:
+                    return
+                for entry in rb.json():
+                    if not isinstance(entry, dict):
+                        continue
+                    body = entry.get("body") if entry.get("code") == 200 else None
+                    if isinstance(body, dict) and body.get("id"):
+                        info_map[body["id"]] = body
+            except Exception:
+                pass
 
-        info_map: dict = {}
-        mget_sem = asyncio.Semaphore(20)
+    chunks = [item_ids[i:i + 20] for i in range(0, len(item_ids), 20)]
+    await asyncio.gather(*[fetch_batch(c) for c in chunks])
 
-        async def fetch_batch(chunk):
-            async with mget_sem:
-                try:
-                    rb = await client.get(
-                        f"{ML_API_URL}/items", headers=headers,
-                        params={"ids": ",".join(chunk), "attributes": PUBLICACIONES_ATTRS})
-                    if rb.status_code != 200:
-                        return
-                    for entry in rb.json():
-                        if not isinstance(entry, dict):
-                            continue
-                        body = entry.get("body") if entry.get("code") == 200 else None
-                        if isinstance(body, dict) and body.get("id"):
-                            info_map[body["id"]] = body
-                except Exception:
-                    pass
+    # Descripción: endpoint aparte por item (1 request c/u, es lo más lento).
+    desc_map: dict = {}
+    desc_sem = asyncio.Semaphore(25)
 
-        chunks = [all_item_ids[i:i + 20] for i in range(0, len(all_item_ids), 20)]
-        await asyncio.gather(*[fetch_batch(c) for c in chunks])
+    async def fetch_desc(item_id):
+        async with desc_sem:
+            try:
+                rd = await client.get(f"{ML_API_URL}/items/{item_id}/description", headers=headers)
+                if rd.status_code == 200:
+                    desc_map[item_id] = (rd.json().get("plain_text") or "").strip()
+            except Exception:
+                pass
 
-        def _matches(item_sku: str) -> bool:
-            s = (item_sku or "").upper()
-            return s == sku_norm or s.startswith(sku_norm + "-")
-
-        matched_ids = [iid for iid in all_item_ids if _matches(_extract_item_sku(info_map.get(iid)))]
-        if not matched_ids:
-            return {"sku": sku, "items": []}
-
-        # Descripción: endpoint aparte por item.
-        desc_map: dict = {}
-        desc_sem = asyncio.Semaphore(20)
-
-        async def fetch_desc(item_id):
-            async with desc_sem:
-                try:
-                    rd = await client.get(f"{ML_API_URL}/items/{item_id}/description", headers=headers)
-                    if rd.status_code == 200:
-                        desc_map[item_id] = (rd.json().get("plain_text") or "").strip()
-                except Exception:
-                    pass
-
-        await asyncio.gather(*[fetch_desc(i) for i in matched_ids])
+    await asyncio.gather(*[fetch_desc(i) for i in item_ids])
 
     items = []
-    for item_id in matched_ids:
+    for item_id in item_ids:
         info = info_map.get(item_id) or {}
         has_variations = bool(info.get("variations"))
         is_catalog = bool(info.get("catalog_listing") or info.get("catalog_product_id"))
@@ -6366,6 +6342,64 @@ async def api_publicaciones_by_sku(request: Request, account_id: int, sku: str =
             "locked_attrs": is_catalog,  # marca / modelo / descripción
         })
     items.sort(key=lambda x: x["item_id"])
+    return items
+
+
+async def _get_all_publicaciones(account_id: int, acc: dict, force_refresh: bool = False) -> list:
+    """Catálogo completo de publicaciones activas con marca/modelo/sku/
+    descripción, cacheado (PUBLICACIONES_CACHE_TTL_SECONDS)."""
+    cached = PUBLICACIONES_CACHE.get(account_id) if not force_refresh else None
+    if cached and (datetime.utcnow() - cached["at"]).total_seconds() < PUBLICACIONES_CACHE_TTL_SECONDS:
+        return cached["items"]
+    token = await refresh_ml_token(account_id)
+    if not token:
+        raise HTTPException(502)
+    headers = {"Authorization": f"Bearer {token}"}
+    debug = []
+    async with httpx.AsyncClient(timeout=180) as client:
+        all_item_ids = await fetch_all_seller_item_ids(client, headers, acc["ml_user_id"], debug)
+        items = await _fetch_publicaciones_items(client, headers, all_item_ids)
+    PUBLICACIONES_CACHE[account_id] = {"at": datetime.utcnow(), "items": items}
+    return items
+
+
+@app.get("/api/publicaciones/{account_id}/all")
+async def api_publicaciones_all(request: Request, account_id: int):
+    """Trae TODO el catálogo activo (cacheado) para filtrar del lado del
+    cliente por Marca/Modelo/SKU/Descripción sin repetir la búsqueda contra
+    ML cada vez. `?refresh=1` fuerza a recargar contra ML."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    refresh = (request.query_params.get("refresh") in ("1", "true", "yes"))
+    items = await _get_all_publicaciones(account_id, acc, force_refresh=refresh)
+    return {"items": items}
+
+
+@app.get("/api/publicaciones/{account_id}/by-sku")
+async def api_publicaciones_by_sku(request: Request, account_id: int, sku: str = ""):
+    """Filtra el catálogo cacheado por SKU (exacto o variante SKU-ALGO). Se
+    mantiene por compatibilidad; el frontend ahora usa /all + filtro local."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    sku = (sku or "").strip()
+    if not sku:
+        raise HTTPException(400, "Falta el SKU a buscar.")
+    sku_norm = sku.upper()
+    all_items = await _get_all_publicaciones(account_id, acc)
+
+    def _matches(item_sku: str) -> bool:
+        s = (item_sku or "").upper()
+        return s == sku_norm or s.startswith(sku_norm + "-")
+
+    items = [it for it in all_items if _matches(it.get("sku"))]
     return {"sku": sku, "items": items}
 
 
@@ -6394,6 +6428,18 @@ async def _pub_update_field(client, headers, item_id, field, value):
     return False, f"HTTP {r.status_code}: {r.text[:300]}"
 
 
+def _pub_cache_patch(account_id: int, item_id: str, field: str, value) -> None:
+    """Actualiza el item ya editado dentro de la caché de /all, para que no
+    quede desactualizada hasta que venza el TTL o se fuerce un refresh."""
+    cached = PUBLICACIONES_CACHE.get(account_id)
+    if not cached:
+        return
+    for it in cached["items"]:
+        if it.get("item_id") == item_id:
+            it[field] = value
+            break
+
+
 @app.patch("/api/publicaciones/{account_id}/{item_id}")
 async def api_publicaciones_patch(request: Request, account_id: int, item_id: str):
     """Edita un campo de una publicación individual."""
@@ -6417,6 +6463,7 @@ async def api_publicaciones_patch(request: Request, account_id: int, item_id: st
         ok, err = await _pub_update_field(client, headers, item_id, field, value)
     if not ok:
         raise HTTPException(502, err or "Error al actualizar en ML.")
+    _pub_cache_patch(account_id, item_id, field, value)
     return {"ok": True}
 
 
@@ -6453,6 +6500,9 @@ async def api_publicaciones_bulk_edit(request: Request, account_id: int):
                 return {"item_id": iid, "ok": ok, "error": err}
 
         results = await asyncio.gather(*[one(iid) for iid in item_ids])
+    for res in results:
+        if res["ok"]:
+            _pub_cache_patch(account_id, res["item_id"], field, value)
     return {"results": results, "ok": True}
 
 
