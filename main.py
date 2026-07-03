@@ -6254,7 +6254,15 @@ async def api_promociones_by_sku(request: Request, account_id: int, sku: str = "
 # puede editar siempre que la publicación no tenga variantes (cada variante
 # tiene su propio SKU y no lo tocamos automáticamente para no romper el
 # mapeo de variantes).
-PUBLICACIONES_ATTRS = "id,title,seller_sku,attributes,sale_terms,variations,catalog_listing,catalog_product_id,permalink,status,family_name"
+PUBLICACIONES_ATTRS = "id,title,seller_sku,attributes,sale_terms,variations,catalog_listing,catalog_product_id,permalink,status,family_name,category_id"
+# Ficha técnica: atributos de categoría (color, material, EAN, etc.) que no
+# tiene sentido repetir por publicación porque ya cuelgan de la categoría —
+# se excluyen acá porque ya se manejan aparte (Condiciones Generales) o no
+# son editables como "ficha técnica" propiamente dicha.
+FICHA_TECNICA_EXCLUDE_IDS = {"BRAND", "MODEL", "SELLER_SKU"}
+CATEGORY_ATTRS_CACHE: dict = {}
+CATEGORY_ATTRS_CACHE_TTL_SECONDS = 6 * 3600
+CATEGORY_NAME_CACHE: dict = {}
 
 
 def _pub_attr(info: dict, attr_id: str) -> str:
@@ -6343,6 +6351,10 @@ async def _fetch_publicaciones_items(client, headers, item_ids: list) -> list:
         # (no bloqueo) y dejamos que el intento real contra ML confirme si se
         # puede o no — el error de ML ya se muestra igual si lo rechaza.
         has_family = bool(info.get("family_name"))
+        raw_attrs = [
+            {"id": a.get("id"), "value_id": a.get("value_id"), "value_name": a.get("value_name")}
+            for a in (info.get("attributes") or []) if isinstance(a, dict) and a.get("id")
+        ]
         items.append({
             "item_id": item_id,
             "sku": _extract_item_sku(info),
@@ -6353,6 +6365,8 @@ async def _fetch_publicaciones_items(client, headers, item_ids: list) -> list:
             "warranty_type": _pub_sale_term(info, "WARRANTY_TYPE"),
             "warranty_time": _pub_sale_term(info, "WARRANTY_TIME"),
             "permalink": info.get("permalink") or "",
+            "category_id": info.get("category_id") or "",
+            "attributes": raw_attrs,
             "is_catalog": is_catalog,
             "has_variations": has_variations,
             "has_family": has_family,
@@ -6531,6 +6545,180 @@ async def api_publicaciones_bulk_edit(request: Request, account_id: int):
     for res in results:
         if res["ok"]:
             _pub_cache_patch(account_id, res["item_id"], field, value)
+    return {"results": results, "ok": True}
+
+
+# ────────────────── Ficha técnica (atributos por categoría) ──────────────────
+async def _get_category_attributes(category_id: str) -> list:
+    """Atributos editables de una categoría de ML (endpoint público, sin auth),
+    cacheado. Excluye read_only/hidden y los que ya viven en Condiciones
+    Generales (marca/modelo/SKU)."""
+    cached = CATEGORY_ATTRS_CACHE.get(category_id)
+    if cached and (datetime.utcnow() - cached["at"]).total_seconds() < CATEGORY_ATTRS_CACHE_TTL_SECONDS:
+        return cached["attrs"]
+    attrs = []
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.get(f"{ML_API_URL}/categories/{category_id}/attributes")
+        if r.status_code == 200:
+            for a in r.json():
+                if not isinstance(a, dict) or not a.get("id"):
+                    continue
+                if a["id"] in FICHA_TECNICA_EXCLUDE_IDS:
+                    continue
+                tags = a.get("tags") or {}
+                if tags.get("read_only") or tags.get("hidden"):
+                    continue
+                values = [
+                    {"id": v.get("id"), "name": v.get("name")}
+                    for v in (a.get("values") or []) if isinstance(v, dict)
+                ]
+                attrs.append({
+                    "id": a["id"],
+                    "name": a.get("name") or a["id"],
+                    "value_type": a.get("value_type") or "STRING",
+                    "values": values,
+                })
+    except Exception:
+        pass
+    CATEGORY_ATTRS_CACHE[category_id] = {"at": datetime.utcnow(), "attrs": attrs}
+    return attrs
+
+
+async def _get_category_name(category_id: str) -> str:
+    cached = CATEGORY_NAME_CACHE.get(category_id)
+    if cached:
+        return cached
+    name = category_id
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.get(f"{ML_API_URL}/categories/{category_id}")
+        if r.status_code == 200:
+            name = r.json().get("name") or category_id
+    except Exception:
+        pass
+    CATEGORY_NAME_CACHE[category_id] = name
+    return name
+
+
+@app.get("/api/publicaciones/category-names")
+async def api_publicaciones_category_names(request: Request):
+    """Nombres legibles para una lista de category_id separados por coma
+    (dato público de ML, cacheado en memoria)."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    ids = [c.strip() for c in (request.query_params.get("ids") or "").split(",") if c.strip()]
+    names = await asyncio.gather(*[_get_category_name(c) for c in ids])
+    return {"names": dict(zip(ids, names))}
+
+
+@app.get("/api/publicaciones/category-attributes/{category_id}")
+async def api_publicaciones_category_attributes(request: Request, category_id: str):
+    """Atributos editables (ficha técnica) de una categoría de ML."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    attrs = await _get_category_attributes(category_id)
+    return {"attributes": attrs}
+
+
+def _pub_attr_cache_patch(account_id: int, item_id: str, attr_id: str, value_id, value_name) -> None:
+    """Igual que _pub_cache_patch pero para un atributo dentro de item['attributes']."""
+    cached = PUBLICACIONES_CACHE.get(account_id)
+    if not cached:
+        return
+    for it in cached["items"]:
+        if it.get("item_id") != item_id:
+            continue
+        for a in it.get("attributes") or []:
+            if a.get("id") == attr_id:
+                a["value_id"] = value_id
+                a["value_name"] = value_name
+                break
+        else:
+            it.setdefault("attributes", []).append({"id": attr_id, "value_id": value_id, "value_name": value_name})
+        break
+
+
+async def _pub_update_attr(client, headers, item_id, attr_id, value_id, value_name):
+    """PUT a ML para un atributo de ficha técnica. Devuelve (ok, error_str|None)."""
+    attr = {"id": attr_id, "value_name": value_name}
+    if value_id:
+        attr["value_id"] = value_id
+    try:
+        r = await client.put(f"{ML_API_URL}/items/{item_id}", headers=headers, json={"attributes": [attr]})
+    except Exception as e:
+        return False, str(e)[:300]
+    if r.status_code in (200, 201):
+        return True, None
+    return False, f"HTTP {r.status_code}: {r.text[:300]}"
+
+
+@app.patch("/api/publicaciones/{account_id}/{item_id}/attr")
+async def api_publicaciones_patch_attr(request: Request, account_id: int, item_id: str):
+    """Edita un atributo de ficha técnica de una publicación individual."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    if not _account_for_user(account_id, user_id):
+        raise HTTPException(404)
+    body = await request.json()
+    attr_id = (body.get("attr_id") or "").strip()
+    value_name = body.get("value")
+    value_id = body.get("value_id") or None
+    if not attr_id:
+        raise HTTPException(400, "Falta el atributo.")
+    if value_name is None:
+        raise HTTPException(400, "Falta el valor.")
+    token = await refresh_ml_token(account_id)
+    if not token:
+        raise HTTPException(502)
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    async with httpx.AsyncClient(timeout=30) as client:
+        ok, err = await _pub_update_attr(client, headers, item_id, attr_id, value_id, value_name)
+    if not ok:
+        raise HTTPException(502, err or "Error al actualizar en ML.")
+    _pub_attr_cache_patch(account_id, item_id, attr_id, value_id, value_name)
+    return {"ok": True}
+
+
+@app.post("/api/publicaciones/{account_id}/bulk-edit-attr")
+async def api_publicaciones_bulk_edit_attr(request: Request, account_id: int):
+    """Edita un atributo de ficha técnica en bloque. Body:
+    { attr_id: str, value: str, value_id: str|null, item_ids: [...] }"""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    if not _account_for_user(account_id, user_id):
+        raise HTTPException(404)
+    body = await request.json()
+    attr_id = (body.get("attr_id") or "").strip()
+    value_name = body.get("value")
+    value_id = body.get("value_id") or None
+    item_ids = [str(i).strip() for i in (body.get("item_ids") or []) if str(i).strip()]
+    if not attr_id:
+        raise HTTPException(400, "Falta el atributo.")
+    if value_name is None:
+        raise HTTPException(400, "Falta el valor.")
+    if not item_ids:
+        raise HTTPException(400, "No se indicaron publicaciones.")
+    token = await refresh_ml_token(account_id)
+    if not token:
+        raise HTTPException(502)
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    async with httpx.AsyncClient(timeout=60) as client:
+        sem = asyncio.Semaphore(8)
+
+        async def one(iid):
+            async with sem:
+                ok, err = await _pub_update_attr(client, headers, iid, attr_id, value_id, value_name)
+                return {"item_id": iid, "ok": ok, "error": err}
+
+        results = await asyncio.gather(*[one(iid) for iid in item_ids])
+    for res in results:
+        if res["ok"]:
+            _pub_attr_cache_patch(account_id, res["item_id"], attr_id, value_id, value_name)
     return {"results": results, "ok": True}
 
 

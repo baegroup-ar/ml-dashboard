@@ -198,7 +198,54 @@
 
   <div id="tab-content-ficha" style="display:none;">
     <div class="card">
-      <p style="color:#888;font-size:13px;">Ficha técnica — próximamente. Estos atributos dependen de la categoría de cada publicación (color, material, EAN, etc.), así que van a mostrarse dinámicamente según corresponda.</p>
+      <div class="row">
+        <label>Categoría:</label>
+        <select id="ficha-category-select" onchange="onFichaCategoryChange()" style="min-width:280px;">
+          <option value="">Cargá publicaciones primero (solapa Condiciones Generales)</option>
+        </select>
+        <span id="ficha-category-status" style="font-size:12px;color:#888;"></span>
+      </div>
+      <div class="help-box">
+        La ficha técnica depende de la categoría de cada publicación (color, material, EAN, etc.). Elegí una categoría para ver y editar sus atributos.
+        Las publicaciones de <b>catálogo</b> (badge naranja) tienen la ficha compartida y ML no deja editarla desde acá.
+      </div>
+    </div>
+
+    <div id="ficha-body" style="display:none;">
+      <div class="card">
+        <h3>Filtrar</h3>
+        <div class="row">
+          <input type="text" id="ficha-filter-text" placeholder="Filtrar por SKU, MLA o título..." style="width:280px;" oninput="onFichaFilterChange()" />
+          <span id="ficha-filter-count" style="font-size:12px;color:#888;"></span>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Edición masiva (valor nuevo)</h3>
+        <div class="row">
+          <select id="ficha-bulk-attr" onchange="onFichaBulkAttrChange()"></select>
+          <input type="text" id="ficha-bulk-value" placeholder="Nuevo valor" style="width:280px;" />
+          <select id="ficha-bulk-value-select" style="display:none;width:280px;"></select>
+          <button class="primary" onclick="applyFichaBulk()" id="btn-ficha-bulk" disabled>Aplicar a seleccionados (0)</button>
+          <span id="ficha-bulk-msg" style="font-size:12px;color:#888;"></span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div style="overflow-x:auto;">
+          <table>
+            <thead><tr id="ficha-thead-row">
+              <th style="width:30px;"><input type="checkbox" id="ficha-select-all" onchange="toggleFichaAll(this)" /></th>
+              <th>Publicación</th><th>SKU</th>
+            </tr></thead>
+            <tbody id="ficha-tbody">
+              <tr><td colspan="3" class="empty">Elegí una categoría para empezar.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div id="ficha-pager" style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:10px;flex-wrap:wrap;"></div>
+        <div id="ficha-save-msg"></div>
+      </div>
     </div>
   </div>
 
@@ -414,6 +461,260 @@
     document.getElementById('tab-content-ficha').style.display = name === 'ficha' ? '' : 'none';
     document.getElementById('tab-btn-general').classList.toggle('active', name === 'general');
     document.getElementById('tab-btn-ficha').classList.toggle('active', name === 'ficha');
+    if(name === 'ficha') populateFichaCategories();
+  }
+
+  // ─────────────────────────── Ficha técnica ───────────────────────────
+  let FICHA_ATTRS = [];
+  let FICHA_ITEMS = [];
+  let fichaSelected = new Set();
+  let fichaPage = 1;
+  const FICHA_CATEGORY_NAMES = {};
+
+  async function populateFichaCategories() {
+    const select = document.getElementById('ficha-category-select');
+    const status = document.getElementById('ficha-category-status');
+    if(!ALL_ITEMS.length) {
+      select.innerHTML = '<option value="">Cargá publicaciones primero (solapa Condiciones Generales)</option>';
+      return;
+    }
+    const counts = {};
+    for(const it of ALL_ITEMS) {
+      if(!it.category_id) continue;
+      counts[it.category_id] = (counts[it.category_id] || 0) + 1;
+    }
+    const ids = Object.keys(counts);
+    const missing = ids.filter(id => !(id in FICHA_CATEGORY_NAMES));
+    if(missing.length) {
+      status.textContent = 'Cargando nombres de categorías...';
+      try {
+        const r = await fetch(`/api/publicaciones/category-names?ids=${missing.join(',')}`);
+        const j = await r.json();
+        Object.assign(FICHA_CATEGORY_NAMES, j.names || {});
+      } catch(e) { /* si falla, se muestra el category_id crudo */ }
+      status.textContent = '';
+    }
+    const prevValue = select.value;
+    const opts = ids
+      .map(id => ({ id, name: FICHA_CATEGORY_NAMES[id] || id, count: counts[id] }))
+      .sort((a, b) => b.count - a.count);
+    select.innerHTML = '<option value="">Elegí una categoría...</option>' +
+      opts.map(o => `<option value="${esc(o.id)}">${esc(o.name)} (${o.count})</option>`).join('');
+    if(prevValue && counts[prevValue]) select.value = prevValue;
+  }
+
+  async function onFichaCategoryChange() {
+    const catId = document.getElementById('ficha-category-select').value;
+    fichaSelected = new Set();
+    fichaPage = 1;
+    if(!catId) {
+      document.getElementById('ficha-body').style.display = 'none';
+      FICHA_ITEMS = []; FICHA_ATTRS = [];
+      return;
+    }
+    document.getElementById('ficha-body').style.display = '';
+    document.getElementById('ficha-category-status').textContent = 'Cargando atributos de la categoría...';
+    FICHA_ITEMS = ALL_ITEMS.filter(it => it.category_id === catId);
+    try {
+      const r = await fetch(`/api/publicaciones/category-attributes/${catId}`);
+      const j = await r.json();
+      FICHA_ATTRS = j.attributes || [];
+    } catch(e) {
+      FICHA_ATTRS = [];
+    }
+    document.getElementById('ficha-category-status').textContent =
+      `${FICHA_ITEMS.length} publicación(es) en esta categoría · ${FICHA_ATTRS.length} atributo(s) editable(s).`;
+    buildFichaBulkAttrSelect();
+    renderFichaTable();
+  }
+
+  function fichaAttrById(attrId) { return FICHA_ATTRS.find(a => a.id === attrId); }
+
+  function buildFichaBulkAttrSelect() {
+    document.getElementById('ficha-bulk-attr').innerHTML =
+      FICHA_ATTRS.map(a => `<option value="${esc(a.id)}">${esc(a.name)}</option>`).join('');
+    onFichaBulkAttrChange();
+  }
+
+  function onFichaBulkAttrChange() {
+    const attr = fichaAttrById(document.getElementById('ficha-bulk-attr').value);
+    const hasValues = attr && attr.values && attr.values.length;
+    document.getElementById('ficha-bulk-value').style.display = hasValues ? 'none' : '';
+    const sel = document.getElementById('ficha-bulk-value-select');
+    sel.style.display = hasValues ? '' : 'none';
+    if(hasValues) {
+      sel.innerHTML = '<option value="">(sin definir)</option>' +
+        attr.values.map(v => `<option value="${esc(v.id)}" data-name="${esc(v.name)}">${esc(v.name)}</option>`).join('');
+    }
+  }
+
+  function fichaItemAttr(it, attrId) { return (it.attributes || []).find(x => x.id === attrId); }
+
+  function fichaFilteredItems() {
+    const text = (document.getElementById('ficha-filter-text').value || '').trim().toLowerCase();
+    if(!text) return FICHA_ITEMS;
+    return FICHA_ITEMS.filter(it => (it.sku || '').toLowerCase().includes(text)
+      || (it.title || '').toLowerCase().includes(text) || (it.item_id || '').toLowerCase().includes(text));
+  }
+
+  function onFichaFilterChange() { fichaPage = 1; renderFichaTable(); }
+
+  function fichaCell(it, attr) {
+    const locked = it.locked_attrs;
+    const title = locked ? 'Publicación de catálogo: campo bloqueado por ML.' : '';
+    const current = fichaItemAttr(it, attr.id) || {};
+    if(attr.values && attr.values.length) {
+      const opts = ['<option value="">(sin definir)</option>'].concat(
+        attr.values.map(v => `<option value="${esc(v.id)}" data-name="${esc(v.name)}" ${v.id === current.value_id ? 'selected' : ''}>${esc(v.name)}</option>`)
+      ).join('');
+      return `<select class="cell-input" ${locked ? 'disabled' : ''} title="${title}"
+        onchange="saveFichaAttr('${it.item_id}','${attr.id}',this.options[this.selectedIndex].getAttribute('data-name')||'',this.value,this)">${opts}</select>`;
+    }
+    return `<input class="cell-input" value="${esc(current.value_name || '')}" ${locked ? 'disabled' : ''} title="${title}"
+      onblur="saveFichaAttr('${it.item_id}','${attr.id}',this.value,'',this)" onkeydown="if(event.key==='Enter')this.blur()" />`;
+  }
+
+  function renderFichaTable() {
+    const thead = document.getElementById('ficha-thead-row');
+    const tbody = document.getElementById('ficha-tbody');
+    const pager = document.getElementById('ficha-pager');
+    const items = fichaFilteredItems();
+    document.getElementById('ficha-filter-count').textContent = FICHA_ITEMS.length
+      ? `${items.length} de ${FICHA_ITEMS.length} publicación(es)` : '';
+    const colCount = 3 + FICHA_ATTRS.length;
+    thead.innerHTML = `<th style="width:30px;"><input type="checkbox" id="ficha-select-all" onchange="toggleFichaAll(this)" /></th>
+      <th>Publicación</th><th>SKU</th>${FICHA_ATTRS.map(a => `<th>${esc(a.name)}</th>`).join('')}`;
+    if(!items.length) {
+      tbody.innerHTML = `<tr><td colspan="${colCount}" class="empty">${FICHA_ITEMS.length ? 'Sin resultados con ese filtro.' : 'No hay publicaciones en esta categoría.'}</td></tr>`;
+      pager.innerHTML = '';
+      updateFichaBulkUI(items);
+      return;
+    }
+    const totalPages = Math.max(1, Math.ceil(items.length / PAGE_SIZE));
+    if(fichaPage > totalPages) fichaPage = totalPages;
+    if(fichaPage < 1) fichaPage = 1;
+    const start = (fichaPage - 1) * PAGE_SIZE;
+    const pageItems = items.slice(start, start + PAGE_SIZE);
+    tbody.innerHTML = pageItems.map(it => `<tr>
+      <td><input type="checkbox" data-id="${it.item_id}" ${fichaSelected.has(it.item_id) ? 'checked' : ''} onchange="onFichaRowCheck(this)" /></td>
+      <td>
+        <b>${it.item_id}</b><br>
+        <span style="color:#888;font-size:11px;">${esc(it.title)}</span><br>
+        ${it.is_catalog ? '<span class="badge catalog">Catálogo</span>' : '<span class="badge own">Tradicional</span>'}
+      </td>
+      <td>${esc(it.sku)}</td>
+      ${FICHA_ATTRS.map(a => `<td>${fichaCell(it, a)}</td>`).join('')}
+    </tr>`).join('');
+    const from = start + 1;
+    const to = start + pageItems.length;
+    const prevDisabled = fichaPage <= 1 ? 'disabled' : '';
+    const nextDisabled = fichaPage >= totalPages ? 'disabled' : '';
+    pager.innerHTML = `
+      <span style="font-size:12px;color:#888;">${from}–${to} de ${items.length}</span>
+      <div style="display:flex;align-items:center;gap:6px;">
+        <button onclick="goFichaPage(1)" ${prevDisabled}>«</button>
+        <button onclick="goFichaPage(${fichaPage - 1})" ${prevDisabled}>‹ Anterior</button>
+        <span style="font-size:12px;color:#555;padding:0 6px;">Página ${fichaPage} de ${totalPages}</span>
+        <button onclick="goFichaPage(${fichaPage + 1})" ${nextDisabled}>Siguiente ›</button>
+        <button onclick="goFichaPage(${totalPages})" ${nextDisabled}>»</button>
+      </div>`;
+    updateFichaBulkUI(items);
+  }
+
+  function goFichaPage(n) { fichaPage = n; renderFichaTable(); }
+
+  function onFichaRowCheck(cb) {
+    const id = cb.getAttribute('data-id');
+    if(cb.checked) fichaSelected.add(id); else fichaSelected.delete(id);
+    updateFichaBulkUI(fichaFilteredItems());
+  }
+  function toggleFichaAll(cb) {
+    for(const it of fichaFilteredItems()) { if(cb.checked) fichaSelected.add(it.item_id); else fichaSelected.delete(it.item_id); }
+    document.querySelectorAll('#ficha-tbody input[type=checkbox]').forEach(c => { c.checked = cb.checked; });
+    updateFichaBulkUI(fichaFilteredItems());
+  }
+  function updateFichaBulkUI(items) {
+    items = items || fichaFilteredItems();
+    const n = fichaSelected.size;
+    const btn = document.getElementById('btn-ficha-bulk');
+    btn.textContent = `Aplicar a seleccionados (${n})`;
+    btn.disabled = n === 0;
+    const allCb = document.getElementById('ficha-select-all');
+    if(allCb) allCb.checked = items.length > 0 && items.every(it => fichaSelected.has(it.item_id));
+  }
+
+  async function saveFichaAttr(itemId, attrId, valueName, valueId, el) {
+    const msg = document.getElementById('ficha-save-msg');
+    try {
+      const r = await fetch(`/api/publicaciones/${accId()}/${itemId}/attr`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ attr_id: attrId, value: valueName, value_id: valueId || null }) });
+      const j = await r.json().catch(() => ({}));
+      if(!r.ok) throw new Error(j.detail || 'error');
+      const it = FICHA_ITEMS.find(i => i.item_id === itemId);
+      if(it) {
+        let a = fichaItemAttr(it, attrId);
+        if(!a) { a = { id: attrId }; it.attributes = it.attributes || []; it.attributes.push(a); }
+        a.value_name = valueName; a.value_id = valueId || null;
+      }
+      if(el) { el.style.background = '#eafaf0'; setTimeout(() => { el.style.background = ''; }, 800); }
+    } catch(e) {
+      msg.innerHTML = `<div class="msg err">Error en ${itemId}: ${esc(e.message)}</div>`;
+    }
+  }
+
+  async function applyFichaBulk() {
+    const attrId = document.getElementById('ficha-bulk-attr').value;
+    const attr = fichaAttrById(attrId);
+    if(!attrId || !attr) return;
+    const hasValues = attr.values && attr.values.length;
+    let value, valueId = null;
+    if(hasValues) {
+      const sel = document.getElementById('ficha-bulk-value-select');
+      valueId = sel.value || null;
+      value = valueId ? sel.options[sel.selectedIndex].getAttribute('data-name') : '';
+    } else {
+      value = document.getElementById('ficha-bulk-value').value;
+    }
+    const selectedItems = FICHA_ITEMS.filter(it => fichaSelected.has(it.item_id));
+    if(!selectedItems.length) return;
+    const editable = selectedItems.filter(it => !it.locked_attrs);
+    const skipped = selectedItems.length - editable.length;
+    const ids = editable.map(it => it.item_id);
+    if(!ids.length) {
+      document.getElementById('ficha-bulk-msg').textContent = `Las ${selectedItems.length} seleccionadas están bloqueadas (catálogo).`;
+      return;
+    }
+    const preview = (value || '').length > 80 ? value.slice(0, 80) + '…' : value;
+    if(!confirm(`¿Aplicar "${preview}" en "${attr.name}" a ${ids.length} publicación(es)?${skipped ? ` (${skipped} bloqueada(s) se van a omitir)` : ''}`)) return;
+    const msg = document.getElementById('ficha-bulk-msg');
+    msg.textContent = 'Aplicando...';
+    document.getElementById('btn-ficha-bulk').disabled = true;
+    try {
+      const r = await fetch(`/api/publicaciones/${accId()}/bulk-edit-attr`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ attr_id: attrId, value, value_id: valueId, item_ids: ids }) });
+      const j = await r.json();
+      if(!r.ok) throw new Error(j.detail || 'error');
+      const ok = (j.results || []).filter(x => x.ok).length;
+      const fail = (j.results || []).filter(x => !x.ok).length;
+      msg.textContent = `Listo: ${ok} actualizada(s)${fail ? `, ${fail} con error` : ''}${skipped ? `, ${skipped} bloqueada(s) omitida(s)` : ''}.`;
+      for(const res of (j.results || [])) {
+        if(res.ok) {
+          const it = FICHA_ITEMS.find(i => i.item_id === res.item_id);
+          if(it) {
+            let a = fichaItemAttr(it, attrId);
+            if(!a) { a = { id: attrId }; it.attributes = it.attributes || []; it.attributes.push(a); }
+            a.value_name = value; a.value_id = valueId;
+          }
+        }
+      }
+      renderFichaTable();
+    } catch(e) {
+      msg.textContent = 'Error: ' + e.message;
+    } finally {
+      document.getElementById('btn-ficha-bulk').disabled = fichaSelected.size === 0;
+    }
   }
 
   async function applyBulk() {
