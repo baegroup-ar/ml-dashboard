@@ -6254,13 +6254,20 @@ async def api_promociones_by_sku(request: Request, account_id: int, sku: str = "
 # puede editar siempre que la publicación no tenga variantes (cada variante
 # tiene su propio SKU y no lo tocamos automáticamente para no romper el
 # mapeo de variantes).
-PUBLICACIONES_ATTRS = "id,title,seller_sku,attributes,variations,catalog_listing,catalog_product_id,permalink,status,family_name"
+PUBLICACIONES_ATTRS = "id,title,seller_sku,attributes,sale_terms,variations,catalog_listing,catalog_product_id,permalink,status,family_name"
 
 
 def _pub_attr(info: dict, attr_id: str) -> str:
     for attr in (info.get("attributes") or []):
         if isinstance(attr, dict) and attr.get("id") == attr_id:
             return (attr.get("value_name") or "").strip()
+    return ""
+
+
+def _pub_sale_term(info: dict, term_id: str) -> str:
+    for term in (info.get("sale_terms") or []):
+        if isinstance(term, dict) and term.get("id") == term_id:
+            return (term.get("value_name") or "").strip()
     return ""
 
 
@@ -6343,6 +6350,8 @@ async def _fetch_publicaciones_items(client, headers, item_ids: list) -> list:
             "brand": _pub_attr(info, "BRAND"),
             "model": _pub_attr(info, "MODEL"),
             "description": desc_map.get(item_id, ""),
+            "warranty_type": _pub_sale_term(info, "WARRANTY_TYPE"),
+            "warranty_time": _pub_sale_term(info, "WARRANTY_TIME"),
             "permalink": info.get("permalink") or "",
             "is_catalog": is_catalog,
             "has_variations": has_variations,
@@ -6429,6 +6438,11 @@ async def _pub_update_field(client, headers, item_id, field, value):
             r = await client.put(
                 f"{ML_API_URL}/items/{item_id}",
                 headers=headers, json={"attributes": [{"id": "SELLER_SKU", "value_name": value}]})
+        elif field in ("warranty_type", "warranty_time"):
+            term_id = "WARRANTY_TYPE" if field == "warranty_type" else "WARRANTY_TIME"
+            r = await client.put(
+                f"{ML_API_URL}/items/{item_id}",
+                headers=headers, json={"sale_terms": [{"id": term_id, "value_name": value}]})
         elif field == "title":
             r = await client.put(
                 f"{ML_API_URL}/items/{item_id}",
@@ -6465,7 +6479,7 @@ async def api_publicaciones_patch(request: Request, account_id: int, item_id: st
     body = await request.json()
     field = (body.get("field") or "").strip()
     value = body.get("value")
-    if field not in ("sku", "brand", "model", "description", "title"):
+    if field not in ("sku", "brand", "model", "description", "title", "warranty_type", "warranty_time"):
         raise HTTPException(400, "Campo inválido.")
     if value is None:
         raise HTTPException(400, "Falta el valor.")
@@ -6484,7 +6498,7 @@ async def api_publicaciones_patch(request: Request, account_id: int, item_id: st
 @app.post("/api/publicaciones/{account_id}/bulk-edit")
 async def api_publicaciones_bulk_edit(request: Request, account_id: int):
     """Edita un campo en bloque para varias publicaciones. Body:
-    { field: 'brand'|'model'|'sku'|'description', value: str, item_ids: [...] }"""
+    { field: 'brand'|'model'|'sku'|'description'|'title'|'warranty_type'|'warranty_time', value: str, item_ids: [...] }"""
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
@@ -6494,7 +6508,7 @@ async def api_publicaciones_bulk_edit(request: Request, account_id: int):
     field = (body.get("field") or "").strip()
     value = body.get("value")
     item_ids = [str(i).strip() for i in (body.get("item_ids") or []) if str(i).strip()]
-    if field not in ("sku", "brand", "model", "description", "title"):
+    if field not in ("sku", "brand", "model", "description", "title", "warranty_type", "warranty_time"):
         raise HTTPException(400, "Campo inválido.")
     if value is None:
         raise HTTPException(400, "Falta el valor.")

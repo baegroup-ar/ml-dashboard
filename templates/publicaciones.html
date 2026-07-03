@@ -51,6 +51,10 @@
     .msg { padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-top: 10px; }
     .msg.ok { background: #e6f5ee; color: #1a8a5a; border: 1px solid #c5e9d8; }
     .msg.err { background: #fce9e9; color: #c0392b; border: 1px solid #f5c6c6; }
+    .tabs { display: flex; gap: 4px; margin-bottom: 1.25rem; border-bottom: 1px solid #e5e5e3; }
+    .tab-btn { padding: 10px 16px; border: none; background: none; font-size: 13px; font-weight: 500; color: #888; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; font-family: 'Cantarell', 'Inter', sans-serif; }
+    .tab-btn:hover { color: #444; }
+    .tab-btn.active { color: #005CFF; border-bottom-color: #005CFF; }
   </style>
 </head>
 <body>
@@ -95,9 +99,15 @@
 
 <main>
   <h1>Publicaciones</h1>
-  <p class="lead">Buscá por SKU y editá marca, modelo, SKU y descripción de tus publicaciones, una por una o en bloque.</p>
+  <p class="lead">Buscá por SKU y editá marca, modelo, SKU, descripción y garantía de tus publicaciones, una por una o en bloque.</p>
 
   {% if accounts %}
+  <div class="tabs">
+    <button class="tab-btn active" id="tab-btn-general" onclick="switchTab('general')">Condiciones Generales</button>
+    <button class="tab-btn" id="tab-btn-ficha" onclick="switchTab('ficha')">Ficha Técnica</button>
+  </div>
+
+  <div id="tab-content-general">
   <div class="card">
     <div class="row">
       <label>Cuenta ML:</label>
@@ -129,6 +139,8 @@
         <option value="brand">Marca</option>
         <option value="model">Modelo</option>
         <option value="description">Descripción</option>
+        <option value="warranty_type">Garantía (tipo)</option>
+        <option value="warranty_time">Garantía (tiempo)</option>
       </select>
       <input type="text" id="filter-text" placeholder="Contiene..." style="width:260px;" oninput="onFilterChange()" />
       <textarea id="filter-text-textarea" placeholder="Contiene..." rows="3" style="display:none;width:320px;min-height:70px;resize:both;padding:7px 10px;border:1px solid #ddd;border-radius:8px;font-size:13px;font-family:'Inter',sans-serif;" oninput="onFilterChange()"></textarea>
@@ -151,9 +163,17 @@
         <option value="sku">SKU</option>
         <option value="title">Título</option>
         <option value="description">Descripción</option>
+        <option value="warranty_type">Garantía (tipo)</option>
+        <option value="warranty_time">Garantía (tiempo)</option>
       </select>
       <input type="text" id="bulk-value" placeholder="Nuevo valor" style="width:280px;" />
       <textarea id="bulk-value-textarea" placeholder="Nuevo valor" rows="4" style="display:none;width:420px;min-height:90px;resize:both;padding:7px 10px;border:1px solid #ddd;border-radius:8px;font-size:13px;font-family:'Inter',sans-serif;"></textarea>
+      <select id="bulk-value-select" style="display:none;width:280px;">
+        <option value="">(sin definir)</option>
+        <option value="Sin garantía">Sin garantía</option>
+        <option value="Garantía del vendedor">Garantía del vendedor</option>
+        <option value="Garantía de fábrica">Garantía de fábrica</option>
+      </select>
       <button class="primary" onclick="applyBulk()" id="btn-bulk" disabled>Aplicar a seleccionados (0)</button>
       <span id="bulk-msg" style="font-size:12px;color:#888;"></span>
     </div>
@@ -164,15 +184,22 @@
       <table>
         <thead><tr>
           <th style="width:30px;"><input type="checkbox" id="select-all" onchange="toggleAll(this)" /></th>
-          <th>Publicación</th><th style="min-width:200px;">Título</th><th>SKU</th><th>Marca</th><th>Modelo</th><th style="min-width:220px;">Descripción</th>
+          <th>Publicación</th><th style="min-width:200px;">Título</th><th>SKU</th><th>Marca</th><th>Modelo</th><th style="min-width:220px;">Descripción</th><th>Garantía (tipo)</th><th>Garantía (tiempo)</th>
         </tr></thead>
         <tbody id="tbody">
-          <tr><td colspan="7" class="empty">Hacé click en "Cargar publicaciones" para empezar.</td></tr>
+          <tr><td colspan="9" class="empty">Hacé click en "Cargar publicaciones" para empezar.</td></tr>
         </tbody>
       </table>
     </div>
     <div id="pager" style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:10px;flex-wrap:wrap;"></div>
     <div id="save-msg"></div>
+  </div>
+  </div>
+
+  <div id="tab-content-ficha" style="display:none;">
+    <div class="card">
+      <p style="color:#888;font-size:13px;">Ficha técnica — próximamente. Estos atributos dependen de la categoría de cada publicación (color, material, EAN, etc.), así que van a mostrarse dinámicamente según corresponda.</p>
+    </div>
   </div>
 
   {% else %}
@@ -196,7 +223,7 @@
     const status = document.getElementById('load-status');
     document.getElementById('btn-load').disabled = true;
     status.textContent = 'Cargando publicaciones... (puede tardar según el tamaño del catálogo)';
-    document.getElementById('tbody').innerHTML = '<tr><td colspan="7" class="empty">Cargando...</td></tr>';
+    document.getElementById('tbody').innerHTML = '<tr><td colspan="9" class="empty">Cargando...</td></tr>';
     pubSelected = new Set();
     pubPage = 1;
     try {
@@ -238,9 +265,12 @@
     render();
   }
 
+  const WARRANTY_TYPES = ['', 'Sin garantía', 'Garantía del vendedor', 'Garantía de fábrica'];
+
   function fieldLocked(it, field) {
     if(field === 'sku') return it.locked_sku;
     if(field === 'title') return it.locked_title;
+    if(field === 'warranty_type' || field === 'warranty_time') return false;
     return it.locked_attrs;
   }
   function fieldLockedReason(it, field) {
@@ -255,6 +285,11 @@
       return `<textarea class="cell-input" rows="2" ${locked ? 'disabled' : ''} title="${title}"
         onblur="saveField('${it.item_id}','description',this.value,this)">${esc(value)}</textarea>`;
     }
+    if(field === 'warranty_type') {
+      const opts = WARRANTY_TYPES.map(o => `<option value="${esc(o)}" ${o === (value || '') ? 'selected' : ''}>${o || '(sin definir)'}</option>`).join('');
+      return `<select class="cell-input" ${locked ? 'disabled' : ''} title="${title}"
+        onchange="saveField('${it.item_id}','warranty_type',this.value,this)">${opts}</select>`;
+    }
     return `<input class="cell-input" value="${esc(value)}" ${locked ? 'disabled' : ''} title="${title}"
       onblur="saveField('${it.item_id}','${field}',this.value,this)" onkeydown="if(event.key==='Enter')this.blur()" />`;
   }
@@ -267,7 +302,7 @@
       ? `${items.length} de ${ALL_ITEMS.length} publicación(es)` : '';
     updateReplaceUI(items);
     if(!items.length) {
-      tbody.innerHTML = `<tr><td colspan="7" class="empty">${ALL_ITEMS.length ? 'Sin resultados con ese filtro.' : 'Hacé click en "Cargar publicaciones" para empezar.'}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="9" class="empty">${ALL_ITEMS.length ? 'Sin resultados con ese filtro.' : 'Hacé click en "Cargar publicaciones" para empezar.'}</td></tr>`;
       pager.innerHTML = '';
       updateBulkUI(items);
       return;
@@ -289,6 +324,8 @@
       <td>${fieldCell(it, 'brand', it.brand)}</td>
       <td>${fieldCell(it, 'model', it.model)}</td>
       <td>${fieldCell(it, 'description', it.description)}</td>
+      <td>${fieldCell(it, 'warranty_type', it.warranty_type)}</td>
+      <td>${fieldCell(it, 'warranty_time', it.warranty_time)}</td>
     </tr>`).join('');
     const from = start + 1;
     const to = start + pageItems.length;
@@ -357,14 +394,26 @@
   }
 
   function onBulkFieldChange() {
-    const isDesc = document.getElementById('bulk-field').value === 'description';
-    document.getElementById('bulk-value').style.display = isDesc ? 'none' : '';
+    const field = document.getElementById('bulk-field').value;
+    const isDesc = field === 'description';
+    const isWarrantyType = field === 'warranty_type';
+    document.getElementById('bulk-value').style.display = (isDesc || isWarrantyType) ? 'none' : '';
     document.getElementById('bulk-value-textarea').style.display = isDesc ? '' : 'none';
+    document.getElementById('bulk-value-select').style.display = isWarrantyType ? '' : 'none';
   }
 
   function bulkValue() {
-    const isDesc = document.getElementById('bulk-field').value === 'description';
-    return isDesc ? document.getElementById('bulk-value-textarea').value : document.getElementById('bulk-value').value;
+    const field = document.getElementById('bulk-field').value;
+    if(field === 'description') return document.getElementById('bulk-value-textarea').value;
+    if(field === 'warranty_type') return document.getElementById('bulk-value-select').value;
+    return document.getElementById('bulk-value').value;
+  }
+
+  function switchTab(name) {
+    document.getElementById('tab-content-general').style.display = name === 'general' ? '' : 'none';
+    document.getElementById('tab-content-ficha').style.display = name === 'ficha' ? '' : 'none';
+    document.getElementById('tab-btn-general').classList.toggle('active', name === 'general');
+    document.getElementById('tab-btn-ficha').classList.toggle('active', name === 'ficha');
   }
 
   async function applyBulk() {
