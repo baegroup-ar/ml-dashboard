@@ -102,12 +102,6 @@
   <p class="lead">Buscá por SKU y editá marca, modelo, SKU, descripción y garantía de tus publicaciones, una por una o en bloque.</p>
 
   {% if accounts %}
-  <div class="tabs">
-    <button class="tab-btn active" id="tab-btn-general" onclick="switchTab('general')">Condiciones Generales</button>
-    <button class="tab-btn" id="tab-btn-ficha" onclick="switchTab('ficha')">Ficha Técnica</button>
-  </div>
-
-  <div id="tab-content-general">
   <div class="card">
     <div class="row">
       <label>Cuenta ML:</label>
@@ -122,6 +116,15 @@
       <a href="#" onclick="loadAll(true);return false;" id="btn-refresh" style="font-size:12px;color:#005CFF;text-decoration:none;">↻ Actualizar</a>
       <span id="load-status" style="font-size:12px;color:#888;"></span>
     </div>
+  </div>
+
+  <div class="tabs">
+    <button class="tab-btn active" id="tab-btn-general" onclick="switchTab('general')">Condiciones Generales</button>
+    <button class="tab-btn" id="tab-btn-ficha" onclick="switchTab('ficha')">Ficha Técnica</button>
+  </div>
+
+  <div id="tab-content-general">
+  <div class="card">
     <div class="help-box">
       Las publicaciones de <b>catálogo</b> (badge naranja) comparten la ficha con otros vendedores: ML no deja editar marca, modelo ni descripción
       desde acá. El <b>SKU</b> es tuyo y se puede editar siempre, salvo que la publicación tenga variantes (cada variante tiene su propio SKU).
