@@ -1205,7 +1205,6 @@ PAGE_ROUTES = {
     "clientes": "/clientes",
     "publicaciones": "/publicaciones",
     "fotos": "/fotos",
-    "videos": "/videos",
 }
 
 
@@ -6612,23 +6611,6 @@ async def fotos_page(request: Request):
     })
 
 
-@app.get("/videos", response_class=HTMLResponse)
-async def videos_page(request: Request):
-    user_id = get_session_user_id(request)
-    if not user_id:
-        return RedirectResponse("/")
-    user = get_user(user_id)
-    _r = _page_redirect(user, "videos")
-    if _r:
-        return _r
-    accounts = get_visible_accounts(user_id, user)
-    accounts = await refresh_visible_account_nicknames(accounts)
-    return templates.TemplateResponse("videos.html", {
-        "request": request, "user": user, "accounts": accounts,
-        "perms": user_permissions(user),
-    })
-
-
 @app.get("/api/fotos/{account_id}/all")
 async def api_fotos_all(request: Request, account_id: int):
     user_id = get_session_user_id(request)
@@ -6690,74 +6672,6 @@ async def api_fotos_bulk_apply(request: Request, account_id: int):
                         it["pictures"] = source_urls
                         break
     return {"results": results, "ok": True}
-
-
-@app.post("/api/clips/{account_id}/upload")
-async def api_clips_upload(request: Request, account_id: int):
-    """EXPERIMENTAL: intenta subir un clip de video a varias publicaciones.
-    ML solo documenta este endpoint para items CBT/Global Selling
-    (cbt_item_id); acá lo probamos contra item_id locales y devolvemos el
-    error real de ML si no aplica, en vez de asumir que funciona."""
-    user_id = get_session_user_id(request)
-    if not user_id:
-        raise HTTPException(401)
-    if not _account_for_user(account_id, user_id):
-        raise HTTPException(404)
-    form = await request.form()
-    upload = form.get("file")
-    if upload is None or not hasattr(upload, "read"):
-        raise HTTPException(400, "Falta el archivo de video.")
-    item_ids = [s.strip() for s in str(form.get("item_ids") or "").split(",") if s.strip()]
-    if not item_ids:
-        raise HTTPException(400, "No se indicaron publicaciones destino.")
-    content = await upload.read()
-    filename = getattr(upload, "filename", "") or "clip.mp4"
-    content_type = getattr(upload, "content_type", "") or "video/mp4"
-    token = await refresh_ml_token(account_id)
-    if not token:
-        raise HTTPException(502)
-    headers = {"Authorization": f"Bearer {token}"}
-    results = []
-    async with httpx.AsyncClient(timeout=180) as client:
-        sem = asyncio.Semaphore(2)  # uploads de video: concurrencia baja a propósito
-
-        async def one(iid):
-            async with sem:
-                try:
-                    files = {"video": (filename, content, content_type)}
-                    r = await client.post(
-                        f"{ML_API_URL}/marketplace/items/{iid}/clips/upload",
-                        headers=headers, files=files)
-                except Exception as e:
-                    return {"item_id": iid, "ok": False, "error": str(e)[:400]}
-                if r.status_code in (200, 201):
-                    return {"item_id": iid, "ok": True, "error": None}
-                return {"item_id": iid, "ok": False, "error": f"HTTP {r.status_code}: {r.text[:400]}"}
-
-        results = await asyncio.gather(*[one(iid) for iid in item_ids])
-    return {"results": results, "ok": True}
-
-
-@app.get("/api/clips/{account_id}/test-read/{item_id}")
-async def api_clips_test_read(request: Request, account_id: int, item_id: str):
-    """Diagnóstico de solo lectura: intenta LISTAR los clips de una
-    publicación (sin subir nada) para saber si el bloqueo de ML es sobre
-    toda la API de Clips para esta cuenta/app, o solo sobre la subida."""
-    user_id = get_session_user_id(request)
-    if not user_id:
-        raise HTTPException(401)
-    if not _account_for_user(account_id, user_id):
-        raise HTTPException(404)
-    token = await refresh_ml_token(account_id)
-    if not token:
-        raise HTTPException(502)
-    headers = {"Authorization": f"Bearer {token}"}
-    async with httpx.AsyncClient(timeout=30) as client:
-        try:
-            r = await client.get(f"{ML_API_URL}/marketplace/items/{item_id}/clips", headers=headers)
-        except Exception as e:
-            return {"ok": False, "status": None, "body": str(e)[:500]}
-    return {"ok": r.status_code in (200, 201), "status": r.status_code, "body": r.text[:1500]}
 
 
 @app.get("/api/promociones/{account_id}/{promotion_id}/items")
@@ -9153,7 +9067,6 @@ PAGES = [
     ("clientes",    "Clientes"),
     ("publicaciones", "Publicaciones"),
     ("fotos", "Fotos"),
-    ("videos", "Videos"),
 ]
 PAGE_KEYS = {k for k, _ in PAGES}
 
