@@ -4840,6 +4840,13 @@ async def api_etiquetas_save_schedule(request: Request, account_id: int):
         raise HTTPException(404)
     body = await request.json()
     schedules = body.get("schedules") or {}
+    apply_all = bool(body.get("apply_all"))
+    target_ids = [account_id]
+    if apply_all:
+        owner = _accounts_owner_id(user, user_id)
+        target_ids = [r["id"] for r in db_fetchall("SELECT id FROM ml_accounts WHERE user_id=:uid", {"uid": owner})]
+        if account_id not in target_ids:
+            target_ids.append(account_id)
     for lg in ETQ_CUTOFF_LOGISTICS:
         rows = schedules.get(lg)
         if not isinstance(rows, list):
@@ -4852,9 +4859,11 @@ async def api_etiquetas_save_schedule(request: Request, account_id: int):
                 continue
             if 0 <= wd <= 6:
                 schedule[wd] = {"cutoff": item.get("cutoff") or "", "ventana": item.get("ventana") or ""}
-        _save_cutoffs(account_id, lg, schedule)
-    ETIQUETAS_CACHE.pop(account_id, None)  # invalida cache: cambió el filtro
-    return {"ok": True}
+        for aid in target_ids:
+            _save_cutoffs(aid, lg, schedule)
+    for aid in target_ids:
+        ETIQUETAS_CACHE.pop(aid, None)  # invalida cache: cambió el filtro
+    return {"ok": True, "applied_to": len(target_ids)}
 
 
 def _etq_filter_ids(account_id, ids: str) -> list:

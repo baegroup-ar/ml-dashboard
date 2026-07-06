@@ -166,6 +166,10 @@
       </p>
       <div id="schedule-tables"></div>
       <div class="row" style="margin-top:12px;">
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#555;">
+          <input type="checkbox" id="apply-all-accounts" />
+          Aplicar a todas mis cuentas ML
+        </label>
         <button class="green" onclick="saveSchedule()">Guardar horarios</button>
         <span id="schedule-msg" style="font-size:12px;color:#888;"></span>
       </div>
@@ -391,15 +395,19 @@ async function saveSchedule() {
     const lg = inp.getAttribute('data-lg'), i = +inp.getAttribute('data-i'), f = inp.getAttribute('data-f');
     if (SCHEDULES[lg] && SCHEDULES[lg][i]) SCHEDULES[lg][i][f] = inp.value.trim();
   });
+  const applyAll = document.getElementById('apply-all-accounts').checked;
   const msg = document.getElementById('schedule-msg');
   msg.textContent = 'Guardando...';
   try {
     const r = await fetch(`/api/etiquetas/${accId()}/cutoff_schedule`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ schedules: SCHEDULES }),
+      body: JSON.stringify({ schedules: SCHEDULES, apply_all: applyAll }),
     });
     if (!r.ok) throw new Error('HTTP ' + r.status);
-    msg.textContent = 'Guardado. Recargá los envíos para aplicar el nuevo corte.';
+    const j = await r.json();
+    msg.textContent = applyAll
+      ? `Guardado en ${j.applied_to} cuenta(s). Recargá los envíos para aplicar el nuevo corte.`
+      : 'Guardado. Recargá los envíos para aplicar el nuevo corte.';
   } catch (e) {
     msg.textContent = 'Error al guardar: ' + e.message;
   }
