@@ -3354,6 +3354,89 @@ async def api_stock_prices_add(request: Request, account_id: int):
     return {"ok": True}
 
 
+def _parse_inbound_report(content: bytes) -> dict:
+    """Parsea el 'Reporte de Planificación de envíos' que se baja del Seller
+    Center de ML y devuelve {sku: unidades_en_camino} sumando por SKU (un SKU
+    puede aparecer en varias filas = varios productos Full). Detecta las columnas
+    'SKU' y 'Unidades en camino' por nombre, así aguanta reordenamientos."""
+    from openpyxl import load_workbook
+    wb = load_workbook(io.BytesIO(content), data_only=True, read_only=True)
+    ws = wb.active
+    rows = list(ws.iter_rows(values_only=True))
+
+    def _norm(v) -> str:
+        return str(v or "").strip().lower()
+
+    sku_col = camino_col = header_idx = None
+    for i, row in enumerate(rows[:30]):
+        cells = [_norm(c) for c in row]
+        if "sku" in cells and any("en camino" in c for c in cells):
+            header_idx = i
+            sku_col = cells.index("sku")
+            camino_col = next(j for j, c in enumerate(cells) if "en camino" in c)
+            break
+    if header_idx is None:
+        raise ValueError("No encontré las columnas 'SKU' y 'Unidades en camino'. "
+                         "¿Es el Reporte de Planificación de envíos de ML?")
+
+    out: dict = {}
+    for row in rows[header_idx + 1:]:
+        if sku_col >= len(row) or camino_col >= len(row):
+            continue
+        sku = str(row[sku_col] or "").strip()
+        if not sku:
+            continue
+        digits = "".join(ch for ch in str(row[camino_col] or "") if ch.isdigit())
+        qty = int(digits) if digits else 0
+        out[sku] = out.get(sku, 0) + qty
+    return out
+
+
+@app.post("/api/stock/{account_id:int}/inbound/upload")
+async def api_stock_inbound_upload(request: Request, account_id: int):
+    """Importa el 'en camino' a Full desde el Reporte de Planificación de envíos
+    de ML. Actualiza stock_en_camino de los SKUs del reporte que ya existen en la
+    base de precios (incluye poner 0 en los que el reporte trae sin nada en
+    camino). No toca SKUs que no vienen en el reporte."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    if not _account_for_user(account_id, user_id):
+        raise HTTPException(404)
+    form = await request.form()
+    upload = form.get("file")
+    if upload is None or not hasattr(upload, "read"):
+        raise HTTPException(400, "Falta el archivo")
+    content = await upload.read()
+    try:
+        by_sku = _parse_inbound_report(content)
+    except Exception as e:
+        raise HTTPException(400, f"No pude leer el archivo: {e}")
+    if not by_sku:
+        return {"ok": True, "skus_reporte": 0, "actualizados": 0, "no_en_base": 0, "total_unidades": 0}
+    # SKUs que existen en la base de precios de esta cuenta (universo de Stock).
+    base_rows = db_fetchall(
+        "SELECT sku FROM product_sale_prices WHERE account_id=:a", {"a": account_id})
+    base_skus = {r["sku"] for r in base_rows}
+    updated = 0
+    for sku, qty in by_sku.items():
+        if sku not in base_skus:
+            continue
+        db_execute(
+            "UPDATE product_sale_prices SET stock_en_camino=:q, updated_at=NOW()"
+            " WHERE account_id=:a AND sku=:s",
+            {"a": account_id, "s": sku, "q": float(qty)},
+        )
+        updated += 1
+    return {
+        "ok": True,
+        "skus_reporte": len(by_sku),
+        "actualizados": updated,
+        "no_en_base": len(by_sku) - updated,
+        "total_unidades": sum(by_sku.values()),
+    }
+
+
 @app.post("/api/stock/{account_id:int}/inbound")
 async def api_stock_inbound_set(request: Request, account_id: int):
     """Guarda el stock EN CAMINO a Full (carga manual) para un SKU. Solo aplica

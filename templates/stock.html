@@ -153,8 +153,13 @@
         </select>
         <input type="number" id="cob-val" placeholder="días" min="0" max="3650" oninput="renderTable()" style="width:56px;" />
       </div>
-      <button class="green" onclick="downloadStockExcel()" title="Descarga el listado completo en Excel">⬇ Descargar Excel</button>
+      <div class="row" style="gap:8px;">
+        <input type="file" id="inbound-file" accept=".xlsx" style="display:none;" onchange="uploadInbound(this)" />
+        <button class="ghost" onclick="document.getElementById('inbound-file').click()" title="Importá el 'en camino' a Full desde el Reporte de Planificación de envíos que bajás de ML">⬆ Importar en camino (Excel de ML)</button>
+        <button class="green" onclick="downloadStockExcel()" title="Descarga el listado completo en Excel">⬇ Descargar Excel</button>
+      </div>
     </div>
+    <div id="inbound-msg" style="font-size:12px;color:#888;margin-top:8px;"></div>
     <div class="row" style="margin-top:10px;">
       <label style="font-size:12px;"><input type="checkbox" id="f-activas" onchange="renderTable()" style="vertical-align:-2px;"> Activas (con stock)</label>
       <label style="font-size:12px;"><input type="checkbox" id="f-sinstock" onchange="renderTable()" style="vertical-align:-2px;"> Sin stock</label>
@@ -371,6 +376,29 @@ function downloadStockExcel() {
   const td = document.getElementById('target-days').value || 15;
   const sd = salesDays();
   window.location = `/api/stock/${accId()}/export?target_days=${encodeURIComponent(td)}&sales_days=${sd}`;
+}
+
+async function uploadInbound(input) {
+  const f = input.files[0];
+  const msg = document.getElementById('inbound-msg');
+  if (!f) return;
+  msg.style.color = '#888';
+  msg.textContent = 'Importando el reporte...';
+  const fd = new FormData(); fd.append('file', f);
+  try {
+    const r = await fetch(`/api/stock/${accId()}/inbound/upload`, { method: 'POST', body: fd });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.detail || 'error');
+    msg.style.color = '#1a8a5a';
+    msg.textContent = `Listo: ${j.actualizados} SKU(s) actualizados (${j.total_unidades} u. en camino en el reporte).` +
+      (j.no_en_base ? ` ${j.no_en_base} SKU(s) del reporte no están en tu base de precios.` : '');
+    if (DATA) loadStock();
+  } catch (e) {
+    msg.style.color = '#c0392b';
+    msg.textContent = 'Error: ' + e.message;
+  } finally {
+    input.value = '';
+  }
 }
 
 async function uploadPrices() {
