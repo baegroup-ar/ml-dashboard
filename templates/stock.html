@@ -159,6 +159,8 @@
       <label style="font-size:12px;"><input type="checkbox" id="f-activas" onchange="renderTable()" style="vertical-align:-2px;"> Activas (con stock)</label>
       <label style="font-size:12px;"><input type="checkbox" id="f-sinstock" onchange="renderTable()" style="vertical-align:-2px;"> Sin stock</label>
       <label style="font-size:12px;"><input type="checkbox" id="only-rep" onchange="renderTable()" style="vertical-align:-2px;"> Con reposición</label>
+      <label style="font-size:12px;"><input type="checkbox" id="f-full" onchange="renderTable()" style="vertical-align:-2px;"> Con stock en Full</label>
+      <label style="font-size:12px;"><input type="checkbox" id="f-camino" onchange="renderTable()" style="vertical-align:-2px;"> Con stock en camino</label>
     </div>
     <div class="summary" style="margin-top:12px;">
       <span><span class="lbl">SKUs</span><b id="sum-skus">0</b></span>
@@ -242,6 +244,8 @@ function renderTable() {
   const onlyRep = document.getElementById('only-rep').checked;
   const fActivas = document.getElementById('f-activas').checked;
   const fSinStock = document.getElementById('f-sinstock').checked;
+  const fFull = document.getElementById('f-full').checked;
+  const fCamino = document.getElementById('f-camino').checked;
   const agingOp = document.getElementById('aging-op').value;
   const agingValRaw = document.getElementById('aging-val').value;
   const agingVal = agingValRaw === '' ? null : parseInt(agingValRaw);
@@ -262,6 +266,8 @@ function renderTable() {
   // si tildás las dos (o ninguna), muestra todo.
   if (fActivas && !fSinStock) rows = rows.filter(r => r._total > 0);
   else if (fSinStock && !fActivas) rows = rows.filter(r => r._total === 0);
+  if (fFull) rows = rows.filter(r => (r.stock_full || 0) > 0);
+  if (fCamino) rows = rows.filter(r => (r.stock_en_camino || 0) > 0);
   // Filtro por aging (días desde la última compra). Los SKU sin fecha de
   // compra (aging null) quedan fuera cuando hay un filtro de aging activo.
   if (agingOp && agingVal != null && !isNaN(agingVal)) {
