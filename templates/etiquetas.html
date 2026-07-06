@@ -162,14 +162,11 @@
         Corte por día. Lo que queda listo <b>después</b> del corte va a la colecta/despacho de
         <b>mañana</b> y no se muestra hoy. Formato 24hs <code>HH:MM</code>. Dejá el corte vacío si ese día no opera.<br>
         <b>Colecta</b> cambia semana a semana (lo ves en ML → Preferencias de venta → Horarios de envío con colecta) → actualizalo a mano cuando cambie.
-        <b>Flex</b> lo configurás vos y no cambia salvo que lo cambies.
+        <b>Flex</b> lo configurás vos y no cambia salvo que lo cambies.<br>
+        Con <b>TODAS las cuentas</b> seleccionado arriba, lo que guardés acá se aplica a todas tus cuentas ML. Elegí una cuenta puntual si necesitás un horario distinto solo para esa.
       </p>
       <div id="schedule-tables"></div>
       <div class="row" style="margin-top:12px;">
-        <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#555;">
-          <input type="checkbox" id="apply-all-accounts" />
-          Aplicar a todas mis cuentas ML
-        </label>
         <button class="green" onclick="saveSchedule()">Guardar horarios</button>
         <span id="schedule-msg" style="font-size:12px;color:#888;"></span>
       </div>
@@ -342,13 +339,12 @@ function renderColectaHoy(co) {
   const el = document.getElementById('cutoff-hoy');
   document.getElementById('colecta-card').style.display = 'block';
   const editBtn = document.getElementById('edit-schedule-btn');
+  if (editBtn) editBtn.style.display = '';
   if (isAll() || !co) {
     el.innerHTML = '★ <b>TODAS las cuentas</b>. El corte de hoy se aplica con la config de cada cuenta. ' +
-      'Para editar horarios, elegí una cuenta puntual.';
-    if (editBtn) editBtn.style.display = isAll() ? 'none' : '';
+      'Podés editar el horario acá y se aplica a todas tus cuentas ML.';
     return;
   }
-  if (editBtn) editBtn.style.display = '';
   el.innerHTML = '📦 ' + cutoffLine('Colecta', co.cross_docking) +
     ' &nbsp;|&nbsp; 🛵 ' + cutoffLine('Flex', co.self_service) +
     '<div style="color:#999;font-size:11px;margin-top:4px;">Lo que entra después del corte va a mañana.</div>';
@@ -360,7 +356,8 @@ async function toggleScheduleEditor() {
   if (ed.style.display === 'none') {
     if (!SCHEDULES) {
       try {
-        const r = await fetch(`/api/etiquetas/${accId()}/cutoff_schedule`);
+        const url = isAll() ? `/api/etiquetas/all/cutoff_schedule` : `/api/etiquetas/${accId()}/cutoff_schedule`;
+        const r = await fetch(url);
         SCHEDULES = (await r.json()).schedules || {};
       } catch (e) { SCHEDULES = {}; }
     }
@@ -395,17 +392,17 @@ async function saveSchedule() {
     const lg = inp.getAttribute('data-lg'), i = +inp.getAttribute('data-i'), f = inp.getAttribute('data-f');
     if (SCHEDULES[lg] && SCHEDULES[lg][i]) SCHEDULES[lg][i][f] = inp.value.trim();
   });
-  const applyAll = document.getElementById('apply-all-accounts').checked;
   const msg = document.getElementById('schedule-msg');
   msg.textContent = 'Guardando...';
   try {
-    const r = await fetch(`/api/etiquetas/${accId()}/cutoff_schedule`, {
+    const url = isAll() ? `/api/etiquetas/all/cutoff_schedule` : `/api/etiquetas/${accId()}/cutoff_schedule`;
+    const r = await fetch(url, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ schedules: SCHEDULES, apply_all: applyAll }),
+      body: JSON.stringify({ schedules: SCHEDULES }),
     });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const j = await r.json();
-    msg.textContent = applyAll
+    msg.textContent = isAll()
       ? `Guardado en ${j.applied_to} cuenta(s). Recargá los envíos para aplicar el nuevo corte.`
       : 'Guardado. Recargá los envíos para aplicar el nuevo corte.';
   } catch (e) {

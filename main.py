@@ -4808,15 +4808,7 @@ async def api_etiquetas(request: Request, account_id: int):
     }
 
 
-@app.get("/api/etiquetas/{account_id:int}/cutoff_schedule")
-async def api_etiquetas_get_schedule(request: Request, account_id: int):
-    user_id = get_session_user_id(request)
-    if not user_id:
-        raise HTTPException(401)
-    user = get_user(user_id)
-    require_page(user, "etiquetas")
-    if not _account_for_user(account_id, user_id):
-        raise HTTPException(404)
+def _etq_schedule_payload(account_id: int) -> dict:
     out = {}
     for lg in ETQ_CUTOFF_LOGISTICS:
         cutoffs = _get_cutoffs(account_id, lg)
@@ -4826,27 +4818,10 @@ async def api_etiquetas_get_schedule(request: Request, account_id: int):
              "ventana": cutoffs.get(wd, {}).get("ventana", "")}
             for wd in range(7)
         ]
-    return {"schedules": out}
+    return out
 
 
-@app.post("/api/etiquetas/{account_id:int}/cutoff_schedule")
-async def api_etiquetas_save_schedule(request: Request, account_id: int):
-    user_id = get_session_user_id(request)
-    if not user_id:
-        raise HTTPException(401)
-    user = get_user(user_id)
-    require_page(user, "etiquetas")
-    if not _account_for_user(account_id, user_id):
-        raise HTTPException(404)
-    body = await request.json()
-    schedules = body.get("schedules") or {}
-    apply_all = bool(body.get("apply_all"))
-    target_ids = [account_id]
-    if apply_all:
-        owner = _accounts_owner_id(user, user_id)
-        target_ids = [r["id"] for r in db_fetchall("SELECT id FROM ml_accounts WHERE user_id=:uid", {"uid": owner})]
-        if account_id not in target_ids:
-            target_ids.append(account_id)
+def _etq_apply_schedules(target_ids: list, schedules: dict) -> None:
     for lg in ETQ_CUTOFF_LOGISTICS:
         rows = schedules.get(lg)
         if not isinstance(rows, list):
@@ -4863,6 +4838,61 @@ async def api_etiquetas_save_schedule(request: Request, account_id: int):
             _save_cutoffs(aid, lg, schedule)
     for aid in target_ids:
         ETIQUETAS_CACHE.pop(aid, None)  # invalida cache: cambió el filtro
+
+
+@app.get("/api/etiquetas/{account_id:int}/cutoff_schedule")
+async def api_etiquetas_get_schedule(request: Request, account_id: int):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    user = get_user(user_id)
+    require_page(user, "etiquetas")
+    if not _account_for_user(account_id, user_id):
+        raise HTTPException(404)
+    return {"schedules": _etq_schedule_payload(account_id)}
+
+
+@app.post("/api/etiquetas/{account_id:int}/cutoff_schedule")
+async def api_etiquetas_save_schedule(request: Request, account_id: int):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    user = get_user(user_id)
+    require_page(user, "etiquetas")
+    if not _account_for_user(account_id, user_id):
+        raise HTTPException(404)
+    body = await request.json()
+    _etq_apply_schedules([account_id], body.get("schedules") or {})
+    return {"ok": True, "applied_to": 1}
+
+
+@app.get("/api/etiquetas/all/cutoff_schedule")
+async def api_etiquetas_get_schedule_all(request: Request):
+    """Trae un horario de referencia (el de la primera cuenta) para editar y
+    aplicar a todas las cuentas de una — se usa cuando el selector está en
+    'TODAS las cuentas'."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    user = get_user(user_id)
+    require_page(user, "etiquetas")
+    accounts = get_visible_accounts(user_id, user)
+    if not accounts:
+        return {"schedules": _etq_schedule_payload(-1)}
+    return {"schedules": _etq_schedule_payload(accounts[0]["id"])}
+
+
+@app.post("/api/etiquetas/all/cutoff_schedule")
+async def api_etiquetas_save_schedule_all(request: Request):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    user = get_user(user_id)
+    require_page(user, "etiquetas")
+    owner = _accounts_owner_id(user, user_id)
+    target_ids = [r["id"] for r in db_fetchall("SELECT id FROM ml_accounts WHERE user_id=:uid", {"uid": owner})]
+    body = await request.json()
+    _etq_apply_schedules(target_ids, body.get("schedules") or {})
     return {"ok": True, "applied_to": len(target_ids)}
 
 
