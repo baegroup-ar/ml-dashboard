@@ -49,6 +49,8 @@
 
     .ratings { display: flex; gap: 16px; font-size: 12px; color: #666; margin-top: 14px; flex-wrap: wrap; }
     .ratings b { color: #111; }
+    .hist { font-size: 12px; color: #999; margin-top: 14px; padding-top: 12px; border-top: 1px solid #f0f0ee; }
+    .hist b { color: #555; }
     .err { background: #fce9e9; color: #c0392b; border: 1px solid #f5c6c6; border-radius: 8px; padding: 10px 14px; font-size: 13px; }
     .no-accounts { text-align: center; padding: 4rem; color: #888; font-size: 14px; }
   </style>
@@ -123,11 +125,9 @@
     {% if r.error %}
       <div class="err" style="margin-top:14px;">No se pudo traer la reputación: {{ r.error }}</div>
     {% else %}
-      {% if r.period %}<div class="period" style="margin-top:14px;">Ventas de los últimos {{ r.period }}</div>{% endif %}
+      <div class="period" style="margin-top:14px;">Últimos {{ r.period }}</div>
       <div class="tx-grid">
-        <div class="tx-cell"><div class="n">{{ '{:,}'.format(r.tx_total).replace(',', '.') if r.tx_total is not none else '—' }}</div><div class="l">Ventas</div></div>
-        <div class="tx-cell"><div class="n">{{ '{:,}'.format(r.tx_completed).replace(',', '.') if r.tx_completed is not none else '—' }}</div><div class="l">Concretadas</div></div>
-        <div class="tx-cell"><div class="n">{{ '{:,}'.format(r.tx_canceled).replace(',', '.') if r.tx_canceled is not none else '—' }}</div><div class="l">Canceladas</div></div>
+        <div class="tx-cell"><div class="n">{{ '{:,}'.format(r.sales_completed).replace(',', '.') if r.sales_completed is not none else '—' }}</div><div class="l">Ventas concretadas</div></div>
       </div>
 
       {% if r.metrics %}
@@ -148,6 +148,15 @@
         <span>🟢 Positivas <b>{{ ((r.ratings_positive or 0) * 100) | round(0) | int }}%</b></span>
         <span>⚪ Neutras <b>{{ ((r.ratings_neutral or 0) * 100) | round(0) | int }}%</b></span>
         <span>🔴 Negativas <b>{{ ((r.ratings_negative or 0) * 100) | round(0) | int }}%</b></span>
+      </div>
+      {% endif %}
+
+      {% if r.hist_total is not none %}
+      <div class="hist">
+        Histórico de la cuenta:
+        <b>{{ '{:,}'.format(r.hist_total).replace(',', '.') }}</b> ventas ·
+        <b>{{ '{:,}'.format(r.hist_completed).replace(',', '.') if r.hist_completed is not none else '—' }}</b> concretadas ·
+        <b>{{ '{:,}'.format(r.hist_canceled).replace(',', '.') if r.hist_canceled is not none else '—' }}</b> canceladas
       </div>
       {% endif %}
     {% endif %}

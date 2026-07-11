@@ -4116,19 +4116,36 @@ async def _fetch_account_reputation(acc: dict) -> dict:
     ratings = tx.get("ratings") or {}
     metrics = rep.get("metrics") or {}
 
+    # Traduce el período que devuelve ML ("60 days" / "365 days") a ES.
+    def _period_es(p):
+        if not p:
+            return None
+        return str(p).replace("days", "días").replace("day", "día")
+
     # Métricas (Reclamos / Envíos con demora / Cancelaciones): % y cantidad.
+    # OJO: estas métricas son de los últimos 60 días (mismo período que muestra
+    # ML en su panel de Reputación), NO del histórico.
+    metrics_period = None
     metric_rows = []
     for key, label in REPUTACION_METRIC_LABELS.items():
         m = metrics.get(key)
         if not isinstance(m, dict):
             continue
         rate = m.get("rate")
+        metrics_period = metrics_period or m.get("period")
         metric_rows.append({
             "label": label,
             "pct": round(float(rate) * 100, 2) if rate is not None else None,
             "value": m.get("value"),
-            "period": m.get("period") or tx.get("period"),
         })
+
+    # Ventas concretadas del PERÍODO (60 días) → esto sí matchea el panel de ML.
+    # El bloque `transactions` de la API, en cambio, es el HISTÓRICO de la cuenta.
+    sales = metrics.get("sales") or {}
+    metrics_period = metrics_period or sales.get("period")
+    sales_completed = sales.get("completed")
+    if sales_completed is None:
+        sales_completed = sales.get("value")
 
     level_id = rep.get("level_id") or ""
     out.update({
@@ -4136,10 +4153,11 @@ async def _fetch_account_reputation(acc: dict) -> dict:
         "level_color": REPUTACION_LEVEL_COLORS.get(level_id),
         "power_status": rep.get("power_seller_status"),
         "power_label": REPUTACION_POWER_LABELS.get(rep.get("power_seller_status") or ""),
-        "period": tx.get("period"),
-        "tx_total": tx.get("total"),
-        "tx_completed": tx.get("completed"),
-        "tx_canceled": tx.get("canceled"),
+        "period": _period_es(metrics_period) or "60 días",
+        "sales_completed": sales_completed,     # 60 días (matchea ML)
+        "hist_total": tx.get("total"),          # histórico de la cuenta
+        "hist_completed": tx.get("completed"),
+        "hist_canceled": tx.get("canceled"),
         "ratings_positive": ratings.get("positive"),
         "ratings_neutral": ratings.get("neutral"),
         "ratings_negative": ratings.get("negative"),
