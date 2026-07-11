@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Reputación · Panel BAE</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Cantarell:ital,wght@0,400;0,700;1,400&amp;display=swap" rel="stylesheet"><link rel="icon" type="image/png" href="/static/bae-favicon.png">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Cantarell', 'Inter', system-ui, sans-serif; background: #f7f7f5; color: #111; }
+    nav { background: #fff; border-bottom: 1px solid #e5e5e3; padding: 0 1.5rem; height: 56px; display: flex; align-items: center; justify-content: space-between; }
+    .nav-brand { font-weight: 600; font-size: 15px; display: flex; align-items: center; gap: 8px; }
+    .nav-right { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+    .btn-nav { padding: 6px 14px; border: 1px solid #ddd; border-radius: 8px; background: #fff; font-size: 13px; cursor: pointer; text-decoration: none; color: #111; }
+    .nav-dropdown { position: relative; display: inline-block; }
+    .nav-dropdown .dropdown-trigger.active { color: #005CFF; font-weight: 500; border-color: #005CFF; }
+    .nav-dropdown .dropdown-menu { display: none; position: absolute; top: calc(100% + 4px); left: 0; background: #fff; border: 1px solid #ddd; border-radius: 8px; min-width: 170px; z-index: 100; box-shadow: 0 6px 16px rgba(0,0,0,0.10); padding: 6px; flex-direction: column; }
+    .nav-dropdown:hover .dropdown-menu { display: flex; }
+    .dropdown-menu a.dropdown-item, .dropdown-menu span.dropdown-item { display: block; padding: 8px 10px; font-size: 13px; color: #111; text-decoration: none; border-radius: 6px; white-space: nowrap; cursor: pointer; }
+    .dropdown-menu a.dropdown-item:hover { background: #f5f5f3; }
+    .dropdown-menu span.dropdown-item.active { color: #005CFF; font-weight: 500; background: #EAF1FF; cursor: default; }
+    main { max-width: 1280px; margin: 0 auto; padding: 1.5rem; }
+    h1 { font-size: 20px; font-weight: 600; margin-bottom: 6px; }
+    p.lead { font-size: 13px; color: #888; margin-bottom: 1.25rem; }
+
+    .acc-card { background: #fff; border: 1px solid #e5e5e3; border-radius: 14px; padding: 1.25rem 1.5rem; margin-bottom: 1.25rem; }
+    .acc-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding-bottom: 14px; border-bottom: 1px solid #f0f0ee; }
+    .acc-name { font-size: 17px; font-weight: 600; display: flex; align-items: center; gap: 10px; }
+    .acc-name .dot { width: 9px; height: 9px; border-radius: 50%; background: #ccc; display: inline-block; }
+    .power { display: flex; align-items: center; gap: 10px; }
+    .power-label { font-size: 14px; font-weight: 600; color: #1a8a5a; }
+    .thermo { display: flex; gap: 4px; }
+    .thermo span { width: 34px; height: 9px; border-radius: 3px; background: #eee; opacity: .35; }
+    .thermo span.on { opacity: 1; }
+
+    .tx-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; margin: 16px 0 4px; }
+    .tx-cell { padding: 8px 4px; }
+    .tx-cell .n { font-size: 20px; font-weight: 700; color: #111; }
+    .tx-cell .l { font-size: 12px; color: #888; margin-top: 2px; }
+    .period { font-size: 12px; color: #aaa; margin-bottom: 4px; }
+
+    .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-top: 16px; }
+    .metric { border: 1px solid #eee; border-radius: 10px; padding: 12px 14px; }
+    .metric .mlabel { font-size: 13px; color: #666; font-weight: 500; }
+    .metric .mpct { font-size: 24px; font-weight: 700; margin: 4px 0 2px; }
+    .metric .mval { font-size: 12px; color: #999; }
+    .metric.ok .mpct { color: #1a8a5a; }
+
+    .ratings { display: flex; gap: 16px; font-size: 12px; color: #666; margin-top: 14px; flex-wrap: wrap; }
+    .ratings b { color: #111; }
+    .err { background: #fce9e9; color: #c0392b; border: 1px solid #f5c6c6; border-radius: 8px; padding: 10px 14px; font-size: 13px; }
+    .no-accounts { text-align: center; padding: 4rem; color: #888; font-size: 14px; }
+  </style>
+</head>
+<body>
+<nav>
+  <div class="nav-brand">
+    <img src="/static/bae-icon.png" alt="Tienda Bae" style="height:32px;width:auto;display:block;" />
+    Tienda Bae App
+  </div>
+  <div class="nav-right">
+    {% if 'dashboard' in perms or 'reputacion' in perms or 'descuentos' in perms or 'ranking' in perms or 'etiquetas' in perms or 'publicaciones' in perms or 'fotos' in perms %}
+    <div class="nav-dropdown">
+      <span class="btn-nav dropdown-trigger active">Mercadolibre ▾</span>
+      <div class="dropdown-menu">
+        {% if 'dashboard' in perms %}<a href="/dashboard" class="dropdown-item">Dashboard</a>{% endif %}
+        <span class="dropdown-item active">Reputación</span>
+        {% if 'descuentos' in perms %}<a href="/descuentos" class="dropdown-item">Descuentos</a>{% endif %}
+        {% if 'ranking' in perms %}<a href="/ranking" class="dropdown-item">Ranking</a>{% endif %}
+        {% if 'etiquetas' in perms %}<a href="/etiquetas" class="dropdown-item">Etiquetas</a>{% endif %}
+        {% if 'publicaciones' in perms %}<a href="/publicaciones" class="dropdown-item">Publicaciones</a>{% endif %}
+        {% if 'fotos' in perms %}<a href="/fotos" class="dropdown-item">Fotos</a>{% endif %}
+      </div>
+    </div>
+    {% endif %}
+    {% if 'costos' in perms or 'pvp' in perms or 'clientes' in perms or 'base_sku' in perms or 'envios_flex' in perms %}
+    <div class="nav-dropdown">
+      <span class="btn-nav dropdown-trigger">Base de Datos ▾</span>
+      <div class="dropdown-menu">
+        {% if 'costos' in perms %}<a href="/costos" class="dropdown-item">Costos (CMV)</a>{% endif %}
+        {% if 'pvp' in perms %}<a href="/pvp" class="dropdown-item">PVP</a>{% endif %}
+        {% if 'clientes' in perms %}<a href="/clientes" class="dropdown-item">Clientes</a>{% endif %}
+        {% if 'base_sku' in perms %}<a href="/base-sku" class="dropdown-item">SKUs</a>{% endif %}
+        {% if 'envios_flex' in perms %}<a href="/costos/envios-flex" class="dropdown-item">Envíos Flex</a>{% endif %}
+      </div>
+    </div>
+    {% endif %}
+    {% if 'stock' in perms %}<a href="/stock" class="btn-nav">Stock valorizado</a>{% endif %}
+    <span style="color:#888;">{{ user.name }}</span>
+    {% if user.is_admin %}<a href="/admin" style="font-size:12px;color:#005CFF;text-decoration:none;">Admin</a>{% endif %}
+    <a href="/logout" class="btn-nav">Salir</a>
+  </div>
+</nav>
+
+<main>
+  <h1>Reputación</h1>
+  <p class="lead">Reputación de cada cuenta de MercadoLibre, según los datos que expone la API de ML (últimos 60 días).</p>
+
+  {% if not reputations %}
+    <div class="no-accounts">No hay cuentas de MercadoLibre conectadas.</div>
+  {% endif %}
+
+  {% for r in reputations %}
+  <div class="acc-card">
+    <div class="acc-head">
+      <div class="acc-name">
+        <span class="dot" {% if r.level_color %}style="background:{{ r.level_color }};"{% endif %}></span>
+        {{ r.nickname or ('Cuenta ' ~ r.id) }}
+      </div>
+      <div class="power">
+        {% if r.power_label %}<span class="power-label">🏅 {{ r.power_label }}</span>{% endif %}
+        <div class="thermo">
+          {% set order = ['1_red','2_orange','3_yellow','4_light_green','5_green'] %}
+          {% for lv in order %}
+            <span class="{% if lv == r.level_id %}on{% endif %}"
+                  style="background:{% if lv == r.level_id and r.level_color %}{{ r.level_color }}{% else %}#{{ {'1_red':'f2b8bd','2_orange':'fad3b3','3_yellow':'faedc0','4_light_green':'d6ead1','5_green':'bfe0cd'}[lv] }}{% endif %};"></span>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+
+    {% if r.error %}
+      <div class="err" style="margin-top:14px;">No se pudo traer la reputación: {{ r.error }}</div>
+    {% else %}
+      {% if r.period %}<div class="period" style="margin-top:14px;">Ventas de los últimos {{ r.period }}</div>{% endif %}
+      <div class="tx-grid">
+        <div class="tx-cell"><div class="n">{{ '{:,}'.format(r.tx_total).replace(',', '.') if r.tx_total is not none else '—' }}</div><div class="l">Ventas</div></div>
+        <div class="tx-cell"><div class="n">{{ '{:,}'.format(r.tx_completed).replace(',', '.') if r.tx_completed is not none else '—' }}</div><div class="l">Concretadas</div></div>
+        <div class="tx-cell"><div class="n">{{ '{:,}'.format(r.tx_canceled).replace(',', '.') if r.tx_canceled is not none else '—' }}</div><div class="l">Canceladas</div></div>
+      </div>
+
+      {% if r.metrics %}
+      <div class="metrics">
+        {% for m in r.metrics %}
+        <div class="metric ok">
+          <div class="mlabel">{{ m.label }}</div>
+          <div class="mpct">{{ ('%g' % m.pct) ~ '%' if m.pct is not none else '—' }}</div>
+          <div class="mval">{% if m.value is not none %}Son {{ m.value }} de tus ventas{% endif %}</div>
+        </div>
+        {% endfor %}
+      </div>
+      {% endif %}
+
+      {% if r.ratings_positive is not none or r.ratings_negative is not none %}
+      <div class="ratings">
+        <span>Calificaciones:</span>
+        <span>🟢 Positivas <b>{{ ((r.ratings_positive or 0) * 100) | round(0) | int }}%</b></span>
+        <span>⚪ Neutras <b>{{ ((r.ratings_neutral or 0) * 100) | round(0) | int }}%</b></span>
+        <span>🔴 Negativas <b>{{ ((r.ratings_negative or 0) * 100) | round(0) | int }}%</b></span>
+      </div>
+      {% endif %}
+    {% endif %}
+  </div>
+  {% endfor %}
+</main>
+</body>
+</html>

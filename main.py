@@ -4056,6 +4056,117 @@ def _parse_csv_flex(content: bytes) -> list:
 
 # ── Descuentos / Promociones ───────────────────────────────────────
 
+# ── Reputación ───────────────────────────────────────────────────────────────
+# Orden fijo de cuentas pedido por el negocio.
+REPUTACION_ORDER = ["TIENDA BAE", "BAETECH", "LAMUS"]
+
+# Etiquetas ES para las métricas que devuelve seller_reputation.metrics.
+REPUTACION_METRIC_LABELS = {
+    "claims": "Reclamos",
+    "delayed_handling_time": "Envíos con demora",
+    "cancellations": "Canceladas por vos",
+}
+# Semáforo de reputación (level_id ML → color).
+REPUTACION_LEVEL_COLORS = {
+    "1_red": "#e63946", "2_orange": "#f4801f", "3_yellow": "#f2c94c",
+    "4_light_green": "#8bc34a", "5_green": "#1a8a5a",
+}
+REPUTACION_POWER_LABELS = {
+    "platinum": "MercadoLíder Platinum",
+    "gold": "MercadoLíder Gold",
+    "silver": "MercadoLíder",
+}
+
+
+def _reputacion_sort_key(acc: dict):
+    nick = str(acc.get("nickname") or "").strip().upper()
+    try:
+        return (REPUTACION_ORDER.index(nick), nick)
+    except ValueError:
+        return (len(REPUTACION_ORDER), nick)
+
+
+async def _fetch_account_reputation(acc: dict) -> dict:
+    """Trae seller_reputation de una cuenta ML. Tolerante a fallos: nunca lanza,
+    devuelve {'error': ...} si algo falla para que la página muestre el resto."""
+    out = {"id": acc["id"], "nickname": (acc.get("nickname") or "").strip()}
+    token = await refresh_ml_token(acc["id"])
+    if not token:
+        out["error"] = "Sin token (reconectá la cuenta)"
+        return out
+    ml_user_id = str(acc.get("ml_user_id") or "").strip()
+    try:
+        async with httpx.AsyncClient(timeout=12) as client:
+            resp = await client.get(
+                f"{ML_API_URL}/users/{ml_user_id}",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        if resp.status_code != 200:
+            out["error"] = f"ML respondió {resp.status_code}"
+            return out
+        data = resp.json()
+    except Exception as e:
+        out["error"] = f"Error de conexión: {e}"
+        return out
+
+    if not out["nickname"]:
+        out["nickname"] = (data.get("nickname") or "").strip()
+    rep = data.get("seller_reputation") or {}
+    tx = rep.get("transactions") or {}
+    ratings = tx.get("ratings") or {}
+    metrics = rep.get("metrics") or {}
+
+    # Métricas (Reclamos / Envíos con demora / Cancelaciones): % y cantidad.
+    metric_rows = []
+    for key, label in REPUTACION_METRIC_LABELS.items():
+        m = metrics.get(key)
+        if not isinstance(m, dict):
+            continue
+        rate = m.get("rate")
+        metric_rows.append({
+            "label": label,
+            "pct": round(float(rate) * 100, 2) if rate is not None else None,
+            "value": m.get("value"),
+            "period": m.get("period") or tx.get("period"),
+        })
+
+    level_id = rep.get("level_id") or ""
+    out.update({
+        "level_id": level_id,
+        "level_color": REPUTACION_LEVEL_COLORS.get(level_id),
+        "power_status": rep.get("power_seller_status"),
+        "power_label": REPUTACION_POWER_LABELS.get(rep.get("power_seller_status") or ""),
+        "period": tx.get("period"),
+        "tx_total": tx.get("total"),
+        "tx_completed": tx.get("completed"),
+        "tx_canceled": tx.get("canceled"),
+        "ratings_positive": ratings.get("positive"),
+        "ratings_neutral": ratings.get("neutral"),
+        "ratings_negative": ratings.get("negative"),
+        "metrics": metric_rows,
+    })
+    return out
+
+
+@app.get("/reputacion", response_class=HTMLResponse)
+async def reputacion_page(request: Request):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse("/")
+    user = get_user(user_id)
+    _r = _page_redirect(user, "reputacion")
+    if _r:
+        return _r
+    accounts = get_visible_accounts(user_id, user)
+    accounts = await refresh_visible_account_nicknames(accounts)
+    accounts = sorted(accounts, key=_reputacion_sort_key)
+    reputations = await asyncio.gather(*(_fetch_account_reputation(a) for a in accounts))
+    return templates.TemplateResponse("reputacion.html", {
+        "request": request, "user": user, "reputations": list(reputations),
+        "perms": user_permissions(user),
+    })
+
+
 @app.get("/descuentos", response_class=HTMLResponse)
 async def descuentos_page(request: Request):
     user_id = get_session_user_id(request)
@@ -9380,6 +9491,7 @@ async def api_orders_export(
 # slugs internos; los labels los muestra la UI. El admin SIEMPRE las ve.
 PAGES = [
     ("dashboard",   "Dashboard"),
+    ("reputacion",  "Reputación"),
     ("costos",      "Costos (CMV)"),
     ("envios_flex", "Envíos Flex"),
     ("descuentos",  "Descuentos"),
