@@ -243,6 +243,12 @@
       <input type="search" id="preview-search" placeholder="SKU o MLA" oninput="onPreviewSearchChange()" style="min-width:240px;flex:1;max-width:420px;padding:6px 10px;border:1px solid #ddd;border-radius:8px;font-size:13px;" />
       <button onclick="exportPreviewFiltered()" style="padding:7px 12px;border:1px solid #1a8a5a;background:#fff;color:#1a8a5a;border-radius:8px;font-size:12px;cursor:pointer;">Excel filtrado</button>
     </div>
+    <div class="row" style="margin-bottom:10px;gap:8px;align-items:center;background:#EAF1FF;border:1px solid #cfe0ff;border-radius:8px;padding:8px 12px;flex-wrap:wrap;">
+      <label style="font-size:13px;color:#005CFF;font-weight:600;">Desc. adicional (a todos):</label>
+      <input type="number" id="extra-pct" min="0" max="100" step="0.5" value="0" oninput="onExtraPctChange()" style="width:90px;padding:6px 8px;border:1px solid #cfe0ff;border-radius:8px;font-size:13px;" />
+      <span style="font-size:13px;color:#005CFF;">%</span>
+      <span style="font-size:12px;color:#666;">Se suma a “Tu desc.” de cada item (base + adicional) y se aplica así a los seleccionados. No afecta a SMART/precio fijo de ML ni a los que no tienen descuento cargado.</span>
+    </div>
     <div class="summary" id="preview-summary"></div>
     <div style="overflow-x:auto;">
       <table class="preview-table">
@@ -747,11 +753,38 @@
   let previewFilter = 'all';
   let previewSearch = '';
 
+  // ── Desc. adicional global (se suma a "Tu desc." de cada item) ──
+  function getExtraPct() {
+    const v = parseFloat(document.getElementById('extra-pct')?.value);
+    return (isFinite(v) && v > 0) ? v : 0;
+  }
+  // SMART/MARKETPLACE: ML fija el precio exacto → el adicional NO tiene efecto.
+  function isFixedPricePromo(it) {
+    const t = (it.promotion_type || (currentPromo && currentPromo.type) || '').toUpperCase();
+    return t === 'SMART' || t === 'MARKETPLACE_CAMPAIGN';
+  }
+  // "Tu desc." EFECTIVO = lo cargado en la base + el adicional (salvo precio fijo).
+  // Si no hay descuento cargado, no hay a qué sumarle → null.
+  function effLoaded(it) {
+    if(it.loaded_discount_pct == null) return null;
+    const extra = isFixedPricePromo(it) ? 0 : getExtraPct();
+    return Math.min(100, Math.round((it.loaded_discount_pct + extra) * 100) / 100);
+  }
+  // below_min recalculado con el desc. efectivo (el adicional puede sacarlo del piso).
+  function effBelowMin(it) {
+    const eff = effLoaded(it);
+    if(eff == null || it.min_discount_pct == null) return false;
+    return eff <= it.min_discount_pct;
+  }
+  function onExtraPctChange() {
+    renderPreview();
+  }
+
   function computeItemGap(it) {
     const target = it.min_discount_pct != null ? it.min_discount_pct : null;
     if(target == null) return null;
     const required = target + 0.1;
-    const loaded = it.loaded_discount_pct != null ? it.loaded_discount_pct : 0;
+    const loaded = effLoaded(it) != null ? effLoaded(it) : 0;
     return Math.max(0, Math.round((required - loaded) * 10) / 10);
   }
 
@@ -761,7 +794,7 @@
   //   (el +0.1 es porque ML exige SUPERAR estrictamente el piso, no igualarlo)
   // - Sin descuento cargado → null (no se aplica)
   function applySellerPct(it) {
-    const loaded = it.loaded_discount_pct;
+    const loaded = effLoaded(it);   // base + adicional
     const min = it.min_discount_pct;
     if(loaded == null) return null;
     if(min == null || loaded > min) return loaded;
@@ -799,14 +832,18 @@
       const gap = computeItemGap(it);
       // Filtro por tipo
       switch(previewFilter) {
-        case 'upgrade':
-          if(!(it.ml_applied_pct != null && it.loaded_discount_pct != null
-               && (it.loaded_discount_pct - it.ml_applied_pct) > 0.4)) return false;
+        case 'upgrade': {
+          const el = effLoaded(it);
+          if(!(it.ml_applied_pct != null && el != null
+               && (el - it.ml_applied_pct) > 0.4)) return false;
           break;
-        case 'downgrade':
-          if(!(it.ml_applied_pct != null && it.loaded_discount_pct != null
-               && (it.ml_applied_pct - it.loaded_discount_pct) > 0.4)) return false;
+        }
+        case 'downgrade': {
+          const el = effLoaded(it);
+          if(!(it.ml_applied_pct != null && el != null
+               && (it.ml_applied_pct - el) > 0.4)) return false;
           break;
+        }
         case 'nodisc': if(it.loaded_discount_pct != null) return false; break;
         case 'ok':     if(gap !== 0) return false; break;
         case 'below':  if(!(gap != null && gap > 0)) return false; break;
@@ -922,7 +959,7 @@
     currentItems.forEach(it => {
       if(it.loaded_discount_pct == null) sinDesc++;
       else cargados++;
-      if(it.below_min) debajoMin++;
+      if(effBelowMin(it)) debajoMin++;
     });
     // Aplicar filtro + paginar
     const filtered = getFilteredItems();
@@ -937,13 +974,14 @@
       const pageItems = filtered.slice(start, start + PREVIEW_PAGE_SIZE);
       tbody.innerHTML = pageItems.map(it => {
         const sinDescuento = it.loaded_discount_pct == null;
-        const debajo = it.below_min;
+        const debajo = effBelowMin(it);
+        const eff = effLoaded(it);
         const rowCls = sinDescuento ? 'row-gray' : (debajo ? 'row-warn' : '');
         let estado = '';
         if(sinDescuento) {
           estado = '<span class="badge gray">Sin descuento cargado</span>';
         } else if(debajo) {
-          estado = `<span class="badge warn" title="Tu descuento (${it.loaded_discount_pct}%) está por debajo del mínimo de ML (${it.min_discount_pct}%). Si lo seleccionás, se aplica el mínimo de ML.">Aplica desc. ML ${it.min_discount_pct}%</span>`;
+          estado = `<span class="badge warn" title="Tu descuento (${eff}%) está por debajo del mínimo de ML (${it.min_discount_pct}%). Si lo seleccionás, se aplica el mínimo de ML.">Aplica desc. ML ${it.min_discount_pct}%</span>`;
         } else {
           estado = '<span class="badge ok">Listo para aplicar</span>';
         }
@@ -986,7 +1024,7 @@
             <td style="font-family:monospace;font-size:12px;">${it.mla || '—'}</td>
             <td><b>${it.sku || '—'}</b></td>
             <td class="num">${fmt(it.original_price)}</td>
-            <td class="num">${it.loaded_discount_pct != null ? it.loaded_discount_pct + '%' : '0%'}</td>
+            <td class="num" ${(!sinDescuento && eff !== it.loaded_discount_pct) ? `title="Base ${it.loaded_discount_pct}% + adicional ${getExtraPct()}%"` : ''}>${eff != null ? eff + '%' + ((eff !== it.loaded_discount_pct) ? ' <span style="color:#005CFF;font-size:11px;">(+' + getExtraPct() + ')</span>' : '') : '0%'}</td>
             <td class="num col-ml-applied">${it.ml_applied_pct != null ? '<b style="color:#005CFF;">' + it.ml_applied_pct + '%</b>' : '<span style="color:#bbb;">—</span>'}</td>
             <td class="num">${descMlCell}</td>
             <td class="num">${diffCell}</td>
@@ -1072,13 +1110,13 @@
       const gap = computeItemGap(it);
       const estado = it.loaded_discount_pct == null
         ? 'Sin descuento cargado'
-        : (it.below_min ? `Debe superar ${it.min_discount_pct}%` : 'Listo para aplicar');
+        : (effBelowMin(it) ? `Debe superar ${it.min_discount_pct}%` : 'Listo para aplicar');
       return `<tr>
         <td>${esc(it.mla || it.item_id || '')}</td>
         <td>${esc(it.sku || '')}</td>
         <td>${esc(it.title || '')}</td>
         <td>${money(it.original_price)}</td>
-        <td>${pct(it.loaded_discount_pct)}</td>
+        <td>${pct(effLoaded(it))}</td>
         <td>${pct(it.min_discount_pct)}</td>
         <td>${pct(it.ml_contribution_pct)}</td>
         <td>${gap == null ? '' : pct(gap)}</td>
@@ -1148,11 +1186,13 @@
     if(!sel.length) return;
     const debajoMin = sel.filter(s => {
       const it = currentItems.find(x => x.item_id === s.item_id);
-      return it && it.below_min;
+      return it && effBelowMin(it);
     }).length;
     const normal = sel.length - debajoMin;
+    const extra = getExtraPct();
     let txt = `Vas a aplicar la promoción "${currentPromo.name}" a ${sel.length} items.`;
-    if(normal) txt += ` ${normal} con tu descuento.`;
+    if(extra > 0) txt += ` Con un descuento adicional de ${extra}% sumado a tu base (excepto SMART/precio fijo de ML).`;
+    if(normal) txt += ` ${normal} con tu descuento${extra > 0 ? ' (base + adicional)' : ''}.`;
     if(debajoMin) txt += ` ${debajoMin} con el descuento mínimo de ML (tu desc. está por debajo del mínimo).`;
     document.getElementById('confirm-text').textContent = txt;
     document.getElementById('confirm-modal').classList.add('show');
@@ -1227,8 +1267,9 @@
           const res = resById[it.item_id];
           if(res && res.applied_price && res.applied_original) {
             it.ml_applied_pct = Math.round((1 - res.applied_price / res.applied_original) * 1000) / 10;
-          } else if(it.loaded_discount_pct != null) {
-            it.ml_applied_pct = it.loaded_discount_pct;
+          } else {
+            const sp = applySellerPct(it);   // base + adicional (o mín+0.1)
+            if(sp != null) it.ml_applied_pct = sp;
           }
         });
       }
