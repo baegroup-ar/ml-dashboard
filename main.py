@@ -4691,24 +4691,42 @@ def _cutoff_minutes(cutoff: str):
         return None
 
 
-def _ready_after_cutoff(ready_iso: str, cutoffs: dict, today_ar: str) -> bool:
-    """True si el envío quedó listo HOY pero después del corte del día → va a la
-    colecta/despacho de mañana (no es para despachar hoy)."""
-    if not ready_iso:
-        return False
+def _next_colecta_date(ready_iso: str, cutoffs: dict, today_ar: str,
+                       now_ar: datetime) -> str:
+    """Fecha (YYYY-MM-DD, AR) de la próxima colecta/despacho que ML asignaría a
+    este envío, según el calendario de cortes (qué días hay colecta y su horario).
+
+    Un envío entra a la colecta del primer día D (desde que quedó listo / hoy) que:
+      (a) tiene colecta ese día,
+      (b) el envío ya está listo antes del corte de D, y
+      (c) el corte de D todavía no pasó (no lo asignamos a una colecta ya cumplida).
+    Así, lo que quedó listo tarde o en un día sin colecta (finde) rueda al próximo
+    día hábil de colecta — igual que "Tenés que darle el paquete a la colecta que
+    pasará el lunes" en ML. Devuelve today_ar si no se puede calcular (no esconder
+    envíos por falta de datos)."""
+    if not cutoffs:
+        return today_ar
     try:
         dt = datetime.fromisoformat(ready_iso)
     except Exception:
-        return False
+        return today_ar
     if dt.tzinfo is None:
-        return False
-    ar = dt.astimezone(AR_TZ)
-    if ar.date().isoformat() != today_ar:
-        return False  # listo otro día: ya está esperando, es para despachar
-    cm = _cutoff_minutes((cutoffs.get(ar.weekday()) or {}).get("cutoff") or "")
-    if cm is None:
-        return False
-    return (ar.hour * 60 + ar.minute) > cm
+        return today_ar
+    ready_ar = dt.astimezone(AR_TZ)
+    # Buscar desde el día en que quedó listo o desde hoy, el que sea mayor.
+    start = max(ready_ar.date(), now_ar.date())
+    for i in range(14):
+        d = start + timedelta(days=i)
+        cm = _cutoff_minutes((cutoffs.get(d.weekday()) or {}).get("cutoff") or "")
+        if cm is None:
+            continue  # ese día no hay colecta
+        cutoff_dt = datetime(d.year, d.month, d.day, cm // 60, cm % 60, tzinfo=AR_TZ)
+        if ready_ar > cutoff_dt:
+            continue  # no llegó al corte de ese día
+        if cutoff_dt < now_ar:
+            continue  # esa colecta ya pasó
+        return d.isoformat()
+    return today_ar
 
 
 def _ready_ar_parts(ready_iso: str):
@@ -4816,6 +4834,7 @@ async def _fetch_pending_shipments(account_id, acc, token) -> dict:
         details = await asyncio.gather(*[_get_ship(sid) for sid in ship_items])
 
     cutoffs_by_logistic = {lg: _get_cutoffs(account_id, lg) for lg in ETQ_CUTOFF_LOGISTICS}
+    now_ar = datetime.now(AR_TZ)
     diag = {"today_ar": today_ar, "fetched": len(details), "kept": 0,
             "excluded_future": 0, "excluded_after_cutoff": 0, "excluded_logistic": 0,
             "excluded_logistic_by_type": {}}
@@ -4845,9 +4864,12 @@ async def _fetch_pending_shipments(account_id, acc, token) -> dict:
         if isinstance(sh, dict):
             ready_iso_full = str((sh.get("status_history") or {}).get("date_ready_to_ship") or "")
         cuts = cutoffs_by_logistic.get(logistic_type)
-        if status == "ready_to_ship" and cuts and _ready_after_cutoff(ready_iso_full, cuts, today_ar):
-            diag["excluded_after_cutoff"] += 1
-            continue
+        next_colecta = ""
+        if status == "ready_to_ship" and cuts:
+            next_colecta = _next_colecta_date(ready_iso_full, cuts, today_ar, now_ar)
+            if next_colecta > today_ar:
+                diag["excluded_after_cutoff"] += 1
+                continue
         diag["kept"] += 1
         items = ship_items.get(sid, [])
         # Consolidar SKUs repetidos dentro del mismo envío
@@ -4895,6 +4917,7 @@ async def _fetch_pending_shipments(account_id, acc, token) -> dict:
             "distancia": _zona_distancia(zip_code),
             "receiver": receiver,
             "dispatch_date": dispatch_date,
+            "next_colecta": next_colecta,
             "ready_date": ready_date,
             "ready_fecha": ready_fecha,
             "ready_hora": ready_hora,
