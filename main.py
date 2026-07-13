@@ -31,7 +31,7 @@ MASTER_NAME = os.environ.get("MASTER_NAME", "Maestro")
 ML_AUTH_URL = "https://auth.mercadolibre.com.ar/authorization"
 ML_TOKEN_URL = "https://api.mercadolibre.com/oauth/token"
 ML_API_URL = "https://api.mercadolibre.com"
-SHIPPING_LOGIC_VERSION = "v34-logistic-type-in-orders"
+SHIPPING_LOGIC_VERSION = "v35-flex-loyal-receiver-bonif"
 PROMO_ITEM_SCAN_CACHE_TTL_SECONDS = 300
 PROMO_ITEM_SCAN_CACHE: dict[str, dict] = {}
 # Cache de resultados ya armados de /api/promociones/{acc}/{promo}/items.
@@ -1082,6 +1082,8 @@ async def get_shipping_cost(client, shipping_id, headers) -> dict:
     costs_sender_cost = 0.0
     costs_gross_amount = 0.0
     receiver_cost = 0.0
+    receiver_save = 0.0
+    receiver_discount = 0.0
     sender_discount = 0.0
     sender_save = 0.0
     compensation = 0.0
@@ -1091,6 +1093,8 @@ async def get_shipping_cost(client, shipping_id, headers) -> dict:
         costs_gross_amount = amount_value(cd.get("gross_amount"))
         receiver = cd.get("receiver") or {}
         receiver_cost = amount_value(receiver.get("cost"))
+        receiver_save = amount_value(receiver.get("save"))
+        receiver_discount = discount_total(receiver.get("discounts"))
         senders = cd.get("senders") or []
         if senders:
             s0 = senders[0]
@@ -1169,6 +1173,18 @@ async def get_shipping_cost(client, shipping_id, headers) -> dict:
         # sender.cost = 0 → flex env gratis o colecta env gratis cubierta por ML.
         # Todos los campos representan bonificaciones reales aquí.
         bonificacion = max(compensation, sender_save, sender_discount, option_discount_amount)
+
+    # Flex con envío gratis por beneficio de fidelidad ("loyal"): ML no le cobra
+    # al vendedor (sender.cost=0) ni al comprador (receiver.cost=0), pero le
+    # ACREDITA al vendedor el valor del envío. Ese monto aparece SÓLO del lado del
+    # receiver (receiver.save / receiver.discounts[].promoted_amount), no en ningún
+    # campo del sender, así que la fórmula de arriba lo pierde y la bonif queda 0.
+    # Caso orden #2000017383822592 (pack #2000013984600253): el panel de ML muestra
+    # $8.690 en "Descuentos y bonificaciones" y /costs sólo lo tenía en receiver.
+    # Gates estrictos para NO tocar ninguna venta que ya funciona: sólo Flex, sin
+    # cargo al vendedor ni al comprador, y cuando no hubo otra señal de bonif.
+    if is_flex and bonificacion == 0 and buyer_cost == 0 and costs_sender_cost == 0:
+        bonificacion = max(receiver_save, receiver_discount)
 
     # Fallback al 50% del list_cost SÓLO cuando /costs no respondió
     # (ej. shipments cancelados sin info). Si /costs respondió y devolvió
