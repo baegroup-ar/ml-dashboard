@@ -42,10 +42,18 @@
     .tabs { display: flex; gap: 6px; margin-bottom: 14px; }
     .tab-btn { padding: 8px 18px; border: 1px solid #ddd; border-radius: 8px; background: #fff; font-size: 13px; cursor: pointer; color: #444; }
     .tab-btn.active { background: #005CFF; color: #fff; border-color: #005CFF; font-weight: 500; }
-    .params-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px 16px; }
-    .params-grid .fld { display: flex; flex-direction: column; gap: 3px; }
-    .params-grid .fld label { font-size: 11px; color: #888; }
-    .params-grid .fld input { padding: 6px 8px; border: 1px solid #ddd; border-radius: 6px; font-size: 13px; }
+    .param-section { margin-top: 16px; padding: 14px 16px; border: 1px solid #eee; border-radius: 10px; background: #fcfcfb; }
+    .param-title { font-size: 13px; font-weight: 600; color: #333; margin-bottom: 10px; }
+    .param-title .param-sub { font-weight: 400; color: #999; font-size: 12px; }
+    .param-fields { display: flex; gap: 20px; flex-wrap: wrap; }
+    .param-fields .fld { display: flex; flex-direction: column; gap: 4px; }
+    .param-fields .fld label { font-size: 11px; color: #888; }
+    .param-hint { font-size: 11px; color: #999; margin-top: 8px; }
+    .p-in { padding: 6px 8px; border: 1px solid #ddd; border-radius: 6px; font-size: 13px; width: 120px; text-align: right; }
+    table.tramos { width: auto; min-width: 460px; border-collapse: collapse; font-size: 13px; margin-top: 4px; }
+    table.tramos th { padding: 6px 12px; font-size: 11px; color: #999; border-bottom: 1px solid #eee; }
+    table.tramos td { padding: 5px 12px; border-bottom: 1px solid #f2f2f0; }
+    table.tramos .p-in { width: 100px; }
     .pill { font-weight: 600; border-radius: 6px; padding: 2px 8px; font-size: 12px; }
     .pos { color: #1a8a5a; } .neg { color: #c0392b; } .mid { color: #b8860b; }
     details.params summary { cursor: pointer; font-size: 14px; font-weight: 600; color: #444; }
@@ -100,39 +108,67 @@
     <b>MELI</b> desglosa el cálculo (comisiones, envío, costo) hasta la Renta Bruta. El PVP MELI alimenta el Stock valorizado.
   </p>
 
-  {% if accounts %}
+  {% if account_id %}
   <div class="card">
     <div class="row">
-      <label>Cuenta ML:</label>
-      <select id="account-select" onchange="loadAll()">
-        {% set default_nick = 'TIENDA BAE' %}
-        {% set has_default = accounts | selectattr('nickname', 'equalto', default_nick) | list | length > 0 %}
-        {% for acc in accounts %}
-        <option value="{{ acc.id }}" {% if acc.nickname == default_nick or (not has_default and loop.first) %}selected{% endif %}>{{ acc.nickname }}</option>
-        {% endfor %}
-      </select>
-      <input type="text" id="search" placeholder="Buscar SKU..." oninput="renderActive()" style="width:260px;" />
+      <input type="text" id="search" placeholder="Buscar SKU..." oninput="renderActive()" style="width:320px;" />
       <span id="count-label" style="font-size:12px;color:#888;"></span>
     </div>
   </div>
 
   <div class="card">
     <details class="params">
-      <summary>⚙ Parámetros de cálculo (comisión fija por tramos y envío)</summary>
-      <div class="params-grid" style="margin-top:14px;">
-        <div class="fld"><label>Tramo 1 — PVP menor a</label><input type="number" id="p-fija_t1_max"></div>
-        <div class="fld"><label>Tramo 1 — comisión fija $</label><input type="number" id="p-fija_t1_val"></div>
-        <div class="fld"><label>Tramo 2 — PVP menor a</label><input type="number" id="p-fija_t2_max"></div>
-        <div class="fld"><label>Tramo 2 — comisión fija $</label><input type="number" id="p-fija_t2_val"></div>
-        <div class="fld"><label>Tramo 3 — PVP menor a</label><input type="number" id="p-fija_t3_max"></div>
-        <div class="fld"><label>Tramo 3 — comisión fija $</label><input type="number" id="p-fija_t3_val"></div>
-        <div class="fld"><label>Envío gratis desde (PVP ≥)</label><input type="number" id="p-envio_threshold"></div>
-        <div class="fld"><label>Envío promedio $</label><input type="number" id="p-envio_promedio"></div>
-        <div class="fld"><label>Comisión variable por defecto (%)</label><input type="number" id="p-comision_var_default" step="0.1"></div>
+      <summary>⚙ Parámetros de cálculo</summary>
+
+      <div class="param-section">
+        <div class="param-title">Comisión fija por tramos <span class="param-sub">— según PVP MELI (con IVA)</span></div>
+        <table class="tramos">
+          <thead><tr><th>Tramo</th><th class="num">Desde</th><th class="num">Hasta (menor a)</th><th class="num">Comisión fija $</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><b>1</b></td><td class="num">$0</td>
+              <td class="num"><input type="number" id="p-fija_t1_max" class="p-in" oninput="updateTramos()"></td>
+              <td class="num"><input type="number" id="p-fija_t1_val" class="p-in"></td>
+            </tr>
+            <tr>
+              <td><b>2</b></td><td class="num" id="t2-desde">—</td>
+              <td class="num"><input type="number" id="p-fija_t2_max" class="p-in" oninput="updateTramos()"></td>
+              <td class="num"><input type="number" id="p-fija_t2_val" class="p-in"></td>
+            </tr>
+            <tr>
+              <td><b>3</b></td><td class="num" id="t3-desde">—</td>
+              <td class="num muted" id="t3-hasta">—</td>
+              <td class="num"><input type="number" id="p-fija_t3_val" class="p-in"></td>
+            </tr>
+            <tr style="background:#fafaf8;">
+              <td><b>4</b></td><td class="num" id="t4-desde">—</td>
+              <td class="num muted">y más</td>
+              <td class="num" style="color:#888;">$0 · paga envío</td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="param-hint">A partir del umbral de envío gratis la comisión fija es $0 y se descuenta el envío (abajo).</div>
       </div>
-      <div class="row" style="margin-top:12px;">
+
+      <div class="param-section">
+        <div class="param-title">Envío</div>
+        <div class="param-fields">
+          <div class="fld"><label>Envío gratis desde (PVP ≥)</label><input type="number" id="p-envio_threshold" class="p-in" oninput="updateTramos()"></div>
+          <div class="fld"><label>Envío promedio $</label><input type="number" id="p-envio_promedio" class="p-in"></div>
+        </div>
+      </div>
+
+      <div class="param-section">
+        <div class="param-title">Comisión variable</div>
+        <div class="param-fields">
+          <div class="fld"><label>Por defecto (%)</label><input type="number" id="p-comision_var_default" class="p-in" step="0.1"></div>
+          <div class="param-hint" style="align-self:center;max-width:360px;">Se aplica cuando el SKU no tiene una comisión propia cargada en la solapa MELI.</div>
+        </div>
+      </div>
+
+      <div class="row" style="margin-top:16px;">
         <button class="primary" onclick="saveConfig()">Guardar parámetros</button>
-        <span style="font-size:11px;color:#888;">Con PVP ≥ envío gratis: comisión fija = $0 y se descuenta el envío promedio. Valores con IVA; el cálculo netea por SKU.</span>
+        <span style="font-size:11px;color:#888;">Valores con IVA; el cálculo netea por SKU según su condición de IVA.</span>
         <span id="cfg-msg" style="font-size:12px;color:#1a8a5a;"></span>
       </div>
     </details>
@@ -193,15 +229,17 @@ let CONFIG = {};
 let DEFAULTS = {};
 let TAB = 'resumen';
 const COST_OVERRIDE = new Map();   // sku -> costo simulado (no persiste)
-const PARAM_KEYS = ['fija_t1_max','fija_t1_val','fija_t2_max','fija_t2_val','fija_t3_max','fija_t3_val','envio_threshold','envio_promedio','comision_var_default'];
+const PARAM_KEYS = ['fija_t1_max','fija_t1_val','fija_t2_max','fija_t2_val','fija_t3_val','envio_threshold','envio_promedio','comision_var_default'];
+const ACCOUNT_ID = {{ account_id or 'null' }};
 
-function accId() { return document.getElementById('account-select').value; }
+function accId() { return ACCOUNT_ID; }
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 const fmt = n => (n==null || isNaN(n)) ? '<span class="muted">—</span>' : '$' + Number(n).toLocaleString('es-AR', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
 const pct = n => (n==null || isNaN(n)) ? '<span class="muted">—</span>' : (Number(n)*100).toLocaleString('es-AR', { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + '%';
 function rentaClass(r){ if(r==null) return ''; if(r<0) return 'neg'; if(r<0.10) return 'mid'; return 'pos'; }
 
 async function loadAll() {
+  if (!accId()) return;
   try {
     const r = await fetch(`/api/margen/${accId()}/data`);
     const j = await r.json();
@@ -223,7 +261,20 @@ function fillParams() {
     if (k === 'comision_var_default') v = (v != null ? v * 100 : v);
     el.value = (v != null ? v : '');
   }
+  updateTramos();
 }
+
+// Refleja los límites de tramos en la tabla (Desde/Hasta) en vivo.
+function updateTramos() {
+  const val = id => { const el = document.getElementById(id); return el && el.value !== '' ? Number(el.value) : null; };
+  const t1 = val('p-fija_t1_max'), t2 = val('p-fija_t2_max'), env = val('p-envio_threshold');
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+  set('t2-desde', fmtPlain(t1));
+  set('t3-desde', fmtPlain(t2));
+  set('t3-hasta', fmtPlain(env));
+  set('t4-desde', fmtPlain(env));
+}
+const fmtPlain = n => (n == null || isNaN(n)) ? '—' : '$' + Number(n).toLocaleString('es-AR', { maximumFractionDigits: 0 });
 
 async function saveConfig() {
   const body = {};
@@ -298,8 +349,7 @@ function renderResumen() {
     const c = computeRow(it);
     return `<tr>
       <td><b>${esc(it.sku)}</b></td>
-      <td class="num"><input type="number" class="num-input" value="${it.pvp_lista != null ? it.pvp_lista : ''}" step="0.01" min="0"
-          onchange="editLista('${esc(it.sku)}', this)"></td>
+      <td class="num">${fmt(it.pvp_lista)}</td>
       <td class="num"><input type="number" class="num-input" style="width:70px" value="${it.desc_meli != null ? Math.round(it.desc_meli*10000)/100 : ''}" step="0.1" min="0" max="100"
           onchange="editDesc('${esc(it.sku)}', this)"> %</td>
       <td class="num">${fmt(it.pvp_meli)}</td>
@@ -337,19 +387,11 @@ async function saveRow(it, el) {
   try {
     const r = await fetch(`/api/margen/${accId()}/row`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sku: it.sku, pvp_lista: it.pvp_lista, desc_meli: it.desc_meli, comision_var: it.comision_var }) });
+      body: JSON.stringify({ sku: it.sku, desc_meli: it.desc_meli, comision_var: it.comision_var }) });
     if (r.ok) flash(el);
   } catch (e) {}
 }
 
-function editLista(sku, el) {
-  const it = ITEMS.find(i => i.sku === sku); if (!it) return;
-  const v = el.value === '' ? null : parseFloat(el.value);
-  it.pvp_lista = (v == null || isNaN(v)) ? null : v;
-  recalcPvpMeli(it);
-  saveRow(it, el);
-  renderActive();
-}
 function editDesc(sku, el) {
   const it = ITEMS.find(i => i.sku === sku); if (!it) return;
   const v = el.value === '' ? null : parseFloat(el.value);
