@@ -390,6 +390,9 @@ def init_db():
         conn.execute(text("ALTER TABLE product_sale_prices ADD COLUMN IF NOT EXISTS desc_meli NUMERIC(6,4)"))
         conn.execute(text("ALTER TABLE product_sale_prices ADD COLUMN IF NOT EXISTS pvp_meli NUMERIC(14,2)"))
         conn.execute(text("ALTER TABLE product_sale_prices ADD COLUMN IF NOT EXISTS comision_var NUMERIC(6,4)"))
+        # Costo manual del módulo Margen: para SKUs sin costo en CMV (o para pisar
+        # el de CMV). Si está seteado gana; si es NULL, se usa el costo de CMV.
+        conn.execute(text("ALTER TABLE product_sale_prices ADD COLUMN IF NOT EXISTS costo_manual NUMERIC(14,2)"))
         # Parámetros globales del cálculo de margen MELI por cuenta (tramos de
         # comisión fija y envío promedio). Se guardan como JSON para flexibilidad.
         conn.execute(text("""
@@ -3709,6 +3712,14 @@ def _margen_current_cost(versioned: dict, sku: str, today_iso: str, variant_map=
     return None, 21.0
 
 
+def _margen_effective_cost(costo_manual, versioned, sku, today_iso, variant_map):
+    """(costo_efectivo, iva_rate, costo_cmv). El manual gana sobre el de CMV;
+    si el manual es NULL se usa el de CMV (que puede venir del cruce base SKU)."""
+    cmv, iva_rate = _margen_current_cost(versioned, sku, today_iso, variant_map)
+    cost = float(costo_manual) if costo_manual is not None else cmv
+    return cost, iva_rate, cmv
+
+
 @app.get("/margen", response_class=HTMLResponse)
 async def margen_page(request: Request):
     """Módulo Margen (canal MELI): sub-solapas Resumen y MELI."""
@@ -3746,12 +3757,13 @@ async def api_margen_data(request: Request, account_id: int):
     variant_map = _get_variant_map(cost_aid)   # componente -> [(original, qty)]
     today_iso = (datetime.utcnow() - timedelta(hours=3)).date().isoformat()
     rows = db_fetchall(
-        "SELECT sku, price, desc_meli, comision_var"
+        "SELECT sku, price, desc_meli, comision_var, costo_manual"
         " FROM product_sale_prices WHERE account_id=:a ORDER BY sku", {"a": account_id})
     items = []
     for r in rows:
         sku = r["sku"]
-        costo, iva_rate = _margen_current_cost(versioned, sku, today_iso, variant_map)
+        costo, iva_rate, costo_cmv = _margen_effective_cost(
+            r["costo_manual"], versioned, sku, today_iso, variant_map)
         # PVP LISTA = precio de la base PVP; PVP MELI = lista * (1 - desc),
         # calculado en vivo para que siga a cualquier cambio de precio en PVP.
         lista = float(r["price"]) if r["price"] is not None else None
@@ -3765,6 +3777,8 @@ async def api_margen_data(request: Request, account_id: int):
             "pvp_meli": pvp_meli,
             "comision_var": float(r["comision_var"]) if r["comision_var"] is not None else None,
             "costo_sin_iva": costo,
+            "costo_cmv": costo_cmv,
+            "costo_manual": float(r["costo_manual"]) if r["costo_manual"] is not None else None,
             "iva_rate": iva_rate,
             "renta": comp["renta"] if comp else None,
         })
@@ -3812,6 +3826,56 @@ async def api_margen_row_save(request: Request, account_id: int):
         " pvp_meli=:meli, updated_at=NOW() WHERE account_id=:a AND sku=:s",
         {"a": account_id, "s": sku, "desc": desc, "cv": cv, "meli": pvp_meli})
     return {"ok": True, "pvp_meli": pvp_meli}
+
+
+@app.post("/api/margen/{account_id:int}/cost")
+async def api_margen_cost_save(request: Request, account_id: int):
+    """Guarda el costo manual de un SKU (persiste). Vacío/None => vuelve a CMV."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    if not _account_for_user(account_id, user_id):
+        raise HTTPException(404)
+    body = await request.json()
+    sku = str(body.get("sku") or "").strip()
+    if not sku:
+        raise HTTPException(400, "SKU obligatorio.")
+    raw = body.get("costo")
+    costo = _coerce_price(raw) if raw not in (None, "") else None
+    db_execute(
+        "UPDATE product_sale_prices SET costo_manual=:c, updated_at=NOW()"
+        " WHERE account_id=:a AND sku=:s",
+        {"a": account_id, "s": sku, "c": costo})
+    return {"ok": True, "costo_manual": costo}
+
+
+@app.post("/api/margen/{account_id:int}/import-costos")
+async def api_margen_import_costos(request: Request, account_id: int):
+    """Importa costos de CMV: a los SKU que tienen costo en CMV les borra el
+    costo manual (vuelven a tomar el de CMV, en vivo). Los que NO están en CMV
+    conservan su costo manual cargado."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    user = get_user(user_id)
+    if not _account_for_user(account_id, user_id):
+        raise HTTPException(404)
+    cost_aid = _cost_account_id_for(user, account_id)
+    versioned = db_get_product_costs(cost_aid)
+    variant_map = _get_variant_map(cost_aid)
+    today_iso = (datetime.utcnow() - timedelta(hours=3)).date().isoformat()
+    rows = db_fetchall(
+        "SELECT sku, costo_manual FROM product_sale_prices WHERE account_id=:a",
+        {"a": account_id})
+    reverted = 0
+    for r in rows:
+        cmv, _ = _margen_current_cost(versioned, r["sku"], today_iso, variant_map)
+        if cmv is not None and r["costo_manual"] is not None:
+            db_execute(
+                "UPDATE product_sale_prices SET costo_manual=NULL, updated_at=NOW()"
+                " WHERE account_id=:a AND sku=:s", {"a": account_id, "s": r["sku"]})
+            reverted += 1
+    return {"ok": True, "reverted": reverted}
 
 
 def _margen_norm_pct(v):
@@ -4016,7 +4080,7 @@ async def api_margen_export_list(request: Request, account_id: int, view: str = 
     variant_map = _get_variant_map(cost_aid)
     today_iso = (datetime.utcnow() - timedelta(hours=3)).date().isoformat()
     rows = db_fetchall(
-        "SELECT sku, price, desc_meli, comision_var"
+        "SELECT sku, price, desc_meli, comision_var, costo_manual"
         " FROM product_sale_prices WHERE account_id=:a ORDER BY sku", {"a": account_id})
 
     import io
@@ -4045,7 +4109,8 @@ async def api_margen_export_list(request: Request, account_id: int, view: str = 
 
     for r in rows:
         sku = r["sku"]
-        costo, iva_rate = _margen_current_cost(versioned, sku, today_iso, variant_map)
+        costo, iva_rate, _cmv = _margen_effective_cost(
+            r["costo_manual"], versioned, sku, today_iso, variant_map)
         lista = float(r["price"]) if r["price"] is not None else None
         desc = float(r["desc_meli"]) if r["desc_meli"] is not None else None
         pvp_meli = _margen_pvp_meli(lista, desc)

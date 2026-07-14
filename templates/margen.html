@@ -39,6 +39,7 @@
     .no-accounts { text-align: center; padding: 4rem; color: #888; font-size: 14px; }
     .num-input { width: 90px; text-align: right; padding: 5px 7px; border: 1px solid #ddd; border-radius: 6px; font-size: 13px; }
     .cell-edit { background: #FFFDF0; }
+    .num-input.cost-manual { border-color: #005CFF; background: #EAF1FF; font-weight: 600; }
     .tabs { display: flex; gap: 6px; margin-bottom: 14px; }
     .tab-btn { padding: 8px 18px; border: 1px solid #ddd; border-radius: 8px; background: #fff; font-size: 13px; cursor: pointer; color: #444; }
     .tab-btn.active { background: #005CFF; color: #fff; border-color: #005CFF; font-weight: 500; }
@@ -235,7 +236,7 @@
     </div>
     <div class="row" style="margin-bottom:8px;">
       <button class="green" onclick="importCostos()">↻ Importar costos (CMV)</button>
-      <span style="font-size:11px;color:#888;">Com. fija, envío y costo son editables por SKU para simular; “Importar costos” recarga todo desde CMV/parámetros.</span>
+      <span style="font-size:11px;color:#888;">El <b>costo se guarda</b> (azul = manual; vacío = vuelve a CMV). Com. fija y envío se editan solo para simular. “Importar costos” vuelve a CMV los SKU que estén en la base de costos; los manuales (sin CMV) se mantienen.</span>
     </div>
     <div style="overflow-x:auto;">
       <table>
@@ -267,7 +268,6 @@ let ITEMS = [];
 let CONFIG = {};
 let DEFAULTS = {};
 let TAB = 'resumen';
-const COST_OVERRIDE = new Map();    // sku -> costo simulado (no persiste)
 const FIJA_OVERRIDE = new Map();    // sku -> com. fija $ s/IVA simulada (no persiste)
 const ENVIO_OVERRIDE = new Map();   // sku -> envío $ s/IVA simulado (no persiste)
 const SEL = { resumen: new Set(), meli: new Set() };   // SKUs seleccionados por tab
@@ -289,7 +289,7 @@ async function loadAll() {
     CONFIG = j.config || {};
     DEFAULTS = j.defaults || {};
   } catch (e) { ITEMS = []; }
-  COST_OVERRIDE.clear(); FIJA_OVERRIDE.clear(); ENVIO_OVERRIDE.clear();
+  FIJA_OVERRIDE.clear(); ENVIO_OVERRIDE.clear();
   SEL.resumen.clear(); SEL.meli.clear();
   fillParams();
   document.getElementById('count-label').textContent = `${ITEMS.length} SKU`;
@@ -367,7 +367,8 @@ function fijaOf(pvp) {
   if (pvp < CONFIG.fija_t2_max) return CONFIG.fija_t2_val;
   return CONFIG.fija_t3_val;
 }
-function costOf(it) { return COST_OVERRIDE.has(it.sku) ? COST_OVERRIDE.get(it.sku) : (it.costo_sin_iva || 0); }
+// Costo efectivo: manual si está cargado, si no el de CMV, si no 0.
+function costOf(it) { return it.costo_manual != null ? it.costo_manual : (it.costo_cmv != null ? it.costo_cmv : 0); }
 function computeRow(it) {
   const pvp = it.pvp_meli;
   if (!pvp || pvp <= 0) return null;
@@ -432,7 +433,8 @@ function renderMeli() {
       <td class="num"><input type="number" class="num-input cell-edit" style="width:80px" value="${Math.round(c.envioAmt)}" step="0.01" min="0"
           onchange="editEnvio('${esc(it.sku)}', this)"></td>
       <td class="num">${fmt(c.cobro)}</td>
-      <td class="num"><input type="number" class="num-input cell-edit" style="width:90px" value="${Math.round(c.costo)}" step="0.01" min="0"
+      <td class="num"><input type="number" class="num-input cell-edit ${it.costo_manual != null ? 'cost-manual' : ''}" style="width:90px" value="${Math.round(c.costo)}" step="0.01" min="0"
+          title="${it.costo_manual != null ? 'Costo manual (editado). Vaciá para volver a CMV.' : 'Costo de CMV'}"
           onchange="editCosto('${esc(it.sku)}', this)"></td>
       <td class="num ${rentaClass(c.renta)}"><b>${pct(c.renta)}</b></td>
     </tr>`;
@@ -466,10 +468,17 @@ function editComVar(sku, el) {
   saveRow(it, el);
   renderActive();
 }
-function editCosto(sku, el) {
-  const v = parseFloat(el.value);
-  if (isNaN(v)) COST_OVERRIDE.delete(sku); else COST_OVERRIDE.set(sku, v);
-  renderActive();   // simulación, no persiste
+async function editCosto(sku, el) {
+  const it = ITEMS.find(i => i.sku === sku); if (!it) return;
+  const v = el.value === '' ? null : parseFloat(el.value);
+  it.costo_manual = (v == null || isNaN(v)) ? null : v;   // null => vuelve a CMV
+  try {
+    const r = await fetch(`/api/margen/${accId()}/cost`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sku, costo: it.costo_manual }) });
+    if (r.ok) flash(el);
+  } catch (e) {}
+  renderActive();
 }
 function editFija(sku, el) {
   const v = parseFloat(el.value);
@@ -481,7 +490,16 @@ function editEnvio(sku, el) {
   if (isNaN(v)) ENVIO_OVERRIDE.delete(sku); else ENVIO_OVERRIDE.set(sku, v);
   renderActive();
 }
-function importCostos() { loadAll(); }   // recarga: limpia overrides simulados
+async function importCostos() {
+  const msg = document.getElementById('meli-msg');
+  if (msg) msg.textContent = 'Importando de CMV...';
+  try {
+    const r = await fetch(`/api/margen/${accId()}/import-costos`, { method: 'POST' });
+    const j = await r.json();
+    if (msg) msg.textContent = `Listo: ${j.reverted} SKU vueltos a CMV.`;
+  } catch (e) { if (msg) msg.textContent = 'Error al importar.'; }
+  await loadAll();
+}
 
 // ── Selección para carga masiva ──
 function onCheck(tab, sku, checked) {
