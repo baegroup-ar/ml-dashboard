@@ -54,6 +54,12 @@
     table.tramos th { padding: 6px 12px; font-size: 11px; color: #999; border-bottom: 1px solid #eee; }
     table.tramos td { padding: 5px 12px; border-bottom: 1px solid #f2f2f0; }
     table.tramos .p-in { width: 100px; }
+    .bulk-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 12px; margin-bottom: 12px; background: #f7f9fc; border: 1px solid #e6ecf5; border-radius: 10px; font-size: 13px; }
+    .bulk-bar .bulk-lbl { font-weight: 600; color: #444; }
+    .bulk-bar .bulk-count { color: #005CFF; font-size: 12px; }
+    .bulk-bar .sep { color: #ccc; }
+    .bulk-bar .tpl-link { color: #005CFF; font-size: 12px; text-decoration: none; }
+    .bulk-bar .bulk-msg { font-size: 12px; color: #1a8a5a; }
     .pill { font-weight: 600; border-radius: 6px; padding: 2px 8px; font-size: 12px; }
     .pos { color: #1a8a5a; } .neg { color: #c0392b; } .mid { color: #b8860b; }
     details.params summary { cursor: pointer; font-size: 14px; font-weight: 600; color: #444; }
@@ -116,8 +122,8 @@
     </div>
   </div>
 
-  <div class="card">
-    <details class="params">
+  <div class="card" id="params-card" style="display:none;">
+    <details class="params" open>
       <summary>⚙ Parámetros de cálculo</summary>
 
       <div class="param-section">
@@ -180,9 +186,21 @@
   </div>
 
   <div class="card" id="view-resumen">
+    <div class="bulk-bar">
+      <span class="bulk-lbl">Carga masiva de Desc.:</span>
+      <span id="res-selcount" class="bulk-count">0 seleccionados</span>
+      <input type="number" id="res-bulk-val" class="num-input" style="width:74px" placeholder="Desc %" step="0.1" min="0" max="100">
+      <button class="primary" onclick="applyBulk('resumen')">Aplicar a seleccionados</button>
+      <span class="sep">|</span>
+      <input type="file" id="res-file" accept=".xlsx,.xlsm,.csv" style="font-size:12px;max-width:200px;">
+      <button class="green" onclick="uploadBulk('resumen')">Subir Excel</button>
+      <a href="#" onclick="downloadTpl(event,'desc')" class="tpl-link">Plantilla</a>
+      <span id="res-msg" class="bulk-msg"></span>
+    </div>
     <div style="overflow-x:auto;">
       <table>
         <thead><tr>
+          <th style="width:30px;"><input type="checkbox" id="res-all" onchange="toggleAll('resumen', this)"></th>
           <th>SKU</th>
           <th class="num">PVP LISTA</th>
           <th class="num">DESC MELI</th>
@@ -195,13 +213,25 @@
   </div>
 
   <div class="card" id="view-meli" style="display:none;">
+    <div class="bulk-bar">
+      <span class="bulk-lbl">Carga masiva de Com. variable:</span>
+      <span id="meli-selcount" class="bulk-count">0 seleccionados</span>
+      <input type="number" id="meli-bulk-val" class="num-input" style="width:74px" placeholder="Com %" step="0.1" min="0">
+      <button class="primary" onclick="applyBulk('meli')">Aplicar a seleccionados</button>
+      <span class="sep">|</span>
+      <input type="file" id="meli-file" accept=".xlsx,.xlsm,.csv" style="font-size:12px;max-width:200px;">
+      <button class="green" onclick="uploadBulk('meli')">Subir Excel</button>
+      <a href="#" onclick="downloadTpl(event,'comision')" class="tpl-link">Plantilla</a>
+      <span id="meli-msg" class="bulk-msg"></span>
+    </div>
     <div class="row" style="margin-bottom:8px;">
       <button class="green" onclick="importCostos()">↻ Importar costos (CMV)</button>
-      <span style="font-size:11px;color:#888;">El costo es editable para simular; “Importar costos” vuelve al costo cargado en Costos (CMV).</span>
+      <span style="font-size:11px;color:#888;">Com. fija, envío y costo son editables por SKU para simular; “Importar costos” recarga todo desde CMV/parámetros.</span>
     </div>
     <div style="overflow-x:auto;">
       <table>
         <thead><tr>
+          <th style="width:30px;"><input type="checkbox" id="meli-all" onchange="toggleAll('meli', this)"></th>
           <th>SKU</th>
           <th class="num">PVP MELI</th>
           <th class="num">PVP s/IVA</th>
@@ -228,7 +258,10 @@ let ITEMS = [];
 let CONFIG = {};
 let DEFAULTS = {};
 let TAB = 'resumen';
-const COST_OVERRIDE = new Map();   // sku -> costo simulado (no persiste)
+const COST_OVERRIDE = new Map();    // sku -> costo simulado (no persiste)
+const FIJA_OVERRIDE = new Map();    // sku -> com. fija $ s/IVA simulada (no persiste)
+const ENVIO_OVERRIDE = new Map();   // sku -> envío $ s/IVA simulado (no persiste)
+const SEL = { resumen: new Set(), meli: new Set() };   // SKUs seleccionados por tab
 const PARAM_KEYS = ['fija_t1_max','fija_t1_val','fija_t2_max','fija_t2_val','fija_t3_val','envio_threshold','envio_promedio','comision_var_default'];
 const ACCOUNT_ID = {{ account_id or 'null' }};
 
@@ -247,7 +280,8 @@ async function loadAll() {
     CONFIG = j.config || {};
     DEFAULTS = j.defaults || {};
   } catch (e) { ITEMS = []; }
-  COST_OVERRIDE.clear();
+  COST_OVERRIDE.clear(); FIJA_OVERRIDE.clear(); ENVIO_OVERRIDE.clear();
+  SEL.resumen.clear(); SEL.meli.clear();
   fillParams();
   document.getElementById('count-label').textContent = `${ITEMS.length} SKU`;
   renderActive();
@@ -304,6 +338,8 @@ function setTab(t) {
   document.getElementById('tab-meli').classList.toggle('active', t === 'meli');
   document.getElementById('view-resumen').style.display = t === 'resumen' ? '' : 'none';
   document.getElementById('view-meli').style.display = t === 'meli' ? '' : 'none';
+  // Parámetros de cálculo: solo en la solapa MELI.
+  document.getElementById('params-card').style.display = t === 'meli' ? '' : 'none';
   renderActive();
 }
 
@@ -328,8 +364,9 @@ function computeRow(it) {
   const pvpSin = pvp / f;
   const cv = (it.comision_var != null ? it.comision_var : CONFIG.comision_var_default);
   const comAmt = pvp * cv / f;
-  const fijaAmt = fijaOf(pvp) / f;
-  const envioAmt = pvp >= CONFIG.envio_threshold ? CONFIG.envio_promedio / f : 0;
+  const fijaAmt = FIJA_OVERRIDE.has(it.sku) ? FIJA_OVERRIDE.get(it.sku) : fijaOf(pvp) / f;
+  const envioAmt = ENVIO_OVERRIDE.has(it.sku) ? ENVIO_OVERRIDE.get(it.sku)
+                  : (pvp >= CONFIG.envio_threshold ? CONFIG.envio_promedio / f : 0);
   const cobro = pvpSin - comAmt - fijaAmt - envioAmt;
   const costo = costOf(it);
   const resultado = cobro - costo;
@@ -342,12 +379,18 @@ function recalcPvpMeli(it) {
 
 function renderActive() { TAB === 'resumen' ? renderResumen() : renderMeli(); }
 
+function chkCell(tab, sku) {
+  return `<td><input type="checkbox" class="row-check" ${SEL[tab].has(sku) ? 'checked' : ''}
+    onchange="onCheck('${tab}','${esc(sku)}', this.checked)"></td>`;
+}
+
 function renderResumen() {
   const rows = filtered();
   const tb = document.getElementById('tbody-resumen');
   tb.innerHTML = rows.length ? rows.map(it => {
     const c = computeRow(it);
     return `<tr>
+      ${chkCell('resumen', it.sku)}
       <td><b>${esc(it.sku)}</b></td>
       <td class="num">${fmt(it.pvp_lista)}</td>
       <td class="num"><input type="number" class="num-input" style="width:70px" value="${it.desc_meli != null ? Math.round(it.desc_meli*10000)/100 : ''}" step="0.1" min="0" max="100"
@@ -355,7 +398,8 @@ function renderResumen() {
       <td class="num">${fmt(it.pvp_meli)}</td>
       <td class="num ${rentaClass(c ? c.renta : null)}"><b>${pct(c ? c.renta : null)}</b></td>
     </tr>`;
-  }).join('') : '<tr><td colspan="5" class="empty">Sin SKU en la base de precios.</td></tr>';
+  }).join('') : '<tr><td colspan="6" class="empty">Sin SKU en la base de precios.</td></tr>';
+  syncHeaderCheck('resumen'); updateSelCount('resumen');
 }
 
 function renderMeli() {
@@ -363,22 +407,26 @@ function renderMeli() {
   const tb = document.getElementById('tbody-meli');
   tb.innerHTML = rows.length ? rows.map(it => {
     const c = computeRow(it);
-    if (!c) return `<tr><td><b>${esc(it.sku)}</b></td><td colspan="9" class="muted" style="text-align:center;">Cargá PVP Lista en Resumen</td></tr>`;
+    if (!c) return `<tr>${chkCell('meli', it.sku)}<td><b>${esc(it.sku)}</b></td><td colspan="9" class="muted" style="text-align:center;">Cargá PVP Lista / precio en PVP</td></tr>`;
     return `<tr>
+      ${chkCell('meli', it.sku)}
       <td><b>${esc(it.sku)}</b></td>
       <td class="num">${fmt(it.pvp_meli)}</td>
       <td class="num">${fmt(c.pvpSin)}</td>
-      <td class="num"><input type="number" class="num-input" style="width:64px" value="${(c.cv*100).toFixed(1)}" step="0.1" min="0"
+      <td class="num"><input type="number" class="num-input cell-edit" style="width:64px" value="${(c.cv*100).toFixed(1)}" step="0.1" min="0"
           onchange="editComVar('${esc(it.sku)}', this)"></td>
       <td class="num">${fmt(c.comAmt)}</td>
-      <td class="num">${fmt(c.fijaAmt)}</td>
-      <td class="num">${fmt(c.envioAmt)}</td>
+      <td class="num"><input type="number" class="num-input cell-edit" style="width:80px" value="${Math.round(c.fijaAmt)}" step="0.01" min="0"
+          onchange="editFija('${esc(it.sku)}', this)"></td>
+      <td class="num"><input type="number" class="num-input cell-edit" style="width:80px" value="${Math.round(c.envioAmt)}" step="0.01" min="0"
+          onchange="editEnvio('${esc(it.sku)}', this)"></td>
       <td class="num">${fmt(c.cobro)}</td>
-      <td class="num"><input type="number" class="num-input cell-edit" value="${Math.round(c.costo)}" step="0.01" min="0"
+      <td class="num"><input type="number" class="num-input cell-edit" style="width:90px" value="${Math.round(c.costo)}" step="0.01" min="0"
           onchange="editCosto('${esc(it.sku)}', this)"></td>
       <td class="num ${rentaClass(c.renta)}"><b>${pct(c.renta)}</b></td>
     </tr>`;
-  }).join('') : '<tr><td colspan="10" class="empty">Sin SKU en la base de precios.</td></tr>';
+  }).join('') : '<tr><td colspan="11" class="empty">Sin SKU en la base de precios.</td></tr>';
+  syncHeaderCheck('meli'); updateSelCount('meli');
 }
 
 function flash(el) { if (!el) return; el.style.background = '#eafaf0'; setTimeout(() => { el.style.background = ''; }, 700); }
@@ -408,15 +456,79 @@ function editComVar(sku, el) {
   renderActive();
 }
 function editCosto(sku, el) {
-  const it = ITEMS.find(i => i.sku === sku); if (!it) return;
   const v = parseFloat(el.value);
-  if (isNaN(v)) { COST_OVERRIDE.delete(sku); } else { COST_OVERRIDE.set(sku, v); }
+  if (isNaN(v)) COST_OVERRIDE.delete(sku); else COST_OVERRIDE.set(sku, v);
   renderActive();   // simulación, no persiste
 }
-function importCostos() {
-  COST_OVERRIDE.clear();
-  loadAll();
+function editFija(sku, el) {
+  const v = parseFloat(el.value);
+  if (isNaN(v)) FIJA_OVERRIDE.delete(sku); else FIJA_OVERRIDE.set(sku, v);
+  renderActive();
 }
+function editEnvio(sku, el) {
+  const v = parseFloat(el.value);
+  if (isNaN(v)) ENVIO_OVERRIDE.delete(sku); else ENVIO_OVERRIDE.set(sku, v);
+  renderActive();
+}
+function importCostos() { loadAll(); }   // recarga: limpia overrides simulados
+
+// ── Selección para carga masiva ──
+function onCheck(tab, sku, checked) {
+  if (checked) SEL[tab].add(sku); else SEL[tab].delete(sku);
+  syncHeaderCheck(tab); updateSelCount(tab);
+}
+function toggleAll(tab, cb) {
+  for (const it of filtered()) { if (cb.checked) SEL[tab].add(it.sku); else SEL[tab].delete(it.sku); }
+  renderActive();
+}
+function syncHeaderCheck(tab) {
+  const cb = document.getElementById(tab === 'resumen' ? 'res-all' : 'meli-all');
+  if (!cb) return;
+  const rows = filtered();
+  cb.checked = rows.length > 0 && rows.every(it => SEL[tab].has(it.sku));
+}
+function updateSelCount(tab) {
+  const el = document.getElementById(tab === 'resumen' ? 'res-selcount' : 'meli-selcount');
+  if (el) el.textContent = `${SEL[tab].size} seleccionados`;
+}
+
+// ── Carga masiva: aplicar a seleccionados / Excel / plantilla ──
+async function applyBulk(tab) {
+  const field = tab === 'resumen' ? 'desc' : 'comision';
+  const skus = [...SEL[tab]];
+  const msg = document.getElementById(tab === 'resumen' ? 'res-msg' : 'meli-msg');
+  if (!skus.length) { msg.textContent = 'No hay SKU seleccionados.'; return; }
+  const raw = document.getElementById(tab === 'resumen' ? 'res-bulk-val' : 'meli-bulk-val').value;
+  if (raw === '') { msg.textContent = 'Ingresá un valor.'; return; }
+  const value = parseFloat(raw);
+  const items = skus.map(sku => ({ sku, value }));
+  msg.textContent = 'Aplicando...';
+  try {
+    const r = await fetch(`/api/margen/${accId()}/bulk`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ field, items }) });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.detail || 'error');
+    msg.textContent = `Listo: ${j.updated} actualizados.`;
+    await loadAll();
+  } catch (e) { msg.textContent = 'Error: ' + e.message; }
+}
+async function uploadBulk(tab) {
+  const field = tab === 'resumen' ? 'desc' : 'comision';
+  const f = document.getElementById(tab === 'resumen' ? 'res-file' : 'meli-file').files[0];
+  const msg = document.getElementById(tab === 'resumen' ? 'res-msg' : 'meli-msg');
+  if (!f) { msg.textContent = 'Elegí un archivo.'; return; }
+  const fd = new FormData(); fd.append('file', f);
+  msg.textContent = 'Subiendo...';
+  try {
+    const r = await fetch(`/api/margen/${accId()}/upload?field=${field}`, { method: 'POST', body: fd });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.detail || 'error');
+    msg.textContent = `Listo: ${j.updated} actualizados.`;
+    await loadAll();
+  } catch (e) { msg.textContent = 'Error: ' + e.message; }
+}
+function downloadTpl(e, field) { if (e) e.preventDefault(); window.location = `/api/margen/${accId()}/template?field=${field}`; }
 
 loadAll();
 </script>

@@ -1534,7 +1534,10 @@ def db_get_product_costs(account_id: int) -> dict:
 
 
 import re as _re_costs
-_CUOTA_SUFFIX_RE = _re_costs.compile(r"^(\d+C|CE|SI|SIN|\d+CE)$")
+# OJO: nombre propio (_COST_) para no colisionar con el _CUOTA_SUFFIX_RE de la
+# sección de stock (línea ~2104), que se define después y antes pisaba a este,
+# dejando roto el fallback de costos por sufijo de cuotas.
+_CUOTA_SUFFIX_COST_RE = _re_costs.compile(r"^(\d+C|CE|SI|SIN|\d+CE)$")
 
 
 def _sku_fallbacks(sku: str):
@@ -1544,7 +1547,7 @@ def _sku_fallbacks(sku: str):
     """
     parts = sku.split("-")
     yielded = set()
-    while len(parts) > 1 and _CUOTA_SUFFIX_RE.match(parts[-1]):
+    while len(parts) > 1 and _CUOTA_SUFFIX_COST_RE.match(parts[-1]):
         parts = parts[:-1]
         candidate = "-".join(parts)
         if candidate not in yielded:
@@ -3680,12 +3683,30 @@ def margen_compute(pvp_meli, iva_rate, comision_var, costo_sin_iva, p) -> Option
     }
 
 
-def _margen_current_cost(versioned: dict, sku: str, today_iso: str):
-    """(costo_sin_iva, iva_rate) vigente para el SKU. iva_rate default 21."""
+def _margen_current_cost(versioned: dict, sku: str, today_iso: str, variant_map=None):
+    """(costo_sin_iva, iva_rate) vigente para el SKU. iva_rate default 21.
+    Si el SKU no tiene costo propio, cruza con la BASE SKU (variantes/combos):
+    el costo del componente = Σ costo(original) × cantidad. Sirve para que un
+    combo/variante (ej. SOP68-443-3C-CE → SOP68-443) herede el costo real."""
     entry = find_cost_for_date(versioned, sku, today_iso)
-    if not entry:
-        return None, 21.0
-    return float(entry["cost"]), float(entry.get("iva_rate") or 21)
+    if entry:
+        return float(entry["cost"]), float(entry.get("iva_rate") or 21)
+    if variant_map:
+        originals = variant_map.get(sku) or variant_map.get((sku or "").upper())
+        if originals:
+            total = 0.0
+            rate = None
+            found = False
+            for (orig, qty) in originals:
+                oe = find_cost_for_date(versioned, orig, today_iso)
+                if oe:
+                    total += float(oe["cost"]) * float(qty or 1)
+                    found = True
+                    if rate is None:
+                        rate = float(oe.get("iva_rate") or 21)
+            if found:
+                return total, (rate if rate is not None else 21.0)
+    return None, 21.0
 
 
 @app.get("/margen", response_class=HTMLResponse)
@@ -3722,6 +3743,7 @@ async def api_margen_data(request: Request, account_id: int):
     p = margen_get_config(account_id)
     cost_aid = _cost_account_id_for(user, account_id)
     versioned = db_get_product_costs(cost_aid)
+    variant_map = _get_variant_map(cost_aid)   # componente -> [(original, qty)]
     today_iso = (datetime.utcnow() - timedelta(hours=3)).date().isoformat()
     rows = db_fetchall(
         "SELECT sku, price, desc_meli, comision_var"
@@ -3729,7 +3751,7 @@ async def api_margen_data(request: Request, account_id: int):
     items = []
     for r in rows:
         sku = r["sku"]
-        costo, iva_rate = _margen_current_cost(versioned, sku, today_iso)
+        costo, iva_rate = _margen_current_cost(versioned, sku, today_iso, variant_map)
         # PVP LISTA = precio de la base PVP; PVP MELI = lista * (1 - desc),
         # calculado en vivo para que siga a cualquier cambio de precio en PVP.
         lista = float(r["price"]) if r["price"] is not None else None
@@ -3790,6 +3812,143 @@ async def api_margen_row_save(request: Request, account_id: int):
         " pvp_meli=:meli, updated_at=NOW() WHERE account_id=:a AND sku=:s",
         {"a": account_id, "s": sku, "desc": desc, "cv": cv, "meli": pvp_meli})
     return {"ok": True, "pvp_meli": pvp_meli}
+
+
+def _margen_norm_pct(v):
+    """Normaliza un porcentaje a fracción. >1 se interpreta como % (25 -> 0.25).
+    Vacío/None -> None (borra el valor)."""
+    if v in (None, ""):
+        return None
+    try:
+        x = float(str(v).replace("%", "").replace(",", ".").strip())
+    except (TypeError, ValueError):
+        return None
+    return x / 100.0 if x > 1 else x
+
+
+def _margen_apply_bulk(account_id: int, field: str, pairs: list) -> int:
+    """Aplica en masa desc_meli o comision_var. pairs = [(sku, fraccion|None)]."""
+    if field == "comision":
+        n = 0
+        for sku, val in pairs:
+            if not sku:
+                continue
+            db_execute(
+                "UPDATE product_sale_prices SET comision_var=:v, updated_at=NOW()"
+                " WHERE account_id=:a AND sku=:s",
+                {"a": account_id, "s": sku, "v": val})
+            n += 1
+        return n
+    # desc: necesita el precio para recalcular pvp_meli
+    price_rows = db_fetchall(
+        "SELECT sku, price FROM product_sale_prices WHERE account_id=:a", {"a": account_id})
+    prices = {r["sku"]: (float(r["price"]) if r["price"] is not None else None)
+              for r in price_rows}
+    n = 0
+    for sku, val in pairs:
+        if not sku or sku not in prices:
+            continue
+        meli = _margen_pvp_meli(prices[sku], val)
+        db_execute(
+            "UPDATE product_sale_prices SET desc_meli=:d, pvp_meli=:m, updated_at=NOW()"
+            " WHERE account_id=:a AND sku=:s",
+            {"a": account_id, "s": sku, "d": val, "m": meli})
+        n += 1
+    return n
+
+
+@app.post("/api/margen/{account_id:int}/bulk")
+async def api_margen_bulk(request: Request, account_id: int):
+    """Carga masiva por selección: {field:'desc'|'comision', items:[{sku,value}]}."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    if not _account_for_user(account_id, user_id):
+        raise HTTPException(404)
+    body = await request.json()
+    field = str(body.get("field") or "")
+    if field not in ("desc", "comision"):
+        raise HTTPException(400, "field inválido (desc|comision).")
+    pairs = [(str(it.get("sku") or "").strip(), _margen_norm_pct(it.get("value")))
+             for it in (body.get("items") or [])]
+    return {"ok": True, "updated": _margen_apply_bulk(account_id, field, pairs)}
+
+
+def _parse_margen_upload(content: bytes, filename: str) -> list:
+    """Devuelve [(sku, valor_raw)] desde xlsx/csv: col A = SKU, col B = valor."""
+    import io
+    filename = (filename or "").lower()
+    if filename.endswith(".xlsx") or filename.endswith(".xlsm"):
+        from openpyxl import load_workbook
+        wb = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+        rows = list(wb.worksheets[0].iter_rows(values_only=True))
+    else:
+        import csv
+        rows = list(csv.reader(io.StringIO(content.decode("utf-8-sig", errors="replace"))))
+    out = []
+    for i, row in enumerate(rows):
+        if not row:
+            continue
+        sku = str(row[0] or "").strip()
+        if not sku or (i == 0 and "sku" in sku.lower()):
+            continue
+        val = row[1] if len(row) > 1 else None
+        out.append((sku, val))
+    return out
+
+
+@app.post("/api/margen/{account_id:int}/upload")
+async def api_margen_upload(request: Request, account_id: int, field: str = "desc"):
+    """Carga masiva desde Excel/CSV (SKU + valor) de desc o comisión variable."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    if not _account_for_user(account_id, user_id):
+        raise HTTPException(404)
+    if field not in ("desc", "comision"):
+        raise HTTPException(400, "field inválido (desc|comision).")
+    form = await request.form()
+    up = form.get("file")
+    if up is None:
+        raise HTTPException(400, "Falta el archivo.")
+    content = await up.read()
+    pairs = [(sku, _margen_norm_pct(v)) for sku, v in _parse_margen_upload(content, up.filename)]
+    return {"ok": True, "updated": _margen_apply_bulk(account_id, field, pairs)}
+
+
+@app.get("/api/margen/{account_id:int}/template")
+async def api_margen_template(request: Request, account_id: int, field: str = "desc"):
+    """Plantilla Excel: SKU + columna de valor (desc % o comisión %)."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    if not _account_for_user(account_id, user_id):
+        raise HTTPException(404)
+    import io
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from fastapi.responses import StreamingResponse
+    col2 = "Descuento %" if field == "desc" else "Comisión variable %"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Plantilla"
+    ws.append(["SKU", col2])
+    fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
+    for c in (1, 2):
+        cell = ws.cell(row=1, column=c)
+        cell.fill = fill
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(horizontal="center")
+    ws.append(["SOP68-443", 15])
+    ws.column_dimensions["A"].width = 22
+    ws.column_dimensions["B"].width = 20
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    fname = "plantilla_descuentos.xlsx" if field == "desc" else "plantilla_comisiones.xlsx"
+    return StreamingResponse(
+        buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
 
 @app.get("/api/margen/{account_id:int}/config")
