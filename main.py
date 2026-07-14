@@ -382,6 +382,24 @@ def init_db():
         # Stock EN CAMINO a Full (carga manual): ML no lo expone vía API, así que
         # el usuario lo carga a mano por SKU y se suma al stock total/valorizado.
         conn.execute(text("ALTER TABLE product_sale_prices ADD COLUMN IF NOT EXISTS stock_en_camino NUMERIC(14,2)"))
+        # Módulo MARGEN (canal MELI). PVP LISTA = precio sin descuento (lo carga
+        # el usuario); DESC MELI = descuento; PVP MELI = lista*(1-desc) = precio
+        # con descuento aplicado (el que consume Stock valorizado). comision_var =
+        # comisión variable de ML por SKU (fracción, ej 0.16), editable.
+        conn.execute(text("ALTER TABLE product_sale_prices ADD COLUMN IF NOT EXISTS pvp_lista NUMERIC(14,2)"))
+        conn.execute(text("ALTER TABLE product_sale_prices ADD COLUMN IF NOT EXISTS desc_meli NUMERIC(6,4)"))
+        conn.execute(text("ALTER TABLE product_sale_prices ADD COLUMN IF NOT EXISTS pvp_meli NUMERIC(14,2)"))
+        conn.execute(text("ALTER TABLE product_sale_prices ADD COLUMN IF NOT EXISTS comision_var NUMERIC(6,4)"))
+        # Parámetros globales del cálculo de margen MELI por cuenta (tramos de
+        # comisión fija y envío promedio). Se guardan como JSON para flexibilidad.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS margen_config (
+                account_id INTEGER NOT NULL REFERENCES ml_accounts(id) ON DELETE CASCADE,
+                params TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT NOW(),
+                PRIMARY KEY (account_id)
+            )
+        """))
         # Mapeo manual: SKU componente (lo que se vende) → SKU original (el que
         # tiene stock) × cantidad. Sirve para variantes (cantidad 1) y combos
         # (cantidad N, o varias filas con el mismo componente para multi-producto).
@@ -3114,9 +3132,12 @@ async def _build_stock_payload(account_id, acc, token, user, target_days,
     cost_aid = _cost_account_id_for(user, account_id)
     last_buy = _last_purchase_by_sku(cost_aid)
     price_rows = db_fetchall(
-        "SELECT sku, price, stock_en_camino FROM product_sale_prices WHERE account_id=:a",
+        "SELECT sku, price, pvp_meli, stock_en_camino FROM product_sale_prices WHERE account_id=:a",
         {"a": account_id})
-    prices = {r["sku"]: float(r["price"]) for r in price_rows}
+    # Precio a valorizar = PVP MELI (con descuento) cuando está cargado en el
+    # módulo Margen; si el SKU todavía no lo tiene, cae al `price` histórico.
+    prices = {r["sku"]: float(r["pvp_meli"] if r["pvp_meli"] is not None else r["price"])
+              for r in price_rows}
     # Stock EN CAMINO a Full (carga manual por SKU). 0/None = sin en camino.
     en_camino_map = {r["sku"]: int(float(r["stock_en_camino"]))
                      for r in price_rows if r.get("stock_en_camino")}
@@ -3572,6 +3593,213 @@ async def api_stock_prices_export(request: Request, account_id: int):
     return StreamingResponse(
         buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="precios_venta_{nick}.xlsx"'})
+
+
+# ── Módulo MARGEN (canal MELI) ───────────────────────────────────────────────
+# Réplica del motor de la hoja "MELI" del Excel de costos: por SKU parte del
+# PVP MELI (con descuento), descuenta comisión variable, comisión fija (por
+# tramos de precio), envío promedio y costo; todo neto de IVA usando el factor
+# de la condición de IVA del SKU (que viene de Costos CMV) → Renta Bruta.
+MARGEN_DEFAULT_PARAMS = {
+    # Tramos de comisión fija según PVP MELI (con IVA):
+    #   PVP < t1_max            -> t1_val
+    #   t1_max <= PVP < t2_max  -> t2_val
+    #   t2_max <= PVP < t3_max  -> t3_val
+    #   PVP >= envio_threshold  -> 0 (envío gratis obligatorio, paga envío)
+    "fija_t1_max": 16000.0, "fija_t1_val": 1280.0,
+    "fija_t2_max": 24000.0, "fija_t2_val": 2540.0,
+    "fija_t3_max": 33000.0, "fija_t3_val": 3030.0,
+    "envio_threshold": 33000.0,
+    "envio_promedio": 7400.0,
+    "comision_var_default": 0.16,
+}
+
+
+def margen_get_config(account_id: int) -> dict:
+    rows = db_fetchall("SELECT params FROM margen_config WHERE account_id=:a",
+                       {"a": account_id})
+    params = dict(MARGEN_DEFAULT_PARAMS)
+    if rows:
+        try:
+            params.update(json.loads(rows[0]["params"]))
+        except Exception:
+            pass
+    return params
+
+
+def margen_save_config(account_id: int, params: dict) -> dict:
+    merged = dict(MARGEN_DEFAULT_PARAMS)
+    for k in MARGEN_DEFAULT_PARAMS:
+        if params.get(k) is not None:
+            try:
+                merged[k] = float(params[k])
+            except (TypeError, ValueError):
+                pass
+    db_execute(
+        "INSERT INTO margen_config (account_id, params, updated_at)"
+        " VALUES (:a, :p, NOW()) ON CONFLICT (account_id)"
+        " DO UPDATE SET params=EXCLUDED.params, updated_at=NOW()",
+        {"a": account_id, "p": json.dumps(merged)})
+    return merged
+
+
+def _margen_fija(pvp_con_iva: float, p: dict) -> float:
+    """Cargo fijo (con IVA) según tramos. >= envio_threshold -> 0 (paga envío)."""
+    if not pvp_con_iva or pvp_con_iva >= p["envio_threshold"]:
+        return 0.0
+    if pvp_con_iva < p["fija_t1_max"]:
+        return p["fija_t1_val"]
+    if pvp_con_iva < p["fija_t2_max"]:
+        return p["fija_t2_val"]
+    return p["fija_t3_val"]
+
+
+def margen_compute(pvp_meli, iva_rate, comision_var, costo_sin_iva, p) -> Optional[dict]:
+    """Desglose de margen para un SKU. `pvp_meli` con IVA; `costo_sin_iva` neto.
+    Todo se netea con el factor de IVA del SKU."""
+    if not pvp_meli or pvp_meli <= 0:
+        return None
+    factor = 1 + (float(iva_rate or 0) / 100.0)
+    pvp_sin_iva = pvp_meli / factor
+    cv = float(comision_var if comision_var is not None else p["comision_var_default"])
+    comision_var_amt = pvp_meli * cv / factor
+    fija_amt = _margen_fija(pvp_meli, p) / factor
+    envio_amt = (p["envio_promedio"] / factor) if pvp_meli >= p["envio_threshold"] else 0.0
+    cobro = pvp_sin_iva - comision_var_amt - fija_amt - envio_amt
+    costo = float(costo_sin_iva or 0)
+    resultado = cobro - costo
+    renta = (resultado / pvp_sin_iva) if pvp_sin_iva else None
+    return {
+        "pvp_sin_iva": pvp_sin_iva, "comision_var_frac": cv,
+        "comision_var_amt": comision_var_amt, "fija_amt": fija_amt,
+        "envio_amt": envio_amt, "cobro": cobro, "costo_sin_iva": costo,
+        "resultado": resultado, "renta": renta,
+    }
+
+
+def _margen_current_cost(versioned: dict, sku: str, today_iso: str):
+    """(costo_sin_iva, iva_rate) vigente para el SKU. iva_rate default 21."""
+    entry = find_cost_for_date(versioned, sku, today_iso)
+    if not entry:
+        return None, 21.0
+    return float(entry["cost"]), float(entry.get("iva_rate") or 21)
+
+
+@app.get("/margen", response_class=HTMLResponse)
+async def margen_page(request: Request):
+    """Módulo Margen (canal MELI): sub-solapas Resumen y MELI."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse("/")
+    user = get_user(user_id)
+    _r = _page_redirect(user, "margen")
+    if _r:
+        return _r
+    accounts = get_visible_accounts(user_id, user)
+    accounts = await refresh_visible_account_nicknames(accounts)
+    only_bae = [a for a in accounts if (a.get("nickname") or "").strip().upper() == "TIENDA BAE"]
+    selector_accounts = only_bae or accounts
+    return templates.TemplateResponse("margen.html", {
+        "request": request, "user": user, "accounts": selector_accounts,
+        "perms": user_permissions(user),
+    })
+
+
+@app.get("/api/margen/{account_id:int}/data")
+async def api_margen_data(request: Request, account_id: int):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    user = get_user(user_id)
+    if not _account_for_user(account_id, user_id):
+        raise HTTPException(404)
+    p = margen_get_config(account_id)
+    cost_aid = _cost_account_id_for(user, account_id)
+    versioned = db_get_product_costs(cost_aid)
+    today_iso = (datetime.utcnow() - timedelta(hours=3)).date().isoformat()
+    rows = db_fetchall(
+        "SELECT sku, price, pvp_lista, desc_meli, pvp_meli, comision_var"
+        " FROM product_sale_prices WHERE account_id=:a ORDER BY sku", {"a": account_id})
+    items = []
+    for r in rows:
+        sku = r["sku"]
+        costo, iva_rate = _margen_current_cost(versioned, sku, today_iso)
+        pvp_meli = float(r["pvp_meli"]) if r["pvp_meli"] is not None else None
+        comp = margen_compute(pvp_meli, iva_rate, r["comision_var"], costo, p)
+        items.append({
+            "sku": sku,
+            "pvp_lista": float(r["pvp_lista"]) if r["pvp_lista"] is not None else None,
+            "desc_meli": float(r["desc_meli"]) if r["desc_meli"] is not None else None,
+            "pvp_meli": pvp_meli,
+            "comision_var": float(r["comision_var"]) if r["comision_var"] is not None else None,
+            "costo_sin_iva": costo,
+            "iva_rate": iva_rate,
+            "renta": comp["renta"] if comp else None,
+        })
+    return {"items": items, "config": p, "defaults": MARGEN_DEFAULT_PARAMS}
+
+
+def _margen_pvp_meli(lista, desc):
+    """PVP MELI = lista * (1 - desc). desc None -> 0. lista None -> None."""
+    if lista is None:
+        return None
+    d = float(desc) if desc is not None else 0.0
+    return round(float(lista) * (1 - d), 2)
+
+
+@app.post("/api/margen/{account_id:int}/row")
+async def api_margen_row_save(request: Request, account_id: int):
+    """Guarda pvp_lista / desc_meli / comision_var de un SKU y recalcula pvp_meli."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    if not _account_for_user(account_id, user_id):
+        raise HTTPException(404)
+    body = await request.json()
+    sku = str(body.get("sku") or "").strip()
+    if not sku:
+        raise HTTPException(400, "SKU obligatorio.")
+    lista = _coerce_price(body.get("pvp_lista")) if body.get("pvp_lista") not in (None, "") else None
+    desc = body.get("desc_meli")
+    desc = float(desc) if desc not in (None, "") else None
+    if desc is not None and desc > 1:  # aceptar 25 como 0.25
+        desc = desc / 100.0
+    cv = body.get("comision_var")
+    cv = float(cv) if cv not in (None, "") else None
+    if cv is not None and cv > 1:
+        cv = cv / 100.0
+    pvp_meli = _margen_pvp_meli(lista, desc)
+    db_execute(
+        "INSERT INTO product_sale_prices"
+        " (account_id, sku, price, pvp_lista, desc_meli, pvp_meli, comision_var, updated_at)"
+        " VALUES (:a,:s,:price,:lista,:desc,:meli,:cv,NOW())"
+        " ON CONFLICT (account_id, sku) DO UPDATE SET"
+        "  pvp_lista=EXCLUDED.pvp_lista, desc_meli=EXCLUDED.desc_meli,"
+        "  pvp_meli=EXCLUDED.pvp_meli, comision_var=EXCLUDED.comision_var, updated_at=NOW()",
+        {"a": account_id, "s": sku, "price": (pvp_meli if pvp_meli is not None else 0),
+         "lista": lista, "desc": desc, "meli": pvp_meli, "cv": cv})
+    return {"ok": True, "pvp_meli": pvp_meli}
+
+
+@app.get("/api/margen/{account_id:int}/config")
+async def api_margen_config_get(request: Request, account_id: int):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    if not _account_for_user(account_id, user_id):
+        raise HTTPException(404)
+    return {"config": margen_get_config(account_id), "defaults": MARGEN_DEFAULT_PARAMS}
+
+
+@app.post("/api/margen/{account_id:int}/config")
+async def api_margen_config_save(request: Request, account_id: int):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    if not _account_for_user(account_id, user_id):
+        raise HTTPException(404)
+    body = await request.json()
+    return {"ok": True, "config": margen_save_config(account_id, body or {})}
 
 
 # Caché invalidator: cuando cambian los costos hay que recalcular las órdenes.
@@ -9532,6 +9760,7 @@ PAGES = [
     ("ranking",     "Ranking por SKU"),
     ("etiquetas",   "Etiquetas"),
     ("stock",       "Stock valorizado"),
+    ("margen",      "Margen"),
     ("base_sku",    "SKUs"),
     ("pvp",         "PVP"),
     ("clientes",    "Clientes"),

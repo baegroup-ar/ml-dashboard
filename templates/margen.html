@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Margen · Panel BAE</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Cantarell:ital,wght@0,400;0,700;1,400&amp;display=swap" rel="stylesheet"><link rel="icon" type="image/png" href="/static/bae-favicon.png">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Cantarell', 'Inter', system-ui, sans-serif; background: #fff; color: #111; }
+    nav { background: #fff; border-bottom: 1px solid #e5e5e3; padding: 0 1.5rem; height: 56px; display: flex; align-items: center; justify-content: space-between; }
+    .nav-brand { font-weight: 600; font-size: 15px; display: flex; align-items: center; gap: 8px; }
+    .nav-right { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+    .btn-nav { padding: 6px 14px; border: 1px solid #ddd; border-radius: 8px; background: #fff; font-size: 13px; cursor: pointer; text-decoration: none; color: #111; }
+    .nav-dropdown { position: relative; display: inline-block; }
+    .nav-dropdown .dropdown-trigger.active { color: #005CFF; font-weight: 500; border-color: #005CFF; }
+    .nav-dropdown .dropdown-menu { display: none; position: absolute; top: calc(100% + 4px); left: 0; background: #fff; border: 1px solid #ddd; border-radius: 8px; min-width: 170px; z-index: 100; box-shadow: 0 6px 16px rgba(0,0,0,0.10); padding: 6px; flex-direction: column; }
+    .nav-dropdown:hover .dropdown-menu { display: flex; }
+    .dropdown-menu a.dropdown-item, .dropdown-menu span.dropdown-item { display: block; padding: 8px 10px; font-size: 13px; color: #111; text-decoration: none; border-radius: 6px; white-space: nowrap; cursor: pointer; }
+    .dropdown-menu a.dropdown-item:hover { background: #f5f5f3; }
+    main { max-width: 1200px; margin: 0 auto; padding: 1.5rem; }
+    h1 { font-size: 20px; font-weight: 600; margin-bottom: 6px; }
+    p.lead { font-size: 13px; color: #888; margin-bottom: 1.25rem; }
+    .card { background: #fff; border: 1px solid #e5e5e3; border-radius: 12px; padding: 1.25rem; margin-bottom: 1.25rem; }
+    .card h3 { font-size: 14px; font-weight: 600; color: #444; margin-bottom: 12px; }
+    .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .row label { font-size: 13px; color: #666; }
+    .row select, .row input { padding: 7px 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 13px; font-family: 'Inter', sans-serif; }
+    .row select { min-width: 220px; }
+    button.primary { padding: 8px 16px; border: none; border-radius: 8px; background: #005CFF; color: #fff; font-size: 13px; cursor: pointer; }
+    button.green { padding: 8px 16px; border: none; border-radius: 8px; background: #1a8a5a; color: #fff; font-size: 13px; cursor: pointer; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 12px; }
+    th { padding: 9px 10px; text-align: left; color: #888; font-weight: 500; border-bottom: 1px solid #eee; font-size: 12px; white-space: nowrap; }
+    th.num, td.num { text-align: right; }
+    td { padding: 7px 10px; border-bottom: 1px solid #f0f0ee; color: #333; }
+    tbody tr:hover { background: #fafaf8; }
+    .empty { padding: 2rem; text-align: center; color: #aaa; font-size: 13px; }
+    .no-accounts { text-align: center; padding: 4rem; color: #888; font-size: 14px; }
+    .num-input { width: 90px; text-align: right; padding: 5px 7px; border: 1px solid #ddd; border-radius: 6px; font-size: 13px; }
+    .cell-edit { background: #FFFDF0; }
+    .tabs { display: flex; gap: 6px; margin-bottom: 14px; }
+    .tab-btn { padding: 8px 18px; border: 1px solid #ddd; border-radius: 8px; background: #fff; font-size: 13px; cursor: pointer; color: #444; }
+    .tab-btn.active { background: #005CFF; color: #fff; border-color: #005CFF; font-weight: 500; }
+    .params-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px 16px; }
+    .params-grid .fld { display: flex; flex-direction: column; gap: 3px; }
+    .params-grid .fld label { font-size: 11px; color: #888; }
+    .params-grid .fld input { padding: 6px 8px; border: 1px solid #ddd; border-radius: 6px; font-size: 13px; }
+    .pill { font-weight: 600; border-radius: 6px; padding: 2px 8px; font-size: 12px; }
+    .pos { color: #1a8a5a; } .neg { color: #c0392b; } .mid { color: #b8860b; }
+    details.params summary { cursor: pointer; font-size: 14px; font-weight: 600; color: #444; }
+    .muted { color: #bbb; }
+  </style>
+</head>
+<body>
+<nav>
+  <div class="nav-brand">
+    <img src="/static/bae-icon.png" alt="Tienda Bae" style="height:32px;width:auto;display:block;" />
+    Tienda Bae App
+  </div>
+  <div class="nav-right">
+    {% if 'dashboard' in perms or 'reputacion' in perms or 'descuentos' in perms or 'ranking' in perms or 'etiquetas' in perms or 'publicaciones' in perms or 'fotos' in perms %}
+    <div class="nav-dropdown">
+      <span class="btn-nav dropdown-trigger">Mercadolibre ▾</span>
+      <div class="dropdown-menu">
+        {% if 'dashboard' in perms %}<a href="/dashboard" class="dropdown-item">Dashboard</a>{% endif %}
+        {% if 'reputacion' in perms %}<a href="/reputacion" class="dropdown-item">Reputación</a>{% endif %}
+        {% if 'descuentos' in perms %}<a href="/descuentos" class="dropdown-item">Descuentos</a>{% endif %}
+        {% if 'ranking' in perms %}<a href="/ranking" class="dropdown-item">Ranking</a>{% endif %}
+        {% if 'etiquetas' in perms %}<a href="/etiquetas" class="dropdown-item">Etiquetas</a>{% endif %}
+        {% if 'publicaciones' in perms %}<a href="/publicaciones" class="dropdown-item">Publicaciones</a>{% endif %}
+        {% if 'fotos' in perms %}<a href="/fotos" class="dropdown-item">Fotos</a>{% endif %}
+      </div>
+    </div>
+    {% endif %}
+    {% if 'costos' in perms or 'pvp' in perms or 'clientes' in perms or 'base_sku' in perms or 'envios_flex' in perms %}
+    <div class="nav-dropdown">
+      <span class="btn-nav dropdown-trigger">Base de Datos ▾</span>
+      <div class="dropdown-menu">
+        {% if 'costos' in perms %}<a href="/costos" class="dropdown-item">Costos (CMV)</a>{% endif %}
+        {% if 'pvp' in perms %}<a href="/pvp" class="dropdown-item">PVP</a>{% endif %}
+        {% if 'clientes' in perms %}<a href="/clientes" class="dropdown-item">Clientes</a>{% endif %}
+        {% if 'base_sku' in perms %}<a href="/base-sku" class="dropdown-item">SKUs</a>{% endif %}
+        {% if 'envios_flex' in perms %}<a href="/costos/envios-flex" class="dropdown-item">Envíos Flex</a>{% endif %}
+      </div>
+    </div>
+    {% endif %}
+    {% if 'stock' in perms %}<a href="/stock" class="btn-nav">Stock valorizado</a>{% endif %}
+    <span style="color:#005CFF;font-weight:500;">Margen</span>
+    <span style="color:#888;">{{ user.name }}</span>
+    {% if user.is_admin %}<a href="/admin" style="font-size:12px;color:#005CFF;text-decoration:none;">Admin</a>{% endif %}
+    <a href="/logout" class="btn-nav">Salir</a>
+  </div>
+</nav>
+
+<main>
+  <h1>Margen — Mercado Libre</h1>
+  <p class="lead">
+    Análisis de rentabilidad por SKU. <b>Resumen</b> arma los precios (PVP Lista + Desc. → PVP MELI) y muestra el % de margen;
+    <b>MELI</b> desglosa el cálculo (comisiones, envío, costo) hasta la Renta Bruta. El PVP MELI alimenta el Stock valorizado.
+  </p>
+
+  {% if accounts %}
+  <div class="card">
+    <div class="row">
+      <label>Cuenta ML:</label>
+      <select id="account-select" onchange="loadAll()">
+        {% set default_nick = 'TIENDA BAE' %}
+        {% set has_default = accounts | selectattr('nickname', 'equalto', default_nick) | list | length > 0 %}
+        {% for acc in accounts %}
+        <option value="{{ acc.id }}" {% if acc.nickname == default_nick or (not has_default and loop.first) %}selected{% endif %}>{{ acc.nickname }}</option>
+        {% endfor %}
+      </select>
+      <input type="text" id="search" placeholder="Buscar SKU..." oninput="renderActive()" style="width:260px;" />
+      <span id="count-label" style="font-size:12px;color:#888;"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <details class="params">
+      <summary>⚙ Parámetros de cálculo (comisión fija por tramos y envío)</summary>
+      <div class="params-grid" style="margin-top:14px;">
+        <div class="fld"><label>Tramo 1 — PVP menor a</label><input type="number" id="p-fija_t1_max"></div>
+        <div class="fld"><label>Tramo 1 — comisión fija $</label><input type="number" id="p-fija_t1_val"></div>
+        <div class="fld"><label>Tramo 2 — PVP menor a</label><input type="number" id="p-fija_t2_max"></div>
+        <div class="fld"><label>Tramo 2 — comisión fija $</label><input type="number" id="p-fija_t2_val"></div>
+        <div class="fld"><label>Tramo 3 — PVP menor a</label><input type="number" id="p-fija_t3_max"></div>
+        <div class="fld"><label>Tramo 3 — comisión fija $</label><input type="number" id="p-fija_t3_val"></div>
+        <div class="fld"><label>Envío gratis desde (PVP ≥)</label><input type="number" id="p-envio_threshold"></div>
+        <div class="fld"><label>Envío promedio $</label><input type="number" id="p-envio_promedio"></div>
+        <div class="fld"><label>Comisión variable por defecto (%)</label><input type="number" id="p-comision_var_default" step="0.1"></div>
+      </div>
+      <div class="row" style="margin-top:12px;">
+        <button class="primary" onclick="saveConfig()">Guardar parámetros</button>
+        <span style="font-size:11px;color:#888;">Con PVP ≥ envío gratis: comisión fija = $0 y se descuenta el envío promedio. Valores con IVA; el cálculo netea por SKU.</span>
+        <span id="cfg-msg" style="font-size:12px;color:#1a8a5a;"></span>
+      </div>
+    </details>
+  </div>
+
+  <div class="tabs">
+    <button class="tab-btn active" id="tab-resumen" onclick="setTab('resumen')">Resumen</button>
+    <button class="tab-btn" id="tab-meli" onclick="setTab('meli')">MELI (detalle)</button>
+  </div>
+
+  <div class="card" id="view-resumen">
+    <div style="overflow-x:auto;">
+      <table>
+        <thead><tr>
+          <th>SKU</th>
+          <th class="num">PVP LISTA</th>
+          <th class="num">DESC MELI</th>
+          <th class="num">PVP MELI</th>
+          <th class="num">% MELI</th>
+        </tr></thead>
+        <tbody id="tbody-resumen"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card" id="view-meli" style="display:none;">
+    <div class="row" style="margin-bottom:8px;">
+      <button class="green" onclick="importCostos()">↻ Importar costos (CMV)</button>
+      <span style="font-size:11px;color:#888;">El costo es editable para simular; “Importar costos” vuelve al costo cargado en Costos (CMV).</span>
+    </div>
+    <div style="overflow-x:auto;">
+      <table>
+        <thead><tr>
+          <th>SKU</th>
+          <th class="num">PVP MELI</th>
+          <th class="num">PVP s/IVA</th>
+          <th class="num">Com. var %</th>
+          <th class="num">Com. var $</th>
+          <th class="num">Com. fija $</th>
+          <th class="num">Envío $</th>
+          <th class="num">Cobro</th>
+          <th class="num">Costo s/IVA</th>
+          <th class="num">Renta %</th>
+        </tr></thead>
+        <tbody id="tbody-meli"></tbody>
+      </table>
+    </div>
+  </div>
+
+  {% else %}
+  <div class="card"><div class="no-accounts">No tenés cuentas de Mercado Libre conectadas.</div></div>
+  {% endif %}
+</main>
+
+<script>
+let ITEMS = [];
+let CONFIG = {};
+let DEFAULTS = {};
+let TAB = 'resumen';
+const COST_OVERRIDE = new Map();   // sku -> costo simulado (no persiste)
+const PARAM_KEYS = ['fija_t1_max','fija_t1_val','fija_t2_max','fija_t2_val','fija_t3_max','fija_t3_val','envio_threshold','envio_promedio','comision_var_default'];
+
+function accId() { return document.getElementById('account-select').value; }
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+const fmt = n => (n==null || isNaN(n)) ? '<span class="muted">—</span>' : '$' + Number(n).toLocaleString('es-AR', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+const pct = n => (n==null || isNaN(n)) ? '<span class="muted">—</span>' : (Number(n)*100).toLocaleString('es-AR', { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + '%';
+function rentaClass(r){ if(r==null) return ''; if(r<0) return 'neg'; if(r<0.10) return 'mid'; return 'pos'; }
+
+async function loadAll() {
+  try {
+    const r = await fetch(`/api/margen/${accId()}/data`);
+    const j = await r.json();
+    ITEMS = j.items || [];
+    CONFIG = j.config || {};
+    DEFAULTS = j.defaults || {};
+  } catch (e) { ITEMS = []; }
+  COST_OVERRIDE.clear();
+  fillParams();
+  document.getElementById('count-label').textContent = `${ITEMS.length} SKU`;
+  renderActive();
+}
+
+function fillParams() {
+  for (const k of PARAM_KEYS) {
+    const el = document.getElementById('p-' + k);
+    if (!el) continue;
+    let v = CONFIG[k];
+    if (k === 'comision_var_default') v = (v != null ? v * 100 : v);
+    el.value = (v != null ? v : '');
+  }
+}
+
+async function saveConfig() {
+  const body = {};
+  for (const k of PARAM_KEYS) {
+    const raw = document.getElementById('p-' + k).value;
+    if (raw === '') continue;
+    let v = parseFloat(raw);
+    if (k === 'comision_var_default') v = v / 100;
+    body[k] = v;
+  }
+  const msg = document.getElementById('cfg-msg');
+  try {
+    const r = await fetch(`/api/margen/${accId()}/config`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const j = await r.json();
+    CONFIG = j.config || CONFIG;
+    fillParams();
+    msg.textContent = 'Parámetros guardados.';
+    setTimeout(() => { msg.textContent = ''; }, 2000);
+    renderActive();
+  } catch (e) { msg.textContent = 'Error al guardar.'; msg.style.color = '#c0392b'; }
+}
+
+function setTab(t) {
+  TAB = t;
+  document.getElementById('tab-resumen').classList.toggle('active', t === 'resumen');
+  document.getElementById('tab-meli').classList.toggle('active', t === 'meli');
+  document.getElementById('view-resumen').style.display = t === 'resumen' ? '' : 'none';
+  document.getElementById('view-meli').style.display = t === 'meli' ? '' : 'none';
+  renderActive();
+}
+
+function filtered() {
+  const q = (document.getElementById('search').value || '').trim().toLowerCase();
+  return q ? ITEMS.filter(r => (r.sku || '').toLowerCase().includes(q)) : ITEMS;
+}
+
+// ── Motor de cálculo (réplica de margen_compute en backend) ──
+function factorOf(it) { return 1 + (Number(it.iva_rate || 0) / 100); }
+function fijaOf(pvp) {
+  if (!pvp || pvp >= CONFIG.envio_threshold) return 0;
+  if (pvp < CONFIG.fija_t1_max) return CONFIG.fija_t1_val;
+  if (pvp < CONFIG.fija_t2_max) return CONFIG.fija_t2_val;
+  return CONFIG.fija_t3_val;
+}
+function costOf(it) { return COST_OVERRIDE.has(it.sku) ? COST_OVERRIDE.get(it.sku) : (it.costo_sin_iva || 0); }
+function computeRow(it) {
+  const pvp = it.pvp_meli;
+  if (!pvp || pvp <= 0) return null;
+  const f = factorOf(it);
+  const pvpSin = pvp / f;
+  const cv = (it.comision_var != null ? it.comision_var : CONFIG.comision_var_default);
+  const comAmt = pvp * cv / f;
+  const fijaAmt = fijaOf(pvp) / f;
+  const envioAmt = pvp >= CONFIG.envio_threshold ? CONFIG.envio_promedio / f : 0;
+  const cobro = pvpSin - comAmt - fijaAmt - envioAmt;
+  const costo = costOf(it);
+  const resultado = cobro - costo;
+  const renta = pvpSin ? resultado / pvpSin : null;
+  return { pvpSin, cv, comAmt, fijaAmt, envioAmt, cobro, costo, resultado, renta };
+}
+function recalcPvpMeli(it) {
+  it.pvp_meli = it.pvp_lista == null ? null : Math.round(it.pvp_lista * (1 - (it.desc_meli || 0)) * 100) / 100;
+}
+
+function renderActive() { TAB === 'resumen' ? renderResumen() : renderMeli(); }
+
+function renderResumen() {
+  const rows = filtered();
+  const tb = document.getElementById('tbody-resumen');
+  tb.innerHTML = rows.length ? rows.map(it => {
+    const c = computeRow(it);
+    return `<tr>
+      <td><b>${esc(it.sku)}</b></td>
+      <td class="num"><input type="number" class="num-input" value="${it.pvp_lista != null ? it.pvp_lista : ''}" step="0.01" min="0"
+          onchange="editLista('${esc(it.sku)}', this)"></td>
+      <td class="num"><input type="number" class="num-input" style="width:70px" value="${it.desc_meli != null ? Math.round(it.desc_meli*10000)/100 : ''}" step="0.1" min="0" max="100"
+          onchange="editDesc('${esc(it.sku)}', this)"> %</td>
+      <td class="num">${fmt(it.pvp_meli)}</td>
+      <td class="num ${rentaClass(c ? c.renta : null)}"><b>${pct(c ? c.renta : null)}</b></td>
+    </tr>`;
+  }).join('') : '<tr><td colspan="5" class="empty">Sin SKU en la base de precios.</td></tr>';
+}
+
+function renderMeli() {
+  const rows = filtered();
+  const tb = document.getElementById('tbody-meli');
+  tb.innerHTML = rows.length ? rows.map(it => {
+    const c = computeRow(it);
+    if (!c) return `<tr><td><b>${esc(it.sku)}</b></td><td colspan="9" class="muted" style="text-align:center;">Cargá PVP Lista en Resumen</td></tr>`;
+    return `<tr>
+      <td><b>${esc(it.sku)}</b></td>
+      <td class="num">${fmt(it.pvp_meli)}</td>
+      <td class="num">${fmt(c.pvpSin)}</td>
+      <td class="num"><input type="number" class="num-input" style="width:64px" value="${(c.cv*100).toFixed(1)}" step="0.1" min="0"
+          onchange="editComVar('${esc(it.sku)}', this)"></td>
+      <td class="num">${fmt(c.comAmt)}</td>
+      <td class="num">${fmt(c.fijaAmt)}</td>
+      <td class="num">${fmt(c.envioAmt)}</td>
+      <td class="num">${fmt(c.cobro)}</td>
+      <td class="num"><input type="number" class="num-input cell-edit" value="${Math.round(c.costo)}" step="0.01" min="0"
+          onchange="editCosto('${esc(it.sku)}', this)"></td>
+      <td class="num ${rentaClass(c.renta)}"><b>${pct(c.renta)}</b></td>
+    </tr>`;
+  }).join('') : '<tr><td colspan="10" class="empty">Sin SKU en la base de precios.</td></tr>';
+}
+
+function flash(el) { if (!el) return; el.style.background = '#eafaf0'; setTimeout(() => { el.style.background = ''; }, 700); }
+
+async function saveRow(it, el) {
+  try {
+    const r = await fetch(`/api/margen/${accId()}/row`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sku: it.sku, pvp_lista: it.pvp_lista, desc_meli: it.desc_meli, comision_var: it.comision_var }) });
+    if (r.ok) flash(el);
+  } catch (e) {}
+}
+
+function editLista(sku, el) {
+  const it = ITEMS.find(i => i.sku === sku); if (!it) return;
+  const v = el.value === '' ? null : parseFloat(el.value);
+  it.pvp_lista = (v == null || isNaN(v)) ? null : v;
+  recalcPvpMeli(it);
+  saveRow(it, el);
+  renderActive();
+}
+function editDesc(sku, el) {
+  const it = ITEMS.find(i => i.sku === sku); if (!it) return;
+  const v = el.value === '' ? null : parseFloat(el.value);
+  it.desc_meli = (v == null || isNaN(v)) ? null : v / 100;
+  recalcPvpMeli(it);
+  saveRow(it, el);
+  renderActive();
+}
+function editComVar(sku, el) {
+  const it = ITEMS.find(i => i.sku === sku); if (!it) return;
+  const v = el.value === '' ? null : parseFloat(el.value);
+  it.comision_var = (v == null || isNaN(v)) ? null : v / 100;
+  saveRow(it, el);
+  renderActive();
+}
+function editCosto(sku, el) {
+  const it = ITEMS.find(i => i.sku === sku); if (!it) return;
+  const v = parseFloat(el.value);
+  if (isNaN(v)) { COST_OVERRIDE.delete(sku); } else { COST_OVERRIDE.set(sku, v); }
+  renderActive();   // simulación, no persiste
+}
+function importCostos() {
+  COST_OVERRIDE.clear();
+  loadAll();
+}
+
+loadAll();
+</script>
+</body>
+</html>
