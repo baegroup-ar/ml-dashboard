@@ -3712,12 +3712,69 @@ def _margen_current_cost(versioned: dict, sku: str, today_iso: str, variant_map=
     return None, 21.0
 
 
-def _margen_effective_cost(costo_manual, versioned, sku, today_iso, variant_map):
-    """(costo_efectivo, iva_rate, costo_cmv). El manual gana sobre el de CMV;
-    si el manual es NULL se usa el de CMV (que puede venir del cruce base SKU)."""
-    cmv, iva_rate = _margen_current_cost(versioned, sku, today_iso, variant_map)
-    cost = float(costo_manual) if costo_manual is not None else cmv
-    return cost, iva_rate, cmv
+def _cmv_direct_entry(versioned, sku_u, today_iso):
+    """Costo de CMV del SKU EXACTO (sin fallback de sufijo). versioned viene
+    keyeado en mayúsculas por db_get_product_costs."""
+    entries = versioned.get(sku_u)
+    if not entries:
+        return None
+    sel = None
+    for e in entries:
+        if e["valid_from"] <= today_iso:
+            sel = e
+        else:
+            break
+    return sel
+
+
+def _margen_resolve_cost(sku, manual_map_u, versioned, today_iso, variant_map_u, seen=None):
+    """(costo_efectivo, iva_rate) cruzando en orden: costo MANUAL propio → CMV
+    propio → sufijo de cuota (recursivo) → base SKU (Σ original×qty, recursivo).
+    Así el costo manual cargado en el ORIGINAL se propaga a variantes/combos."""
+    if seen is None:
+        seen = set()
+    su = (sku or "").strip().upper()
+    if not su or su in seen:
+        return None, 21.0
+    seen.add(su)
+    # 1) manual propio (gana). IVA: del CMV propio si existe, si no 21.
+    if manual_map_u.get(su) is not None:
+        e = _cmv_direct_entry(versioned, su, today_iso)
+        return float(manual_map_u[su]), (float(e["iva_rate"]) if e else 21.0)
+    # 2) CMV propio directo
+    e = _cmv_direct_entry(versioned, su, today_iso)
+    if e:
+        return float(e["cost"]), float(e.get("iva_rate") or 21)
+    # 3) sufijo de cuota → base (recursivo: capta manual o CMV del base)
+    for fb in _sku_fallbacks(su):
+        c, iva = _margen_resolve_cost(fb, manual_map_u, versioned, today_iso, variant_map_u, seen)
+        if c is not None:
+            return c, iva
+    # 4) base SKU (variantes/combos): Σ costo(original) × cantidad
+    originals = variant_map_u.get(su)
+    if originals:
+        total = 0.0
+        iva = None
+        found = False
+        for (orig, qty) in originals:
+            c, iv = _margen_resolve_cost(orig, manual_map_u, versioned, today_iso, variant_map_u, seen)
+            if c is not None:
+                total += c * float(qty or 1)
+                found = True
+                if iva is None:
+                    iva = iv
+        if found:
+            return total, (iva if iva is not None else 21.0)
+    return None, 21.0
+
+
+def _margen_maps(rows, variant_map):
+    """Arma manual_map y variant_map keyeados en mayúsculas para el resolver."""
+    manual_map_u = {(r["sku"] or "").strip().upper():
+                    (float(r["costo_manual"]) if r["costo_manual"] is not None else None)
+                    for r in rows}
+    variant_map_u = {(k or "").strip().upper(): v for k, v in variant_map.items()}
+    return manual_map_u, variant_map_u
 
 
 @app.get("/margen", response_class=HTMLResponse)
@@ -3759,11 +3816,13 @@ async def api_margen_data(request: Request, account_id: int):
     rows = db_fetchall(
         "SELECT sku, price, desc_meli, comision_var, costo_manual"
         " FROM product_sale_prices WHERE account_id=:a ORDER BY sku", {"a": account_id})
+    manual_map_u, variant_map_u = _margen_maps(rows, variant_map)
     items = []
     for r in rows:
         sku = r["sku"]
-        costo, iva_rate, costo_cmv = _margen_effective_cost(
-            r["costo_manual"], versioned, sku, today_iso, variant_map)
+        # Costo efectivo: manual propio → CMV → cruce base SKU (propaga el manual
+        # del original a variantes/combos).
+        costo, iva_rate = _margen_resolve_cost(sku, manual_map_u, versioned, today_iso, variant_map_u)
         # PVP LISTA = precio de la base PVP; PVP MELI = lista * (1 - desc),
         # calculado en vivo para que siga a cualquier cambio de precio en PVP.
         lista = float(r["price"]) if r["price"] is not None else None
@@ -3777,7 +3836,6 @@ async def api_margen_data(request: Request, account_id: int):
             "pvp_meli": pvp_meli,
             "comision_var": float(r["comision_var"]) if r["comision_var"] is not None else None,
             "costo_sin_iva": costo,
-            "costo_cmv": costo_cmv,
             "costo_manual": float(r["costo_manual"]) if r["costo_manual"] is not None else None,
             "iva_rate": iva_rate,
             "renta": comp["renta"] if comp else None,
@@ -4082,6 +4140,7 @@ async def api_margen_export_list(request: Request, account_id: int, view: str = 
     rows = db_fetchall(
         "SELECT sku, price, desc_meli, comision_var, costo_manual"
         " FROM product_sale_prices WHERE account_id=:a ORDER BY sku", {"a": account_id})
+    manual_map_u, variant_map_u = _margen_maps(rows, variant_map)
 
     import io
     from openpyxl import Workbook
@@ -4109,8 +4168,7 @@ async def api_margen_export_list(request: Request, account_id: int, view: str = 
 
     for r in rows:
         sku = r["sku"]
-        costo, iva_rate, _cmv = _margen_effective_cost(
-            r["costo_manual"], versioned, sku, today_iso, variant_map)
+        costo, iva_rate = _margen_resolve_cost(sku, manual_map_u, versioned, today_iso, variant_map_u)
         lista = float(r["price"]) if r["price"] is not None else None
         desc = float(r["desc_meli"]) if r["desc_meli"] is not None else None
         pvp_meli = _margen_pvp_meli(lista, desc)

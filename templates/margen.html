@@ -367,8 +367,9 @@ function fijaOf(pvp) {
   if (pvp < CONFIG.fija_t2_max) return CONFIG.fija_t2_val;
   return CONFIG.fija_t3_val;
 }
-// Costo efectivo: manual si está cargado, si no el de CMV, si no 0.
-function costOf(it) { return it.costo_manual != null ? it.costo_manual : (it.costo_cmv != null ? it.costo_cmv : 0); }
+// Costo efectivo: manual propio si está cargado; si no, el que resolvió el
+// backend (CMV o cruce por base SKU, que ya propaga el manual del original).
+function costOf(it) { return it.costo_manual != null ? it.costo_manual : (it.costo_sin_iva != null ? it.costo_sin_iva : 0); }
 function computeRow(it) {
   const pvp = it.pvp_meli;
   if (!pvp || pvp <= 0) return null;
@@ -476,9 +477,9 @@ async function editCosto(sku, el) {
     const r = await fetch(`/api/margen/${accId()}/cost`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sku, costo: it.costo_manual }) });
-    if (r.ok) flash(el);
-  } catch (e) {}
-  renderActive();
+    // Recarga para propagar el costo del original a sus variantes/combos.
+    if (r.ok) await loadAll();
+  } catch (e) { renderActive(); }
 }
 function editFija(sku, el) {
   const v = parseFloat(el.value);
