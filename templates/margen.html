@@ -133,21 +133,24 @@
           <tbody>
             <tr>
               <td><b>1</b></td><td class="num">$0</td>
-              <td class="num"><input type="number" id="p-fija_t1_max" class="p-in" oninput="updateTramos()"></td>
+              <td class="num"><input type="number" id="p-fija_t1_max" class="p-in" oninput="syncMirrors()"></td>
               <td class="num"><input type="number" id="p-fija_t1_val" class="p-in"></td>
             </tr>
             <tr>
-              <td><b>2</b></td><td class="num" id="t2-desde">—</td>
-              <td class="num"><input type="number" id="p-fija_t2_max" class="p-in" oninput="updateTramos()"></td>
+              <td><b>2</b></td>
+              <td class="num"><input type="number" class="p-in mirror" data-src="p-fija_t1_max" oninput="onMirror(this)"></td>
+              <td class="num"><input type="number" id="p-fija_t2_max" class="p-in" oninput="syncMirrors()"></td>
               <td class="num"><input type="number" id="p-fija_t2_val" class="p-in"></td>
             </tr>
             <tr>
-              <td><b>3</b></td><td class="num" id="t3-desde">—</td>
-              <td class="num muted" id="t3-hasta">—</td>
+              <td><b>3</b></td>
+              <td class="num"><input type="number" class="p-in mirror" data-src="p-fija_t2_max" oninput="onMirror(this)"></td>
+              <td class="num"><input type="number" class="p-in mirror" data-src="p-envio_threshold" oninput="onMirror(this)"></td>
               <td class="num"><input type="number" id="p-fija_t3_val" class="p-in"></td>
             </tr>
             <tr style="background:#fafaf8;">
-              <td><b>4</b></td><td class="num" id="t4-desde">—</td>
+              <td><b>4</b></td>
+              <td class="num"><input type="number" class="p-in mirror" data-src="p-envio_threshold" oninput="onMirror(this)"></td>
               <td class="num muted">y más</td>
               <td class="num" style="color:#888;">$0 · paga envío</td>
             </tr>
@@ -159,7 +162,7 @@
       <div class="param-section">
         <div class="param-title">Envío</div>
         <div class="param-fields">
-          <div class="fld"><label>Envío gratis desde (PVP ≥)</label><input type="number" id="p-envio_threshold" class="p-in" oninput="updateTramos()"></div>
+          <div class="fld"><label>Envío gratis desde (PVP ≥)</label><input type="number" id="p-envio_threshold" class="p-in" oninput="syncMirrors()"></div>
           <div class="fld"><label>Envío promedio $</label><input type="number" id="p-envio_promedio" class="p-in"></div>
         </div>
       </div>
@@ -295,20 +298,22 @@ function fillParams() {
     if (k === 'comision_var_default') v = (v != null ? v * 100 : v);
     el.value = (v != null ? v : '');
   }
-  updateTramos();
+  syncMirrors();
 }
 
-// Refleja los límites de tramos en la tabla (Desde/Hasta) en vivo.
-function updateTramos() {
-  const val = id => { const el = document.getElementById(id); return el && el.value !== '' ? Number(el.value) : null; };
-  const t1 = val('p-fija_t1_max'), t2 = val('p-fija_t2_max'), env = val('p-envio_threshold');
-  const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
-  set('t2-desde', fmtPlain(t1));
-  set('t3-desde', fmtPlain(t2));
-  set('t3-hasta', fmtPlain(env));
-  set('t4-desde', fmtPlain(env));
+// Los "Desde" de cada tramo y el "Hasta" del tramo 3 son inputs espejo del
+// mismo límite (data-src). Editás cualquiera y el par se mantiene sincronizado.
+function syncMirrors() {
+  document.querySelectorAll('.mirror').forEach(m => {
+    const src = document.getElementById(m.dataset.src);
+    if (src) m.value = src.value;
+  });
 }
-const fmtPlain = n => (n == null || isNaN(n)) ? '—' : '$' + Number(n).toLocaleString('es-AR', { maximumFractionDigits: 0 });
+function onMirror(el) {
+  const src = document.getElementById(el.dataset.src);
+  if (src) src.value = el.value;
+  syncMirrors();
+}
 
 async function saveConfig() {
   const body = {};
