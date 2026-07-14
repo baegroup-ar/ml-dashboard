@@ -3951,6 +3951,52 @@ async def api_margen_template(request: Request, account_id: int, field: str = "d
         headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
 
+@app.get("/api/margen/{account_id:int}/export")
+async def api_margen_export(request: Request, account_id: int, field: str = "desc"):
+    """Descarga Excel con los valores cargados: SKU + Desc % (Resumen) o
+    SKU + Comisión variable % (MELI). Trae todos los SKU (vacío si no cargado)."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    if field not in ("desc", "comision"):
+        raise HTTPException(400, "field inválido (desc|comision).")
+    col = "desc_meli" if field == "desc" else "comision_var"
+    rows = db_fetchall(
+        f"SELECT sku, {col} AS v FROM product_sale_prices"
+        " WHERE account_id=:a ORDER BY sku", {"a": account_id})
+    import io
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from fastapi.responses import StreamingResponse
+    header2 = "Descuento %" if field == "desc" else "Comisión variable %"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Cargados"
+    ws.append(["SKU", header2])
+    fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
+    for c in (1, 2):
+        cell = ws.cell(row=1, column=c)
+        cell.fill = fill
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(horizontal="center")
+    for r in rows:
+        v = r.get("v")
+        ws.append([r.get("sku") or "", (round(float(v) * 100, 2) if v is not None else None)])
+    ws.column_dimensions["A"].width = 22
+    ws.column_dimensions["B"].width = 20
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    nick = (acc.get("nickname") or acc.get("ml_user_id") or "cuenta").replace(" ", "_")
+    base = "descuentos_meli" if field == "desc" else "comisiones_meli"
+    return StreamingResponse(
+        buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{base}_{nick}.xlsx"'})
+
+
 @app.get("/api/margen/{account_id:int}/config")
 async def api_margen_config_get(request: Request, account_id: int):
     user_id = get_session_user_id(request)
