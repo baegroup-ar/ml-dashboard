@@ -199,6 +199,8 @@
       <button class="green" onclick="uploadBulk('resumen')">Subir Excel</button>
       <a href="#" onclick="downloadExport(event,'desc')" class="tpl-link">Descargar cargados</a>
       <a href="#" onclick="downloadTpl(event,'desc')" class="tpl-link">Plantilla</a>
+      <span class="sep">|</span>
+      <button class="primary" onclick="downloadListado('resumen')">⬇ Descargar listado</button>
       <span id="res-msg" class="bulk-msg"></span>
     </div>
     <div style="overflow-x:auto;">
@@ -227,6 +229,8 @@
       <button class="green" onclick="uploadBulk('meli')">Subir Excel</button>
       <a href="#" onclick="downloadExport(event,'comision')" class="tpl-link">Descargar cargados</a>
       <a href="#" onclick="downloadTpl(event,'comision')" class="tpl-link">Plantilla</a>
+      <span class="sep">|</span>
+      <button class="primary" onclick="downloadListado('meli')">⬇ Descargar listado</button>
       <span id="meli-msg" class="bulk-msg"></span>
     </div>
     <div class="row" style="margin-bottom:8px;">
@@ -537,6 +541,7 @@ async function uploadBulk(tab) {
 }
 function downloadTpl(e, field) { if (e) e.preventDefault(); window.location = `/api/margen/${accId()}/template?field=${field}`; }
 function downloadExport(e, field) { if (e) e.preventDefault(); window.location = `/api/margen/${accId()}/export?field=${field}`; }
+function downloadListado(view) { window.location = `/api/margen/${accId()}/export-list?view=${view}`; }
 
 loadAll();
 </script>

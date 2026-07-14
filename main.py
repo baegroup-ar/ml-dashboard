@@ -3997,6 +3997,83 @@ async def api_margen_export(request: Request, account_id: int, field: str = "des
         headers={"Content-Disposition": f'attachment; filename="{base}_{nick}.xlsx"'})
 
 
+@app.get("/api/margen/{account_id:int}/export-list")
+async def api_margen_export_list(request: Request, account_id: int, view: str = "resumen"):
+    """Descarga la tabla completa tal cual se muestra: Resumen (SKU, PVP Lista,
+    Desc, PVP MELI, % MELI) o MELI (desglose full hasta Renta Bruta)."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    user = get_user(user_id)
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    if view not in ("resumen", "meli"):
+        raise HTTPException(400, "view inválido (resumen|meli).")
+    p = margen_get_config(account_id)
+    cost_aid = _cost_account_id_for(user, account_id)
+    versioned = db_get_product_costs(cost_aid)
+    variant_map = _get_variant_map(cost_aid)
+    today_iso = (datetime.utcnow() - timedelta(hours=3)).date().isoformat()
+    rows = db_fetchall(
+        "SELECT sku, price, desc_meli, comision_var"
+        " FROM product_sale_prices WHERE account_id=:a ORDER BY sku", {"a": account_id})
+
+    import io
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from fastapi.responses import StreamingResponse
+    wb = Workbook()
+    ws = wb.active
+    if view == "resumen":
+        ws.title = "Resumen"
+        header = ["SKU", "PVP LISTA", "DESC MELI %", "PVP MELI", "% MELI"]
+    else:
+        ws.title = "MELI"
+        header = ["SKU", "PVP MELI", "PVP s/IVA", "Com. var %", "Com. var $",
+                  "Com. fija $", "Envío $", "Cobro", "Costo s/IVA", "Renta %"]
+    ws.append(header)
+    fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
+    for c in range(1, len(header) + 1):
+        cell = ws.cell(row=1, column=c)
+        cell.fill = fill
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(horizontal="center")
+
+    def r2(x):
+        return round(float(x), 2) if x is not None else None
+
+    for r in rows:
+        sku = r["sku"]
+        costo, iva_rate = _margen_current_cost(versioned, sku, today_iso, variant_map)
+        lista = float(r["price"]) if r["price"] is not None else None
+        desc = float(r["desc_meli"]) if r["desc_meli"] is not None else None
+        pvp_meli = _margen_pvp_meli(lista, desc)
+        comp = margen_compute(pvp_meli, iva_rate, r["comision_var"], costo, p)
+        renta_pct = round(comp["renta"] * 100, 2) if comp and comp["renta"] is not None else None
+        if view == "resumen":
+            ws.append([sku, r2(lista), (round(desc * 100, 2) if desc is not None else None),
+                       r2(pvp_meli), renta_pct])
+        else:
+            if comp:
+                ws.append([sku, r2(pvp_meli), r2(comp["pvp_sin_iva"]),
+                           round(comp["comision_var_frac"] * 100, 2), r2(comp["comision_var_amt"]),
+                           r2(comp["fija_amt"]), r2(comp["envio_amt"]), r2(comp["cobro"]),
+                           r2(comp["costo_sin_iva"]), renta_pct])
+            else:
+                ws.append([sku, None, None, None, None, None, None, None, r2(costo), None])
+    for col in range(1, len(header) + 1):
+        ws.column_dimensions[chr(64 + col)].width = 16
+    ws.column_dimensions["A"].width = 22
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    nick = (acc.get("nickname") or acc.get("ml_user_id") or "cuenta").replace(" ", "_")
+    return StreamingResponse(
+        buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="margen_{view}_{nick}.xlsx"'})
+
+
 @app.get("/api/margen/{account_id:int}/config")
 async def api_margen_config_get(request: Request, account_id: int):
     user_id = get_session_user_id(request)
