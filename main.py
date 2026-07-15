@@ -6540,6 +6540,67 @@ async def api_descuentos_bulk_edit(request: Request, account_id: int):
     return {"ok": True, "updated": len(normalized)}
 
 
+@app.post("/api/descuentos/{account_id}/import-margen")
+async def api_descuentos_import_margen(request: Request, account_id: int):
+    """Actualiza el % de la base trayendo el descuento desde Margen (Resumen).
+    Cruce por SKU exacto: para cada MLA cuya SKU tenga `desc_meli` cargado en
+    product_sale_prices (misma cuenta), setea discount_pct = desc_meli*100.
+    Los MLA cuya SKU NO esté en Margen (o sin desc_meli, o sin SKU) quedan
+    intactos — conservan el último descuento cargado. No crea MLAs nuevos."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    # 1) Mapa SKU(upper) -> desc_pct desde Margen (solo desc_meli cargado)
+    price_rows = db_fetchall(
+        "SELECT sku, desc_meli FROM product_sale_prices"
+        " WHERE account_id=:aid AND desc_meli IS NOT NULL",
+        {"aid": account_id},
+    )
+    desc_by_sku = {}
+    for r in price_rows:
+        sku = (r["sku"] or "").strip().upper()
+        if not sku:
+            continue
+        pct = round(float(r["desc_meli"]) * 100.0, 2)
+        if 0 <= pct <= 100:
+            desc_by_sku[sku] = pct
+    # 2) Recorrer la base y actualizar solo los MLA cuyo SKU matchee
+    disc_rows = db_fetchall(
+        "SELECT mla, sku, discount_pct FROM product_discounts WHERE account_id=:aid",
+        {"aid": account_id},
+    )
+    updates = []
+    matched = 0
+    for r in disc_rows:
+        sku = (r["sku"] or "").strip().upper()
+        if not sku or sku not in desc_by_sku:
+            continue
+        matched += 1
+        new_pct = desc_by_sku[sku]
+        if abs(float(r["discount_pct"]) - new_pct) < 0.005:
+            continue  # ya está igual, no cuenta como cambio
+        updates.append({"aid": account_id, "mla": r["mla"], "pct": new_pct})
+    if updates:
+        with engine.connect() as conn:
+            conn.execute(text(
+                "UPDATE product_discounts SET discount_pct=:pct, updated_at=NOW()"
+                " WHERE account_id=:aid AND mla=:mla"
+            ), updates)
+            conn.commit()
+    total = len(disc_rows)
+    return {
+        "ok": True,
+        "updated": len(updates),
+        "matched": matched,
+        "unmatched": total - matched,
+        "total": total,
+        "margen_skus": len(desc_by_sku),
+    }
+
+
 @app.post("/api/descuentos/{account_id}/upload")
 async def api_descuentos_upload(request: Request, account_id: int):
     user_id = get_session_user_id(request)

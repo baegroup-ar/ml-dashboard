@@ -147,6 +147,11 @@
          style="padding:8px 14px;border:1px solid #005CFF;border-radius:8px;background:#fff;color:#005CFF;font-size:13px;text-decoration:none;">
         Descargar plantilla
       </a>
+      <span style="width:1px;height:24px;background:#e0e0dd;"></span>
+      <button onclick="importMargen()" id="btn-import-margen" class="green"
+              title="Actualiza el % de descuento trayéndolo desde Margen (Resumen), cruzando por SKU. Los SKU que no estén en Margen conservan su descuento actual.">
+        ↻ Importar descuentos (Margen)
+      </button>
     </div>
     <div class="help-box">
       Columnas esperadas: <code>MLA</code>, <code>SKU</code> (referencial) y <code>Descuento %</code> (0 a 100).
@@ -663,6 +668,26 @@
       msg.innerHTML = `<div class="msg err">${e.message}</div>`;
     } finally {
       btn.disabled = false; btn.textContent = 'Subir archivo';
+    }
+  }
+
+  async function importMargen() {
+    const btn = document.getElementById('btn-import-margen');
+    const msg = document.getElementById('upload-msg');
+    if(!currentAccountId) { alert('Seleccioná una cuenta primero.'); return; }
+    if(!confirm('Actualizar la base con los descuentos cargados en Margen (Resumen)?\n\nSe actualizan solo los MLA cuya SKU tenga descuento cargado en Margen. Los demás conservan su descuento actual.')) return;
+    btn.disabled = true; const prev = btn.textContent; btn.textContent = 'Importando...';
+    try {
+      const r = await fetch(`/api/descuentos/${currentAccountId}/import-margen`, { method: 'POST' });
+      if(!r.ok) { const t = await r.text(); throw new Error(t || 'Error'); }
+      const d = await r.json();
+      msg.innerHTML = `<div class="msg ok">Importado desde Margen: ${d.updated} actualizados`
+        + ` (${d.matched} coincidieron por SKU, ${d.unmatched} sin coincidencia se dejaron igual).</div>`;
+      await loadBase();
+    } catch(e) {
+      msg.innerHTML = `<div class="msg err">${e.message}</div>`;
+    } finally {
+      btn.disabled = false; btn.textContent = prev;
     }
   }
 
