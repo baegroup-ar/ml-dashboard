@@ -226,15 +226,23 @@
 
   <div class="card" id="view-meli" style="display:none;">
     <div class="bulk-bar">
-      <span class="bulk-lbl">Carga masiva de Com. variable:</span>
+      <span class="bulk-lbl">Carga masiva:</span>
       <span id="meli-selcount" class="bulk-count">0 seleccionados</span>
-      <input type="number" id="meli-bulk-val" class="num-input" style="width:74px" placeholder="Com %" step="0.1" min="0">
-      <button class="primary" onclick="applyBulk('meli')">Aplicar a seleccionados</button>
       <span class="sep">|</span>
-      <input type="file" id="meli-file" accept=".xlsx,.xlsm,.csv" style="font-size:12px;max-width:200px;">
+      <input type="number" id="meli-bulk-val" class="num-input" style="width:74px" placeholder="Com %" step="0.1" min="0">
+      <button class="primary" onclick="applyBulk('meli')">Aplicar com. var</button>
+      <span class="sep">|</span>
+      <select id="meli-bulk-tipo" class="tipo-sel"></select>
+      <button class="primary" onclick="applyBulkTipo()">Aplicar tipo</button>
+      <span class="sep">|</span>
+      <select id="meli-upload-field" class="tipo-sel" title="Qué actualiza el Excel">
+        <option value="comision">Excel: Comisión</option>
+        <option value="tipo">Excel: Tipo Pub.</option>
+      </select>
+      <input type="file" id="meli-file" accept=".xlsx,.xlsm,.csv" style="font-size:12px;max-width:160px;">
       <button class="green" onclick="uploadBulk('meli')">Subir Excel</button>
       <a href="#" onclick="downloadExport(event,'comision')" class="tpl-link">Descargar cargados</a>
-      <a href="#" onclick="downloadTpl(event,'comision')" class="tpl-link">Plantilla</a>
+      <a href="#" onclick="downloadTplMeli(event)" class="tpl-link">Plantilla</a>
       <span class="sep">|</span>
       <button class="primary" onclick="downloadListado('meli')">⬇ Descargar listado</button>
       <span id="meli-msg" class="bulk-msg"></span>
@@ -252,8 +260,8 @@
           <th class="num">PVP MELI</th>
           <th class="num">PVP s/IVA</th>
           <th class="num">Com. var %</th>
-          <th class="num">Com. var $</th>
           <th class="num">Com. cuotas %</th>
+          <th class="num">Com. var $</th>
           <th class="num">Com. fija $</th>
           <th class="num">Envío $</th>
           <th class="num">Cobro</th>
@@ -305,6 +313,7 @@ async function loadAll() {
   FIJA_OVERRIDE.clear(); ENVIO_OVERRIDE.clear();
   SEL.resumen.clear(); SEL.meli.clear();
   fillParams();
+  populateBulkTipo();
   document.getElementById('count-label').textContent = `${ITEMS.length} SKU`;
   renderActive();
 }
@@ -393,7 +402,7 @@ function computeRow(it) {
   if (!pvp || pvp <= 0) return null;
   const f = factorOf(it);
   const pvpSin = pvp / f;
-  const cv = (it.comision_var != null ? it.comision_var : CONFIG.comision_var_default);
+  const cv = (it.comvar_eff != null ? it.comvar_eff : CONFIG.comision_var_default);
   const comAmt = pvp * cv / f;
   const ccf = comCuotasFrac(it);
   const comCuotasAmt = pvp * ccf / f;
@@ -401,10 +410,11 @@ function computeRow(it) {
   const envioAmt = ENVIO_OVERRIDE.has(it.sku) ? ENVIO_OVERRIDE.get(it.sku)
                   : (pvp >= CONFIG.envio_threshold ? CONFIG.envio_promedio / f : 0);
   const cobro = pvpSin - comAmt - comCuotasAmt - fijaAmt - envioAmt;
+  const comCombinedAmt = comAmt + comCuotasAmt;   // Com. var $ = var + cuotas
   const costo = costOf(it);
   const resultado = cobro - costo;
   const renta = pvpSin ? resultado / pvpSin : null;
-  return { pvpSin, cv, comAmt, ccf, comCuotasAmt, fijaAmt, envioAmt, cobro, costo, resultado, renta };
+  return { pvpSin, cv, comAmt, ccf, comCuotasAmt, comCombinedAmt, fijaAmt, envioAmt, cobro, costo, resultado, renta };
 }
 function recalcPvpMeli(it) {
   it.pvp_meli = it.pvp_lista == null ? null : Math.round(it.pvp_lista * (1 - (it.desc_meli || 0)) * 100) / 100;
@@ -453,10 +463,11 @@ function renderMeli() {
       ${tipoCell(it)}
       <td class="num">${fmt(it.pvp_meli)}</td>
       <td class="num">${fmt(c.pvpSin)}</td>
-      <td class="num"><input type="number" class="num-input cell-edit" style="width:64px" value="${(c.cv*100).toFixed(1)}" step="0.1" min="0"
-          onchange="editComVar('${esc(it.sku)}', this)"></td>
-      <td class="num">${fmt(c.comAmt)}</td>
-      <td class="num" title="${(c.ccf*100).toFixed(1)}% = ${fmt(c.comCuotasAmt)}">${pct(c.ccf)}</td>
+      <td class="num">${it.comvar_assoc
+          ? `<span title="Heredado del SKU original (base SKU). Editá la com var en el original.">${(c.cv*100).toFixed(1)}</span>`
+          : `<input type="number" class="num-input cell-edit" style="width:64px" value="${(c.cv*100).toFixed(1)}" step="0.1" min="0" onchange="editComVar('${esc(it.sku)}', this)">`}</td>
+      <td class="num" title="Comisión por cuotas del tipo ${esc(it.tipo_publicacion||'Clasica')}">${pct(c.ccf)}</td>
+      <td class="num" title="Com. var + Com. cuotas">${fmt(c.comCombinedAmt)}</td>
       <td class="num"><input type="number" class="num-input cell-edit" style="width:80px" value="${Math.round(c.fijaAmt)}" step="0.01" min="0"
           onchange="editFija('${esc(it.sku)}', this)"></td>
       <td class="num"><input type="number" class="num-input cell-edit" style="width:80px" value="${Math.round(c.envioAmt)}" step="0.01" min="0"
@@ -493,7 +504,9 @@ function editDesc(sku, el) {
 function editComVar(sku, el) {
   const it = ITEMS.find(i => i.sku === sku); if (!it) return;
   const v = el.value === '' ? null : parseFloat(el.value);
-  it.comision_var = (v == null || isNaN(v)) ? null : v / 100;
+  const frac = (v == null || isNaN(v)) ? null : v / 100;
+  it.comision_var = frac;   // valor propio (se persiste)
+  it.comvar_eff = frac;     // no asociado: efectivo = propio
   saveRow(it, el);
   renderActive();
 }
@@ -583,7 +596,8 @@ async function applyBulk(tab) {
   } catch (e) { msg.textContent = 'Error: ' + e.message; }
 }
 async function uploadBulk(tab) {
-  const field = tab === 'resumen' ? 'desc' : 'comision';
+  const field = tab === 'resumen' ? 'desc'
+              : (document.getElementById('meli-upload-field').value || 'comision');
   const f = document.getElementById(tab === 'resumen' ? 'res-file' : 'meli-file').files[0];
   const msg = document.getElementById(tab === 'resumen' ? 'res-msg' : 'meli-msg');
   if (!f) { msg.textContent = 'Elegí un archivo.'; return; }
@@ -596,6 +610,32 @@ async function uploadBulk(tab) {
     msg.textContent = `Listo: ${j.updated} actualizados.`;
     await loadAll();
   } catch (e) { msg.textContent = 'Error: ' + e.message; }
+}
+async function applyBulkTipo() {
+  const skus = [...SEL.meli];
+  const msg = document.getElementById('meli-msg');
+  if (!skus.length) { msg.textContent = 'No hay SKU seleccionados.'; return; }
+  const tipo = document.getElementById('meli-bulk-tipo').value;
+  const items = skus.map(sku => ({ sku, value: tipo }));
+  msg.textContent = 'Aplicando tipo...';
+  try {
+    const r = await fetch(`/api/margen/${accId()}/bulk`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ field: 'tipo', items }) });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.detail || 'error');
+    msg.textContent = `Listo: ${j.updated} con tipo ${tipo}.`;
+    await loadAll();
+  } catch (e) { msg.textContent = 'Error: ' + e.message; }
+}
+function populateBulkTipo() {
+  const sel = document.getElementById('meli-bulk-tipo');
+  if (sel) sel.innerHTML = TIPOS.map(t => `<option value="${t}">${t}</option>`).join('');
+}
+function downloadTplMeli(e) {
+  if (e) e.preventDefault();
+  const field = document.getElementById('meli-upload-field').value || 'comision';
+  window.location = `/api/margen/${accId()}/template?field=${field}`;
 }
 function downloadTpl(e, field) { if (e) e.preventDefault(); window.location = `/api/margen/${accId()}/template?field=${field}`; }
 function downloadExport(e, field) { if (e) e.preventDefault(); window.location = `/api/margen/${accId()}/export?field=${field}`; }

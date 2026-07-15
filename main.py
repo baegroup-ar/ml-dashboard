@@ -3830,12 +3830,38 @@ def _margen_resolve_cost(sku, manual_map_u, versioned, today_iso, variant_map_u,
 
 
 def _margen_maps(rows, variant_map):
-    """Arma manual_map y variant_map keyeados en mayúsculas para el resolver."""
+    """Arma manual_map, variant_map y comvar_map keyeados en mayúsculas."""
     manual_map_u = {(r["sku"] or "").strip().upper():
                     (float(r["costo_manual"]) if r["costo_manual"] is not None else None)
                     for r in rows}
+    comvar_map_u = {(r["sku"] or "").strip().upper():
+                    (float(r["comision_var"]) if r["comision_var"] is not None else None)
+                    for r in rows}
     variant_map_u = {(k or "").strip().upper(): v for k, v in variant_map.items()}
-    return manual_map_u, variant_map_u
+    return manual_map_u, variant_map_u, comvar_map_u
+
+
+def _margen_resolve_comvar(sku, comvar_map_u, variant_map_u, seen=None):
+    """com var % (fracción) del SKU, o None (→ usar comision_var_default). La
+    asociación en base SKU MANDA: si el SKU está asociado a un original, toma la
+    com var del original (recursivo, primer original que resuelva); NO usa el
+    valor propio de la variante. Si NO está asociado, usa su valor propio."""
+    if seen is None:
+        seen = set()
+    su = (sku or "").strip().upper()
+    if not su or su in seen:
+        return None
+    seen.add(su)
+    originals = variant_map_u.get(su)
+    if originals:
+        # Asociado: manda el original. Si ninguno tiene valor propio, None
+        # (→ default), sin caer nunca al valor propio de la variante.
+        for (orig, _qty) in originals:
+            c = _margen_resolve_comvar(orig, comvar_map_u, variant_map_u, seen)
+            if c is not None:
+                return c
+        return None
+    return comvar_map_u.get(su)
 
 
 @app.get("/margen", response_class=HTMLResponse)
@@ -3877,10 +3903,11 @@ async def api_margen_data(request: Request, account_id: int):
     rows = db_fetchall(
         "SELECT sku, price, desc_meli, comision_var, costo_manual, tipo_publicacion"
         " FROM product_sale_prices WHERE account_id=:a ORDER BY sku", {"a": account_id})
-    manual_map_u, variant_map_u = _margen_maps(rows, variant_map)
+    manual_map_u, variant_map_u, comvar_map_u = _margen_maps(rows, variant_map)
     items = []
     for r in rows:
         sku = r["sku"]
+        su = (sku or "").strip().upper()
         # Costo efectivo: manual propio → CMV → cruce base SKU (propaga el manual
         # del original a variantes/combos).
         costo, iva_rate = _margen_resolve_cost(sku, manual_map_u, versioned, today_iso, variant_map_u)
@@ -3891,13 +3918,21 @@ async def api_margen_data(request: Request, account_id: int):
         pvp_meli = _margen_pvp_meli(lista, desc)
         tipo = _margen_tipo_resolve(sku, r["tipo_publicacion"])
         ccf = _margen_com_cuotas_frac(tipo, p)
-        comp = margen_compute(pvp_meli, iva_rate, r["comision_var"], costo, p, ccf)
+        # Com var: la asociación en base SKU manda (toma la del original). Los SKU
+        # asociados muestran la com var heredada (read-only en la UI). `comision_var`
+        # = valor PROPIO (lo que se persiste); `comvar_eff` = efectivo para calcular
+        # y mostrar (heredado del original si está asociado).
+        assoc = su in variant_map_u
+        comvar = _margen_resolve_comvar(sku, comvar_map_u, variant_map_u)
+        comp = margen_compute(pvp_meli, iva_rate, comvar, costo, p, ccf)
         items.append({
             "sku": sku,
             "pvp_lista": lista,
             "desc_meli": desc,
             "pvp_meli": pvp_meli,
             "comision_var": float(r["comision_var"]) if r["comision_var"] is not None else None,
+            "comvar_eff": comvar,
+            "comvar_assoc": assoc,
             "tipo_publicacion": tipo,
             "com_cuotas": ccf,
             "costo_sin_iva": costo,
@@ -4037,7 +4072,20 @@ def _margen_norm_pct(v):
 
 
 def _margen_apply_bulk(account_id: int, field: str, pairs: list) -> int:
-    """Aplica en masa desc_meli o comision_var. pairs = [(sku, fraccion|None)]."""
+    """Aplica en masa desc_meli, comision_var o tipo_publicacion.
+    pairs = [(sku, valor)] (fracción para desc/comision; string para tipo)."""
+    if field == "tipo":
+        n = 0
+        for sku, val in pairs:
+            if not sku:
+                continue
+            t = val if val in _MARGEN_TIPOS else None
+            db_execute(
+                "UPDATE product_sale_prices SET tipo_publicacion=:t, updated_at=NOW()"
+                " WHERE account_id=:a AND sku=:s",
+                {"a": account_id, "s": sku, "t": t})
+            n += 1
+        return n
     if field == "comision":
         n = 0
         for sku, val in pairs:
@@ -4077,10 +4125,15 @@ async def api_margen_bulk(request: Request, account_id: int):
         raise HTTPException(404)
     body = await request.json()
     field = str(body.get("field") or "")
-    if field not in ("desc", "comision"):
-        raise HTTPException(400, "field inválido (desc|comision).")
-    pairs = [(str(it.get("sku") or "").strip(), _margen_norm_pct(it.get("value")))
-             for it in (body.get("items") or [])]
+    if field not in ("desc", "comision", "tipo"):
+        raise HTTPException(400, "field inválido (desc|comision|tipo).")
+    items = body.get("items") or []
+    if field == "tipo":
+        pairs = [(str(it.get("sku") or "").strip(), str(it.get("value") or "").strip())
+                 for it in items]
+    else:
+        pairs = [(str(it.get("sku") or "").strip(), _margen_norm_pct(it.get("value")))
+                 for it in items]
     return {"ok": True, "updated": _margen_apply_bulk(account_id, field, pairs)}
 
 
@@ -4115,14 +4168,18 @@ async def api_margen_upload(request: Request, account_id: int, field: str = "des
         raise HTTPException(401)
     if not _account_for_user(account_id, user_id):
         raise HTTPException(404)
-    if field not in ("desc", "comision"):
-        raise HTTPException(400, "field inválido (desc|comision).")
+    if field not in ("desc", "comision", "tipo"):
+        raise HTTPException(400, "field inválido (desc|comision|tipo).")
     form = await request.form()
     up = form.get("file")
     if up is None:
         raise HTTPException(400, "Falta el archivo.")
     content = await up.read()
-    pairs = [(sku, _margen_norm_pct(v)) for sku, v in _parse_margen_upload(content, up.filename)]
+    parsed = _parse_margen_upload(content, up.filename)
+    if field == "tipo":
+        pairs = [(sku, str(v or "").strip()) for sku, v in parsed]
+    else:
+        pairs = [(sku, _margen_norm_pct(v)) for sku, v in parsed]
     return {"ok": True, "updated": _margen_apply_bulk(account_id, field, pairs)}
 
 
@@ -4138,7 +4195,9 @@ async def api_margen_template(request: Request, account_id: int, field: str = "d
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment
     from fastapi.responses import StreamingResponse
-    col2 = "Descuento %" if field == "desc" else "Comisión variable %"
+    col2 = {"desc": "Descuento %", "comision": "Comisión variable %",
+            "tipo": "Tipo Publicación"}.get(field, "Valor")
+    example = {"desc": 15, "comision": 16, "tipo": "Premium3"}.get(field, "")
     wb = Workbook()
     ws = wb.active
     ws.title = "Plantilla"
@@ -4149,13 +4208,21 @@ async def api_margen_template(request: Request, account_id: int, field: str = "d
         cell.fill = fill
         cell.font = Font(bold=True)
         cell.alignment = Alignment(horizontal="center")
-    ws.append(["SOP68-443", 15])
+    ws.append(["SOP68-443", example])
+    if field == "tipo":
+        # Ayuda: valores válidos.
+        ws2 = wb.create_sheet("Valores")
+        ws2.append(["Tipo Publicación (valores válidos)"])
+        for t in _MARGEN_TIPOS:
+            ws2.append([t])
+        ws2.column_dimensions["A"].width = 24
     ws.column_dimensions["A"].width = 22
     ws.column_dimensions["B"].width = 20
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
-    fname = "plantilla_descuentos.xlsx" if field == "desc" else "plantilla_comisiones.xlsx"
+    fname = {"desc": "plantilla_descuentos.xlsx", "comision": "plantilla_comisiones.xlsx",
+             "tipo": "plantilla_tipo_publicacion.xlsx"}.get(field, "plantilla.xlsx")
     return StreamingResponse(
         buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{fname}"'})
@@ -4228,7 +4295,7 @@ async def api_margen_export_list(request: Request, account_id: int, view: str = 
     rows = db_fetchall(
         "SELECT sku, price, desc_meli, comision_var, costo_manual, tipo_publicacion"
         " FROM product_sale_prices WHERE account_id=:a ORDER BY sku", {"a": account_id})
-    manual_map_u, variant_map_u = _margen_maps(rows, variant_map)
+    manual_map_u, variant_map_u, comvar_map_u = _margen_maps(rows, variant_map)
 
     import io
     from openpyxl import Workbook
@@ -4241,8 +4308,8 @@ async def api_margen_export_list(request: Request, account_id: int, view: str = 
         header = ["SKU", "PVP LISTA", "DESC MELI %", "PVP MELI", "% MELI"]
     else:
         ws.title = "MELI"
-        header = ["SKU", "Tipo Pub.", "PVP MELI", "PVP s/IVA", "Com. var %", "Com. var $",
-                  "Com. cuotas %", "Com. cuotas $", "Com. fija $", "Envío $", "Cobro",
+        header = ["SKU", "Tipo Pub.", "PVP MELI", "PVP s/IVA", "Com. var %",
+                  "Com. cuotas %", "Com. var $", "Com. fija $", "Envío $", "Cobro",
                   "Costo s/IVA", "Renta %"]
     ws.append(header)
     fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
@@ -4263,20 +4330,23 @@ async def api_margen_export_list(request: Request, account_id: int, view: str = 
         pvp_meli = _margen_pvp_meli(lista, desc)
         tipo = _margen_tipo_resolve(sku, r["tipo_publicacion"])
         ccf = _margen_com_cuotas_frac(tipo, p)
-        comp = margen_compute(pvp_meli, iva_rate, r["comision_var"], costo, p, ccf)
+        comvar = _margen_resolve_comvar(sku, comvar_map_u, variant_map_u)
+        comp = margen_compute(pvp_meli, iva_rate, comvar, costo, p, ccf)
         renta_pct = round(comp["renta"] * 100, 2) if comp and comp["renta"] is not None else None
         if view == "resumen":
             ws.append([sku, r2(lista), (round(desc * 100, 2) if desc is not None else None),
                        r2(pvp_meli), renta_pct])
         else:
             if comp:
+                # Com. var $ = monto combinado (com var % + com cuotas %).
+                com_comb = r2(comp["comision_var_amt"] + comp["com_cuotas_amt"])
                 ws.append([sku, tipo, r2(pvp_meli), r2(comp["pvp_sin_iva"]),
-                           round(comp["comision_var_frac"] * 100, 2), r2(comp["comision_var_amt"]),
-                           round(comp["com_cuotas_frac"] * 100, 2), r2(comp["com_cuotas_amt"]),
+                           round(comp["comision_var_frac"] * 100, 2),
+                           round(comp["com_cuotas_frac"] * 100, 2), com_comb,
                            r2(comp["fija_amt"]), r2(comp["envio_amt"]), r2(comp["cobro"]),
                            r2(comp["costo_sin_iva"]), renta_pct])
             else:
-                ws.append([sku, tipo, None, None, None, None, None, None, None, None, None,
+                ws.append([sku, tipo, None, None, None, None, None, None, None, None,
                            r2(costo), None])
     for col in range(1, len(header) + 1):
         ws.column_dimensions[chr(64 + col)].width = 16
