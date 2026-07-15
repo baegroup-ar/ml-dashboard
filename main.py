@@ -6287,7 +6287,7 @@ async def api_descuentos_template(request: Request):
         [""],
         ["Columnas:"],
         ["MLA", "Identificador de la publicación de Mercado Libre (ej. MLA1648019734)."],
-        ["SKU", "Referencial — sirve para identificar visualmente la publicación. No se usa para matchear."],
+        ["SKU", "Identifica la publicación. El cruce con promos es por MLA, pero el SKU se usa para 'Importar descuentos (Margen)' (cruza por SKU exacto). Conviene cargarlo bien."],
         ["Descuento %", "Porcentaje a aplicar (0 a 100). Ej: 20 = 20% off."],
         [""],
         ["Cómo se usa:"],
