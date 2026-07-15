@@ -3728,9 +3728,12 @@ def _cmv_direct_entry(versioned, sku_u, today_iso):
 
 
 def _margen_resolve_cost(sku, manual_map_u, versioned, today_iso, variant_map_u, seen=None):
-    """(costo_efectivo, iva_rate) cruzando en orden: costo MANUAL propio → CMV
-    propio → sufijo de cuota (recursivo) → base SKU (Σ original×qty, recursivo).
-    Así el costo manual cargado en el ORIGINAL se propaga a variantes/combos."""
+    """(costo_efectivo, iva_rate) cruzando en orden: costo MANUAL propio → base
+    SKU asociada (Σ original×qty, recursivo) → CMV propio → sufijo de cuota
+    (recursivo). La asociación en base SKU MANDA sobre el CMV propio de la
+    variante: si un SKU está asociado a un original, el costo sale del original
+    (que a su vez propaga su manual/CMV); solo si NO está asociado se usa el CMV
+    propio. Así el costo cargado en el ORIGINAL se propaga a variantes/combos."""
     if seen is None:
         seen = set()
     su = (sku or "").strip().upper()
@@ -3741,16 +3744,8 @@ def _margen_resolve_cost(sku, manual_map_u, versioned, today_iso, variant_map_u,
     if manual_map_u.get(su) is not None:
         e = _cmv_direct_entry(versioned, su, today_iso)
         return float(manual_map_u[su]), (float(e["iva_rate"]) if e else 21.0)
-    # 2) CMV propio directo
-    e = _cmv_direct_entry(versioned, su, today_iso)
-    if e:
-        return float(e["cost"]), float(e.get("iva_rate") or 21)
-    # 3) sufijo de cuota → base (recursivo: capta manual o CMV del base)
-    for fb in _sku_fallbacks(su):
-        c, iva = _margen_resolve_cost(fb, manual_map_u, versioned, today_iso, variant_map_u, seen)
-        if c is not None:
-            return c, iva
-    # 4) base SKU (variantes/combos): Σ costo(original) × cantidad
+    # 2) base SKU asociada (variantes/combos): Σ costo(original) × cantidad.
+    # Manda sobre el CMV propio: si está asociado, el costo sale del original.
     originals = variant_map_u.get(su)
     if originals:
         total = 0.0
@@ -3765,6 +3760,15 @@ def _margen_resolve_cost(sku, manual_map_u, versioned, today_iso, variant_map_u,
                     iva = iv
         if found:
             return total, (iva if iva is not None else 21.0)
+    # 3) CMV propio directo (solo si NO está asociado en base SKU)
+    e = _cmv_direct_entry(versioned, su, today_iso)
+    if e:
+        return float(e["cost"]), float(e.get("iva_rate") or 21)
+    # 4) sufijo de cuota → base (recursivo: capta manual o CMV del base)
+    for fb in _sku_fallbacks(su):
+        c, iva = _margen_resolve_cost(fb, manual_map_u, versioned, today_iso, variant_map_u, seen)
+        if c is not None:
+            return c, iva
     return None, 21.0
 
 
