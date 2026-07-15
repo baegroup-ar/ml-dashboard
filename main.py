@@ -393,6 +393,10 @@ def init_db():
         # Costo manual del módulo Margen: para SKUs sin costo en CMV (o para pisar
         # el de CMV). Si está seteado gana; si es NULL, se usa el costo de CMV.
         conn.execute(text("ALTER TABLE product_sale_prices ADD COLUMN IF NOT EXISTS costo_manual NUMERIC(14,2)"))
+        # Tipo de publicación MELI (Clasica / Premium3 / Premium6 / Premium9 /
+        # Premium12). NULL => se autodetecta por el sufijo de cuotas del SKU
+        # (-3C→Premium3, etc.), default Clasica. Editable/persistente por SKU.
+        conn.execute(text("ALTER TABLE product_sale_prices ADD COLUMN IF NOT EXISTS tipo_publicacion TEXT"))
         # Parámetros globales del cálculo de margen MELI por cuenta (tramos de
         # comisión fija y envío promedio). Se guardan como JSON para flexibilidad.
         conn.execute(text("""
@@ -3621,7 +3625,54 @@ MARGEN_DEFAULT_PARAMS = {
     "envio_threshold": 33000.0,
     "envio_promedio": 7400.0,
     "comision_var_default": 0.16,
+    # Comisión por cuotas (fracción) según el tipo de publicación Premium. Es un
+    # costo extra que cobra ML por financiar en cuotas; se resta como la comisión
+    # variable (% sobre PVP MELI, neteado por IVA). Clasica siempre 0.
+    "com_premium3": 0.0,
+    "com_premium6": 0.0,
+    "com_premium9": 0.0,
+    "com_premium12": 0.0,
 }
+
+# Tipos de publicación válidos y el % de comisión cuotas que le corresponde a
+# cada uno (clave del param). Clasica => 0.
+_MARGEN_TIPOS = ["Clasica", "Premium3", "Premium6", "Premium9", "Premium12"]
+_MARGEN_TIPO_PARAM = {
+    "Premium3": "com_premium3", "Premium6": "com_premium6",
+    "Premium9": "com_premium9", "Premium12": "com_premium12",
+}
+# Sufijo de cuotas del SKU -> tipo de publicación (para el default autodetectado).
+_MARGEN_SUFFIX_TIPO = {"3C": "Premium3", "6C": "Premium6", "9C": "Premium9", "12C": "Premium12"}
+
+
+def _margen_tipo_default(sku: str) -> str:
+    """Tipo por defecto según el sufijo de cuotas del SKU. -3C→Premium3,
+    -6C→Premium6, -9C→Premium9, -12C→Premium12; cualquier otro → Clasica."""
+    for seg in (sku or "").strip().upper().split("-"):
+        t = _MARGEN_SUFFIX_TIPO.get(seg)
+        if t:
+            return t
+    return "Clasica"
+
+
+def _margen_tipo_resolve(sku: str, stored) -> str:
+    """Tipo efectivo: el guardado si es válido; si es NULL/vacío, el default
+    autodetectado por sufijo."""
+    s = (stored or "").strip()
+    if s in _MARGEN_TIPOS:
+        return s
+    return _margen_tipo_default(sku)
+
+
+def _margen_com_cuotas_frac(tipo: str, p: dict) -> float:
+    """Fracción de comisión por cuotas del tipo. Clasica → 0."""
+    key = _MARGEN_TIPO_PARAM.get(tipo)
+    if not key:
+        return 0.0
+    try:
+        return float(p.get(key) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def margen_get_config(account_id: int) -> dict:
@@ -3663,24 +3714,30 @@ def _margen_fija(pvp_con_iva: float, p: dict) -> float:
     return p["fija_t3_val"]
 
 
-def margen_compute(pvp_meli, iva_rate, comision_var, costo_sin_iva, p) -> Optional[dict]:
+def margen_compute(pvp_meli, iva_rate, comision_var, costo_sin_iva, p,
+                   com_cuotas_frac=0.0) -> Optional[dict]:
     """Desglose de margen para un SKU. `pvp_meli` con IVA; `costo_sin_iva` neto.
-    Todo se netea con el factor de IVA del SKU."""
+    `com_cuotas_frac` = comisión por cuotas (fracción) según el tipo Premium; se
+    resta como la comisión variable. Todo se netea con el factor de IVA del SKU."""
     if not pvp_meli or pvp_meli <= 0:
         return None
     factor = 1 + (float(iva_rate or 0) / 100.0)
     pvp_sin_iva = pvp_meli / factor
     cv = float(comision_var if comision_var is not None else p["comision_var_default"])
     comision_var_amt = pvp_meli * cv / factor
+    ccf = float(com_cuotas_frac or 0.0)
+    com_cuotas_amt = pvp_meli * ccf / factor
     fija_amt = _margen_fija(pvp_meli, p) / factor
     envio_amt = (p["envio_promedio"] / factor) if pvp_meli >= p["envio_threshold"] else 0.0
-    cobro = pvp_sin_iva - comision_var_amt - fija_amt - envio_amt
+    cobro = pvp_sin_iva - comision_var_amt - com_cuotas_amt - fija_amt - envio_amt
     costo = float(costo_sin_iva or 0)
     resultado = cobro - costo
     renta = (resultado / pvp_sin_iva) if pvp_sin_iva else None
     return {
         "pvp_sin_iva": pvp_sin_iva, "comision_var_frac": cv,
-        "comision_var_amt": comision_var_amt, "fija_amt": fija_amt,
+        "comision_var_amt": comision_var_amt,
+        "com_cuotas_frac": ccf, "com_cuotas_amt": com_cuotas_amt,
+        "fija_amt": fija_amt,
         "envio_amt": envio_amt, "cobro": cobro, "costo_sin_iva": costo,
         "resultado": resultado, "renta": renta,
     }
@@ -3818,7 +3875,7 @@ async def api_margen_data(request: Request, account_id: int):
     variant_map = _get_variant_map(cost_aid)   # componente -> [(original, qty)]
     today_iso = (datetime.utcnow() - timedelta(hours=3)).date().isoformat()
     rows = db_fetchall(
-        "SELECT sku, price, desc_meli, comision_var, costo_manual"
+        "SELECT sku, price, desc_meli, comision_var, costo_manual, tipo_publicacion"
         " FROM product_sale_prices WHERE account_id=:a ORDER BY sku", {"a": account_id})
     manual_map_u, variant_map_u = _margen_maps(rows, variant_map)
     items = []
@@ -3832,19 +3889,24 @@ async def api_margen_data(request: Request, account_id: int):
         lista = float(r["price"]) if r["price"] is not None else None
         desc = float(r["desc_meli"]) if r["desc_meli"] is not None else None
         pvp_meli = _margen_pvp_meli(lista, desc)
-        comp = margen_compute(pvp_meli, iva_rate, r["comision_var"], costo, p)
+        tipo = _margen_tipo_resolve(sku, r["tipo_publicacion"])
+        ccf = _margen_com_cuotas_frac(tipo, p)
+        comp = margen_compute(pvp_meli, iva_rate, r["comision_var"], costo, p, ccf)
         items.append({
             "sku": sku,
             "pvp_lista": lista,
             "desc_meli": desc,
             "pvp_meli": pvp_meli,
             "comision_var": float(r["comision_var"]) if r["comision_var"] is not None else None,
+            "tipo_publicacion": tipo,
+            "com_cuotas": ccf,
             "costo_sin_iva": costo,
             "costo_manual": float(r["costo_manual"]) if r["costo_manual"] is not None else None,
             "iva_rate": iva_rate,
             "renta": comp["renta"] if comp else None,
         })
-    return {"items": items, "config": p, "defaults": MARGEN_DEFAULT_PARAMS}
+    return {"items": items, "config": p, "defaults": MARGEN_DEFAULT_PARAMS,
+            "tipos": _MARGEN_TIPOS}
 
 
 def _margen_pvp_meli(lista, desc):
@@ -3909,6 +3971,28 @@ async def api_margen_cost_save(request: Request, account_id: int):
         " WHERE account_id=:a AND sku=:s",
         {"a": account_id, "s": sku, "c": costo})
     return {"ok": True, "costo_manual": costo}
+
+
+@app.post("/api/margen/{account_id:int}/tipo")
+async def api_margen_tipo_save(request: Request, account_id: int):
+    """Guarda el tipo de publicación de un SKU (Clasica/Premium3/6/9/12).
+    Vacío/None => vuelve al default autodetectado por sufijo."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    if not _account_for_user(account_id, user_id):
+        raise HTTPException(404)
+    body = await request.json()
+    sku = str(body.get("sku") or "").strip()
+    if not sku:
+        raise HTTPException(400, "SKU obligatorio.")
+    tipo = str(body.get("tipo") or "").strip()
+    tipo = tipo if tipo in _MARGEN_TIPOS else None
+    db_execute(
+        "UPDATE product_sale_prices SET tipo_publicacion=:t, updated_at=NOW()"
+        " WHERE account_id=:a AND sku=:s",
+        {"a": account_id, "s": sku, "t": tipo})
+    return {"ok": True, "tipo_publicacion": tipo or _margen_tipo_default(sku)}
 
 
 @app.post("/api/margen/{account_id:int}/import-costos")
@@ -4142,7 +4226,7 @@ async def api_margen_export_list(request: Request, account_id: int, view: str = 
     variant_map = _get_variant_map(cost_aid)
     today_iso = (datetime.utcnow() - timedelta(hours=3)).date().isoformat()
     rows = db_fetchall(
-        "SELECT sku, price, desc_meli, comision_var, costo_manual"
+        "SELECT sku, price, desc_meli, comision_var, costo_manual, tipo_publicacion"
         " FROM product_sale_prices WHERE account_id=:a ORDER BY sku", {"a": account_id})
     manual_map_u, variant_map_u = _margen_maps(rows, variant_map)
 
@@ -4157,8 +4241,9 @@ async def api_margen_export_list(request: Request, account_id: int, view: str = 
         header = ["SKU", "PVP LISTA", "DESC MELI %", "PVP MELI", "% MELI"]
     else:
         ws.title = "MELI"
-        header = ["SKU", "PVP MELI", "PVP s/IVA", "Com. var %", "Com. var $",
-                  "Com. fija $", "Envío $", "Cobro", "Costo s/IVA", "Renta %"]
+        header = ["SKU", "Tipo Pub.", "PVP MELI", "PVP s/IVA", "Com. var %", "Com. var $",
+                  "Com. cuotas %", "Com. cuotas $", "Com. fija $", "Envío $", "Cobro",
+                  "Costo s/IVA", "Renta %"]
     ws.append(header)
     fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
     for c in range(1, len(header) + 1):
@@ -4176,19 +4261,23 @@ async def api_margen_export_list(request: Request, account_id: int, view: str = 
         lista = float(r["price"]) if r["price"] is not None else None
         desc = float(r["desc_meli"]) if r["desc_meli"] is not None else None
         pvp_meli = _margen_pvp_meli(lista, desc)
-        comp = margen_compute(pvp_meli, iva_rate, r["comision_var"], costo, p)
+        tipo = _margen_tipo_resolve(sku, r["tipo_publicacion"])
+        ccf = _margen_com_cuotas_frac(tipo, p)
+        comp = margen_compute(pvp_meli, iva_rate, r["comision_var"], costo, p, ccf)
         renta_pct = round(comp["renta"] * 100, 2) if comp and comp["renta"] is not None else None
         if view == "resumen":
             ws.append([sku, r2(lista), (round(desc * 100, 2) if desc is not None else None),
                        r2(pvp_meli), renta_pct])
         else:
             if comp:
-                ws.append([sku, r2(pvp_meli), r2(comp["pvp_sin_iva"]),
+                ws.append([sku, tipo, r2(pvp_meli), r2(comp["pvp_sin_iva"]),
                            round(comp["comision_var_frac"] * 100, 2), r2(comp["comision_var_amt"]),
+                           round(comp["com_cuotas_frac"] * 100, 2), r2(comp["com_cuotas_amt"]),
                            r2(comp["fija_amt"]), r2(comp["envio_amt"]), r2(comp["cobro"]),
                            r2(comp["costo_sin_iva"]), renta_pct])
             else:
-                ws.append([sku, None, None, None, None, None, None, None, r2(costo), None])
+                ws.append([sku, tipo, None, None, None, None, None, None, None, None, None,
+                           r2(costo), None])
     for col in range(1, len(header) + 1):
         ws.column_dimensions[chr(64 + col)].width = 16
     ws.column_dimensions["A"].width = 22

@@ -40,6 +40,7 @@
     .num-input { width: 90px; text-align: right; padding: 5px 7px; border: 1px solid #ddd; border-radius: 6px; font-size: 13px; }
     .cell-edit { background: #FFFDF0; }
     .num-input.cost-manual { border-color: #005CFF; background: #EAF1FF; font-weight: 600; }
+    .tipo-sel { padding: 4px 6px; border: 1px solid #ddd; border-radius: 6px; font-size: 12px; font-family: 'Inter', sans-serif; background: #fff; cursor: pointer; }
     .tabs { display: flex; gap: 6px; margin-bottom: 14px; }
     .tab-btn { padding: 8px 18px; border: 1px solid #ddd; border-radius: 8px; background: #fff; font-size: 13px; cursor: pointer; color: #444; }
     .tab-btn.active { background: #005CFF; color: #fff; border-color: #005CFF; font-weight: 500; }
@@ -169,11 +170,15 @@
       </div>
 
       <div class="param-section">
-        <div class="param-title">Comisión variable</div>
+        <div class="param-title">Comisión variable <span class="param-sub">— por defecto y comisión por cuotas (Premium)</span></div>
         <div class="param-fields">
           <div class="fld"><label>Por defecto (%)</label><input type="number" id="p-comision_var_default" class="p-in" step="0.1"></div>
-          <div class="param-hint" style="align-self:center;max-width:360px;">Se aplica cuando el SKU no tiene una comisión propia cargada en la solapa MELI.</div>
+          <div class="fld"><label>Premium 3 cuotas (%)</label><input type="number" id="p-com_premium3" class="p-in" step="0.1"></div>
+          <div class="fld"><label>Premium 6 cuotas (%)</label><input type="number" id="p-com_premium6" class="p-in" step="0.1"></div>
+          <div class="fld"><label>Premium 9 cuotas (%)</label><input type="number" id="p-com_premium9" class="p-in" step="0.1"></div>
+          <div class="fld"><label>Premium 12 cuotas (%)</label><input type="number" id="p-com_premium12" class="p-in" step="0.1"></div>
         </div>
+        <div class="param-hint">La comisión <b>Por defecto</b> se usa cuando el SKU no tiene una comisión propia cargada en la solapa MELI. Las de <b>Premium</b> alimentan la columna <b>Com. cuotas</b> según el tipo de publicación de cada SKU (Clasica = 0%).</div>
       </div>
 
       <div class="row" style="margin-top:16px;">
@@ -243,10 +248,12 @@
         <thead><tr>
           <th style="width:30px;"><input type="checkbox" id="meli-all" onchange="toggleAll('meli', this)"></th>
           <th>SKU</th>
+          <th>Tipo Pub.</th>
           <th class="num">PVP MELI</th>
           <th class="num">PVP s/IVA</th>
           <th class="num">Com. var %</th>
           <th class="num">Com. var $</th>
+          <th class="num">Com. cuotas %</th>
           <th class="num">Com. fija $</th>
           <th class="num">Envío $</th>
           <th class="num">Cobro</th>
@@ -271,7 +278,12 @@ let TAB = 'resumen';
 const FIJA_OVERRIDE = new Map();    // sku -> com. fija $ s/IVA simulada (no persiste)
 const ENVIO_OVERRIDE = new Map();   // sku -> envío $ s/IVA simulado (no persiste)
 const SEL = { resumen: new Set(), meli: new Set() };   // SKUs seleccionados por tab
-const PARAM_KEYS = ['fija_t1_max','fija_t1_val','fija_t2_max','fija_t2_val','fija_t3_val','envio_threshold','envio_promedio','comision_var_default'];
+const PARAM_KEYS = ['fija_t1_max','fija_t1_val','fija_t2_max','fija_t2_val','fija_t3_val','envio_threshold','envio_promedio','comision_var_default','com_premium3','com_premium6','com_premium9','com_premium12'];
+// Params que se muestran/guardan como porcentaje (fracción en DB ↔ % en UI).
+const PCT_KEYS = new Set(['comision_var_default','com_premium3','com_premium6','com_premium9','com_premium12']);
+// Tipo de publicación -> param de comisión por cuotas.
+const TIPO_PARAM = { Premium3:'com_premium3', Premium6:'com_premium6', Premium9:'com_premium9', Premium12:'com_premium12' };
+let TIPOS = ['Clasica','Premium3','Premium6','Premium9','Premium12'];
 const ACCOUNT_ID = {{ account_id or 'null' }};
 
 function accId() { return ACCOUNT_ID; }
@@ -288,6 +300,7 @@ async function loadAll() {
     ITEMS = j.items || [];
     CONFIG = j.config || {};
     DEFAULTS = j.defaults || {};
+    TIPOS = j.tipos || TIPOS;
   } catch (e) { ITEMS = []; }
   FIJA_OVERRIDE.clear(); ENVIO_OVERRIDE.clear();
   SEL.resumen.clear(); SEL.meli.clear();
@@ -301,7 +314,7 @@ function fillParams() {
     const el = document.getElementById('p-' + k);
     if (!el) continue;
     let v = CONFIG[k];
-    if (k === 'comision_var_default') v = (v != null ? v * 100 : v);
+    if (PCT_KEYS.has(k)) v = (v != null ? v * 100 : v);
     el.value = (v != null ? v : '');
   }
   syncMirrors();
@@ -327,7 +340,7 @@ async function saveConfig() {
     const raw = document.getElementById('p-' + k).value;
     if (raw === '') continue;
     let v = parseFloat(raw);
-    if (k === 'comision_var_default') v = v / 100;
+    if (PCT_KEYS.has(k)) v = v / 100;
     body[k] = v;
   }
   const msg = document.getElementById('cfg-msg');
@@ -370,6 +383,11 @@ function fijaOf(pvp) {
 // Costo efectivo: manual propio si está cargado; si no, el que resolvió el
 // backend (CMV o cruce por base SKU, que ya propaga el manual del original).
 function costOf(it) { return it.costo_manual != null ? it.costo_manual : (it.costo_sin_iva != null ? it.costo_sin_iva : 0); }
+// Fracción de comisión por cuotas según el tipo de publicación (Clasica = 0).
+function comCuotasFrac(it) {
+  const key = TIPO_PARAM[it.tipo_publicacion];
+  return key ? (Number(CONFIG[key]) || 0) : 0;
+}
 function computeRow(it) {
   const pvp = it.pvp_meli;
   if (!pvp || pvp <= 0) return null;
@@ -377,14 +395,16 @@ function computeRow(it) {
   const pvpSin = pvp / f;
   const cv = (it.comision_var != null ? it.comision_var : CONFIG.comision_var_default);
   const comAmt = pvp * cv / f;
+  const ccf = comCuotasFrac(it);
+  const comCuotasAmt = pvp * ccf / f;
   const fijaAmt = FIJA_OVERRIDE.has(it.sku) ? FIJA_OVERRIDE.get(it.sku) : fijaOf(pvp) / f;
   const envioAmt = ENVIO_OVERRIDE.has(it.sku) ? ENVIO_OVERRIDE.get(it.sku)
                   : (pvp >= CONFIG.envio_threshold ? CONFIG.envio_promedio / f : 0);
-  const cobro = pvpSin - comAmt - fijaAmt - envioAmt;
+  const cobro = pvpSin - comAmt - comCuotasAmt - fijaAmt - envioAmt;
   const costo = costOf(it);
   const resultado = cobro - costo;
   const renta = pvpSin ? resultado / pvpSin : null;
-  return { pvpSin, cv, comAmt, fijaAmt, envioAmt, cobro, costo, resultado, renta };
+  return { pvpSin, cv, comAmt, ccf, comCuotasAmt, fijaAmt, envioAmt, cobro, costo, resultado, renta };
 }
 function recalcPvpMeli(it) {
   it.pvp_meli = it.pvp_lista == null ? null : Math.round(it.pvp_lista * (1 - (it.desc_meli || 0)) * 100) / 100;
@@ -395,6 +415,12 @@ function renderActive() { TAB === 'resumen' ? renderResumen() : renderMeli(); }
 function chkCell(tab, sku) {
   return `<td><input type="checkbox" class="row-check" ${SEL[tab].has(sku) ? 'checked' : ''}
     onchange="onCheck('${tab}','${esc(sku)}', this.checked)"></td>`;
+}
+
+function tipoCell(it) {
+  const cur = it.tipo_publicacion || 'Clasica';
+  const opts = TIPOS.map(t => `<option value="${t}" ${t === cur ? 'selected' : ''}>${t}</option>`).join('');
+  return `<td><select class="tipo-sel" onchange="editTipo('${esc(it.sku)}', this)">${opts}</select></td>`;
 }
 
 function renderResumen() {
@@ -420,15 +446,17 @@ function renderMeli() {
   const tb = document.getElementById('tbody-meli');
   tb.innerHTML = rows.length ? rows.map(it => {
     const c = computeRow(it);
-    if (!c) return `<tr>${chkCell('meli', it.sku)}<td><b>${esc(it.sku)}</b></td><td colspan="9" class="muted" style="text-align:center;">Cargá PVP Lista / precio en PVP</td></tr>`;
+    if (!c) return `<tr>${chkCell('meli', it.sku)}<td><b>${esc(it.sku)}</b></td>${tipoCell(it)}<td colspan="10" class="muted" style="text-align:center;">Cargá PVP Lista / precio en PVP</td></tr>`;
     return `<tr>
       ${chkCell('meli', it.sku)}
       <td><b>${esc(it.sku)}</b></td>
+      ${tipoCell(it)}
       <td class="num">${fmt(it.pvp_meli)}</td>
       <td class="num">${fmt(c.pvpSin)}</td>
       <td class="num"><input type="number" class="num-input cell-edit" style="width:64px" value="${(c.cv*100).toFixed(1)}" step="0.1" min="0"
           onchange="editComVar('${esc(it.sku)}', this)"></td>
       <td class="num">${fmt(c.comAmt)}</td>
+      <td class="num" title="${(c.ccf*100).toFixed(1)}% = ${fmt(c.comCuotasAmt)}">${pct(c.ccf)}</td>
       <td class="num"><input type="number" class="num-input cell-edit" style="width:80px" value="${Math.round(c.fijaAmt)}" step="0.01" min="0"
           onchange="editFija('${esc(it.sku)}', this)"></td>
       <td class="num"><input type="number" class="num-input cell-edit" style="width:80px" value="${Math.round(c.envioAmt)}" step="0.01" min="0"
@@ -439,7 +467,7 @@ function renderMeli() {
           onchange="editCosto('${esc(it.sku)}', this)"></td>
       <td class="num ${rentaClass(c.renta)}"><b>${pct(c.renta)}</b></td>
     </tr>`;
-  }).join('') : '<tr><td colspan="11" class="empty">Sin SKU en la base de precios.</td></tr>';
+  }).join('') : '<tr><td colspan="13" class="empty">Sin SKU en la base de precios.</td></tr>';
   syncHeaderCheck('meli'); updateSelCount('meli');
 }
 
@@ -468,6 +496,17 @@ function editComVar(sku, el) {
   it.comision_var = (v == null || isNaN(v)) ? null : v / 100;
   saveRow(it, el);
   renderActive();
+}
+async function editTipo(sku, el) {
+  const it = ITEMS.find(i => i.sku === sku); if (!it) return;
+  it.tipo_publicacion = el.value;
+  it.com_cuotas = comCuotasFrac(it);
+  renderActive();
+  try {
+    await fetch(`/api/margen/${accId()}/tipo`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sku, tipo: el.value }) });
+  } catch (e) {}
 }
 async function editCosto(sku, el) {
   const it = ITEMS.find(i => i.sku === sku); if (!it) return;
