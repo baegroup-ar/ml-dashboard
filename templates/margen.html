@@ -249,7 +249,7 @@
     </div>
     <div class="row" style="margin-bottom:8px;">
       <button class="green" onclick="importCostos()">↻ Importar costos (CMV)</button>
-      <span style="font-size:11px;color:#888;">El <b>costo se guarda</b> (azul = manual; vacío = vuelve a CMV) y la <b>Com. var % también</b> (azul = propia; vacío = hereda del SKU original o usa el default). Com. fija y envío se editan solo para simular. “Importar costos” vuelve a CMV los SKU que estén en la base de costos; los manuales (sin CMV) se mantienen.</span>
+      <span style="font-size:11px;color:#888;">El <b>costo se guarda</b> (azul = manual; vacío = vuelve a CMV). Com. fija y envío se editan solo para simular. “Importar costos” vuelve a CMV los SKU que estén en la base de costos; los manuales (sin CMV) se mantienen.</span>
     </div>
     <div style="overflow-x:auto;">
       <table>
@@ -463,10 +463,9 @@ function renderMeli() {
       ${tipoCell(it)}
       <td class="num">${fmt(it.pvp_meli)}</td>
       <td class="num">${fmt(c.pvpSin)}</td>
-      <td class="num"><input type="number" class="num-input cell-edit ${it.comision_var != null ? 'cost-manual' : ''}" style="width:64px" value="${(c.cv*100).toFixed(1)}" step="0.1" min="0"
-          title="${it.comision_var != null ? 'Com. var propia (editada). Vaciá para volver a heredar del original / usar el default.'
-                  : (it.comvar_inherit ? 'Heredada del SKU original (base SKU). Editá para fijar una propia.' : 'Com. var por defecto. Editá para fijar una propia.')}"
-          onchange="editComVar('${esc(it.sku)}', this)"></td>
+      <td class="num">${it.comvar_assoc
+          ? `<span title="Heredado del SKU original (base SKU). Editá la com var en el original.">${(c.cv*100).toFixed(1)}</span>`
+          : `<input type="number" class="num-input cell-edit" style="width:64px" value="${(c.cv*100).toFixed(1)}" step="0.1" min="0" onchange="editComVar('${esc(it.sku)}', this)">`}</td>
       <td class="num" title="Comisión por cuotas del tipo ${esc(it.tipo_publicacion||'Clasica')}">${pct(c.ccf)}</td>
       <td class="num" title="Com. var + Com. cuotas">${fmt(c.comCombinedAmt)}</td>
       <td class="num"><input type="number" class="num-input cell-edit" style="width:80px" value="${Math.round(c.fijaAmt)}" step="0.01" min="0"
@@ -502,19 +501,14 @@ function editDesc(sku, el) {
   saveRow(it, el);
   renderActive();
 }
-async function editComVar(sku, el) {
+function editComVar(sku, el) {
   const it = ITEMS.find(i => i.sku === sku); if (!it) return;
   const v = el.value === '' ? null : parseFloat(el.value);
   const frac = (v == null || isNaN(v)) ? null : v / 100;
-  it.comision_var = frac;   // valor propio (se persiste); null => vuelve a heredar
-  it.comvar_eff = frac;
-  try {
-    const r = await fetch(`/api/margen/${accId()}/row`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sku: it.sku, desc_meli: it.desc_meli, comision_var: it.comision_var }) });
-    // Recarga para propagar la com var del original a sus variantes/combos.
-    if (r.ok) await loadAll();
-  } catch (e) { renderActive(); }
+  it.comision_var = frac;   // valor propio (se persiste)
+  it.comvar_eff = frac;     // no asociado: efectivo = propio
+  saveRow(it, el);
+  renderActive();
 }
 async function editTipo(sku, el) {
   const it = ITEMS.find(i => i.sku === sku); if (!it) return;
