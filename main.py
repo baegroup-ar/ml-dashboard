@@ -431,6 +431,24 @@ def init_db():
             conn.execute(text(
                 "INSERT INTO app_meta (key, value) VALUES ('sku_variants_combo_pk','1')"
                 " ON CONFLICT (key) DO NOTHING"))
+        # Margen: la com var de las variantes vuelve a heredar del original.
+        # Mientras la asociación mandaba, el valor propio de las variantes quedó
+        # guardado pero sin efecto (quedaron valores viejos, ej. 24,4% = com var
+        # + cuotas cargadas a mano). Ahora el valor propio es un override que
+        # manda, así que se limpia UNA vez para que arranquen heredando; el
+        # usuario carga a mano solo las que quiera pisar.
+        _cv_reset = conn.execute(text(
+            "SELECT 1 FROM app_meta WHERE key='margen_comvar_variant_reset'")).fetchone()
+        if not _cv_reset:
+            conn.execute(text("""
+                UPDATE product_sale_prices p SET comision_var = NULL
+                WHERE p.comision_var IS NOT NULL
+                  AND EXISTS (SELECT 1 FROM sku_variants v
+                              WHERE UPPER(TRIM(v.variant_sku)) = UPPER(TRIM(p.sku)))
+            """))
+            conn.execute(text(
+                "INSERT INTO app_meta (key, value) VALUES ('margen_comvar_variant_reset','1')"
+                " ON CONFLICT (key) DO NOTHING"))
         # Base de clientes (módulo facturación/ERP). Compartida por DUEÑO
         # (owner_user_id): un cliente es el mismo para todas las cuentas ML del
         # dueño. Único por CUIT dentro del dueño. condicion_iva_id = código ARCA
@@ -3842,26 +3860,28 @@ def _margen_maps(rows, variant_map):
 
 
 def _margen_resolve_comvar(sku, comvar_map_u, variant_map_u, seen=None):
-    """com var % (fracción) del SKU, o None (→ usar comision_var_default). La
-    asociación en base SKU MANDA: si el SKU está asociado a un original, toma la
-    com var del original (recursivo, primer original que resuelva); NO usa el
-    valor propio de la variante. Si NO está asociado, usa su valor propio."""
+    """com var % (fracción) del SKU, o None (→ usar comision_var_default).
+
+    Mismo criterio que el costo: por defecto la variante HEREDA la com var del
+    original de la base SKU (recursivo, primer original que resuelva), pero el
+    valor PROPIO del SKU es un override editable que manda si está cargado.
+    Vaciar el valor propio vuelve a la herencia (o al default si no hay original).
+    Los valores propios viejos de las variantes se limpiaron una vez en el init
+    (app_meta 'margen_comvar_variant_reset') para que arranquen heredando."""
     if seen is None:
         seen = set()
     su = (sku or "").strip().upper()
     if not su or su in seen:
         return None
     seen.add(su)
-    originals = variant_map_u.get(su)
-    if originals:
-        # Asociado: manda el original. Si ninguno tiene valor propio, None
-        # (→ default), sin caer nunca al valor propio de la variante.
-        for (orig, _qty) in originals:
-            c = _margen_resolve_comvar(orig, comvar_map_u, variant_map_u, seen)
-            if c is not None:
-                return c
-        return None
-    return comvar_map_u.get(su)
+    own = comvar_map_u.get(su)
+    if own is not None:
+        return own
+    for (orig, _qty) in (variant_map_u.get(su) or []):
+        c = _margen_resolve_comvar(orig, comvar_map_u, variant_map_u, seen)
+        if c is not None:
+            return c
+    return None
 
 
 @app.get("/margen", response_class=HTMLResponse)
@@ -3907,7 +3927,6 @@ async def api_margen_data(request: Request, account_id: int):
     items = []
     for r in rows:
         sku = r["sku"]
-        su = (sku or "").strip().upper()
         # Costo efectivo: manual propio → CMV → cruce base SKU (propaga el manual
         # del original a variantes/combos).
         costo, iva_rate = _margen_resolve_cost(sku, manual_map_u, versioned, today_iso, variant_map_u)
@@ -3918,12 +3937,12 @@ async def api_margen_data(request: Request, account_id: int):
         pvp_meli = _margen_pvp_meli(lista, desc)
         tipo = _margen_tipo_resolve(sku, r["tipo_publicacion"])
         ccf = _margen_com_cuotas_frac(tipo, p)
-        # Com var: la asociación en base SKU manda (toma la del original). Los SKU
-        # asociados muestran la com var heredada (read-only en la UI). `comision_var`
-        # = valor PROPIO (lo que se persiste); `comvar_eff` = efectivo para calcular
-        # y mostrar (heredado del original si está asociado).
-        assoc = su in variant_map_u
+        # Com var: por defecto hereda del original (base SKU); el valor propio es
+        # un override editable que manda. `comision_var` = valor PROPIO (lo que se
+        # persiste); `comvar_eff` = efectivo para calcular y mostrar;
+        # `comvar_inherit` = el efectivo se heredó del original.
         comvar = _margen_resolve_comvar(sku, comvar_map_u, variant_map_u)
+        inherit = r["comision_var"] is None and comvar is not None
         comp = margen_compute(pvp_meli, iva_rate, comvar, costo, p, ccf)
         items.append({
             "sku": sku,
@@ -3932,7 +3951,7 @@ async def api_margen_data(request: Request, account_id: int):
             "pvp_meli": pvp_meli,
             "comision_var": float(r["comision_var"]) if r["comision_var"] is not None else None,
             "comvar_eff": comvar,
-            "comvar_assoc": assoc,
+            "comvar_inherit": inherit,
             "tipo_publicacion": tipo,
             "com_cuotas": ccf,
             "costo_sin_iva": costo,
