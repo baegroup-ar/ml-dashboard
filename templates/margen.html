@@ -120,6 +120,18 @@
   <div class="card">
     <div class="row">
       <input type="text" id="search" placeholder="Buscar SKU..." oninput="renderActive()" style="width:320px;" />
+      <label style="font-size:13px;color:#666;margin-left:6px;">Renta %:</label>
+      <select id="renta-op" onchange="onRentaFilterChange()" style="width:62px;min-width:0;padding:6px 4px;">
+        <option value="">—</option>
+        <option value="lte">≤</option>
+        <option value="gte">≥</option>
+        <option value="between">entre</option>
+      </select>
+      <input type="number" id="renta-val1" step="0.5" placeholder="0" oninput="renderActive()" style="width:70px;" />
+      <span id="renta-between-sep" style="display:none;font-size:13px;color:#666;">y</span>
+      <input type="number" id="renta-val2" step="0.5" placeholder="0" oninput="renderActive()" style="display:none;width:70px;" />
+      <span style="font-size:13px;color:#666;">%</span>
+      <button class="btn-nav" onclick="clearRentaFilter()" title="Limpiar el filtro de renta" style="padding:5px 10px;font-size:12px;">Limpiar</button>
       <span id="count-label" style="font-size:12px;color:#888;"></span>
     </div>
   </div>
@@ -376,9 +388,41 @@ function setTab(t) {
   renderActive();
 }
 
+// Filtro de Renta % (= "% MELI" del Resumen y "Renta %" de MELI: el mismo
+// número). Los SKU sin PVP (renta null) quedan fuera cuando el filtro está
+// activo, igual que el filtro de aging/cobertura de Stock valorizado.
+function onRentaFilterChange() {
+  const between = document.getElementById('renta-op').value === 'between';
+  document.getElementById('renta-between-sep').style.display = between ? '' : 'none';
+  document.getElementById('renta-val2').style.display = between ? '' : 'none';
+  renderActive();
+}
+function clearRentaFilter() {
+  document.getElementById('renta-op').value = '';
+  document.getElementById('renta-val1').value = '';
+  document.getElementById('renta-val2').value = '';
+  onRentaFilterChange();
+}
+function rentaPasses(it, op, v1, v2) {
+  const c = computeRow(it);
+  if (!c || c.renta == null) return false;
+  const r = c.renta * 100;
+  if (op === 'lte') return r <= v1;
+  if (op === 'gte') return r >= v1;
+  if (op === 'between') {
+    if (isNaN(v2)) return r >= v1;
+    return r >= Math.min(v1, v2) && r <= Math.max(v1, v2);
+  }
+  return true;
+}
 function filtered() {
   const q = (document.getElementById('search').value || '').trim().toLowerCase();
-  return q ? ITEMS.filter(r => (r.sku || '').toLowerCase().includes(q)) : ITEMS;
+  let rows = q ? ITEMS.filter(r => (r.sku || '').toLowerCase().includes(q)) : ITEMS;
+  const op = document.getElementById('renta-op').value;
+  const v1 = parseFloat(document.getElementById('renta-val1').value);
+  const v2 = parseFloat(document.getElementById('renta-val2').value);
+  if (op && !isNaN(v1)) rows = rows.filter(it => rentaPasses(it, op, v1, v2));
+  return rows;
 }
 
 // ── Motor de cálculo (réplica de margen_compute en backend) ──
@@ -420,7 +464,15 @@ function recalcPvpMeli(it) {
   it.pvp_meli = it.pvp_lista == null ? null : Math.round(it.pvp_lista * (1 - (it.desc_meli || 0)) * 100) / 100;
 }
 
-function renderActive() { TAB === 'resumen' ? renderResumen() : renderMeli(); }
+function emptyMsg() {
+  return ITEMS.length ? 'Ningún SKU cumple el filtro.' : 'Sin SKU en la base de precios.';
+}
+function renderActive() {
+  const n = filtered().length;
+  const el = document.getElementById('count-label');
+  if (el) el.textContent = n === ITEMS.length ? `${ITEMS.length} SKU` : `${n} de ${ITEMS.length} SKU`;
+  TAB === 'resumen' ? renderResumen() : renderMeli();
+}
 
 function chkCell(tab, sku) {
   return `<td><input type="checkbox" class="row-check" ${SEL[tab].has(sku) ? 'checked' : ''}
@@ -447,7 +499,7 @@ function renderResumen() {
       <td class="num">${fmt(it.pvp_meli)}</td>
       <td class="num ${rentaClass(c ? c.renta : null)}"><b>${pct(c ? c.renta : null)}</b></td>
     </tr>`;
-  }).join('') : '<tr><td colspan="6" class="empty">Sin SKU en la base de precios.</td></tr>';
+  }).join('') : `<tr><td colspan="6" class="empty">${emptyMsg()}</td></tr>`;
   syncHeaderCheck('resumen'); updateSelCount('resumen');
 }
 
@@ -479,7 +531,7 @@ function renderMeli() {
           onchange="editCosto('${esc(it.sku)}', this)"></td>
       <td class="num ${rentaClass(c.renta)}"><b>${pct(c.renta)}</b></td>
     </tr>`;
-  }).join('') : '<tr><td colspan="13" class="empty">Sin SKU en la base de precios.</td></tr>';
+  }).join('') : `<tr><td colspan="13" class="empty">${emptyMsg()}</td></tr>`;
   syncHeaderCheck('meli'); updateSelCount('meli');
 }
 
