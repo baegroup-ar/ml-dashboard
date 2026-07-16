@@ -3629,6 +3629,9 @@ async def api_stock_prices_export(request: Request, account_id: int):
 # PVP MELI (con descuento), descuenta comisión variable, comisión fija (por
 # tramos de precio), envío promedio y costo; todo neto de IVA usando el factor
 # de la condición de IVA del SKU (que viene de Costos CMV) → Renta Bruta.
+# Margen no tiene selector de cuenta (es un análisis general): trabaja siempre
+# sobre esta cuenta, y toda su base vive ahí. Ver _margen_account_id().
+MARGEN_ACCOUNT_NICKNAME = "TIENDA BAE"
 MARGEN_DEFAULT_PARAMS = {
     # Tramos de comisión fija según PVP MELI (con IVA). El límite superior del
     # último tramo es `envio_threshold` (el punto donde la fija pasa a 0 y
@@ -3884,6 +3887,22 @@ def _margen_resolve_comvar(sku, comvar_map_u, variant_map_u, seen=None):
     return None
 
 
+def _margen_account_id(accounts: list):
+    """Cuenta sobre la que trabaja Margen: TIENDA BAE si existe; si no, la
+    primera visible. Margen es un análisis general y NO tiene selector, así que
+    TODA su base (product_sale_prices.desc_meli / comision_var / costo_manual)
+    vive bajo esta cuenta. product_sale_prices es por cuenta (a diferencia de los
+    costos CMV, que se comparten con _cost_account_id_for), así que cualquier
+    página que quiera leer la base de Margen tiene que resolver la cuenta con
+    este helper y NO con la que el usuario tenga elegida en su propio selector."""
+    if not accounts:
+        return None
+    for a in accounts:
+        if (a.get("nickname") or "").strip().upper() == MARGEN_ACCOUNT_NICKNAME:
+            return a["id"]
+    return accounts[0]["id"]
+
+
 @app.get("/margen", response_class=HTMLResponse)
 async def margen_page(request: Request):
     """Módulo Margen (canal MELI): sub-solapas Resumen y MELI."""
@@ -3896,11 +3915,7 @@ async def margen_page(request: Request):
         return _r
     accounts = get_visible_accounts(user_id, user)
     accounts = await refresh_visible_account_nicknames(accounts)
-    # Análisis general: no hay selector de cuenta. Se resuelve server-side
-    # (TIENDA BAE si existe; si no, la primera cuenta visible).
-    only_bae = [a for a in accounts if (a.get("nickname") or "").strip().upper() == "TIENDA BAE"]
-    chosen = (only_bae or accounts)
-    account_id = chosen[0]["id"] if chosen else None
+    account_id = _margen_account_id(accounts)
     return templates.TemplateResponse("margen.html", {
         "request": request, "user": user, "account_id": account_id,
         "perms": user_permissions(user),
@@ -6722,20 +6737,30 @@ async def api_descuentos_bulk_edit(request: Request, account_id: int):
 async def api_descuentos_import_margen(request: Request, account_id: int):
     """Actualiza el % de la base trayendo el descuento desde Margen (Resumen).
     Cruce por SKU exacto: para cada MLA cuya SKU tenga `desc_meli` cargado en
-    product_sale_prices (misma cuenta), setea discount_pct = desc_meli*100.
-    Los MLA cuya SKU NO esté en Margen (o sin desc_meli, o sin SKU) quedan
-    intactos — conservan el último descuento cargado. No crea MLAs nuevos."""
+    Margen, setea discount_pct = desc_meli*100. Los MLA cuya SKU NO esté en
+    Margen (o sin desc_meli, o sin SKU) quedan intactos — conservan el último
+    descuento cargado. No crea MLAs nuevos.
+
+    La base de Margen se lee SIEMPRE de la cuenta de Margen (_margen_account_id),
+    no de la cuenta elegida acá: Margen es un análisis general sin selector, así
+    que su desc_meli vive todo bajo TIENDA BAE. Leerlo de `account_id` hacía que
+    el import funcionara solo parado en TIENDA BAE y no matcheara nada en el
+    resto de las cuentas (product_sale_prices es por cuenta)."""
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
+    user = get_user(user_id)
     acc = _account_for_user(account_id, user_id)
     if not acc:
         raise HTTPException(404)
+    margen_aid = _margen_account_id(get_visible_accounts(user_id, user))
+    if not margen_aid:
+        raise HTTPException(400, "No hay una cuenta de Margen para importar.")
     # 1) Mapa SKU(upper) -> desc_pct desde Margen (solo desc_meli cargado)
     price_rows = db_fetchall(
         "SELECT sku, desc_meli FROM product_sale_prices"
         " WHERE account_id=:aid AND desc_meli IS NOT NULL",
-        {"aid": account_id},
+        {"aid": margen_aid},
     )
     desc_by_sku = {}
     for r in price_rows:
