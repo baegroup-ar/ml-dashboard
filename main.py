@@ -307,6 +307,20 @@ def init_db():
         if pk_cols and pk_cols[0] != "account_id,sku,valid_from":
             conn.execute(text("ALTER TABLE product_costs DROP CONSTRAINT product_costs_pkey"))
             conn.execute(text("ALTER TABLE product_costs ADD PRIMARY KEY (account_id, sku, valid_from)"))
+        # Renglones de Compras pendientes de "Ingreso" (recepción de mercadería).
+        # Al confirmarse un renglón se vuelca a product_costs (vía db_save_product_costs)
+        # y se borra de acá; esta tabla es solo la bandeja de pendientes.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS purchase_items (
+                id SERIAL PRIMARY KEY,
+                account_id INTEGER NOT NULL REFERENCES ml_accounts(id) ON DELETE CASCADE,
+                sku TEXT NOT NULL,
+                qty NUMERIC(12,2) NOT NULL,
+                cost NUMERIC(12,2) NOT NULL,
+                iva_rate NUMERIC(5,2) NOT NULL DEFAULT 21,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """))
         # Tabla de tarifas Flex (costo real que el vendedor paga a la
         # mensajería, por zona de entrega y con fecha de vigencia).
         conn.execute(text("""
@@ -1259,6 +1273,7 @@ PAGE_ROUTES = {
     "ranking": "/ranking",
     "etiquetas": "/etiquetas",
     "stock": "/stock",
+    "compras": "/compras",
     "base_sku": "/base-sku",
     "pvp": "/pvp",
     "clientes": "/clientes",
@@ -2114,6 +2129,153 @@ async def api_costos_upload(request: Request, account_id: int):
     saved = db_save_product_costs(cost_aid, items)
     _invalidate_all_user_accounts_cache(user, account_id)
     return {"ok": True, "saved": saved, "rows_parsed": len(items)}
+
+
+# ════════════════════════ COMPRAS ════════════════════════
+# Bandeja de recepción de mercadería: se cargan renglones (SKU, cantidad, costo
+# s/IVA, tasa de IVA) que quedan pendientes en `purchase_items`; al tocar
+# "Ingreso" (por fila o en bloque) cada renglón se vuelca a Costos CMV
+# (product_costs, misma lógica que /api/costos) con fecha de hoy, y desaparece
+# de acá. La cantidad es solo para el "Valorizado" en pantalla, no se persiste
+# en product_costs (que no tiene noción de cantidad).
+
+@app.get("/compras", response_class=HTMLResponse)
+async def compras_page(request: Request):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse("/")
+    user = get_user(user_id)
+    _r = _page_redirect(user, "compras")
+    if _r:
+        return _r
+    accounts = get_visible_accounts(user_id, user)
+    accounts = await refresh_visible_account_nicknames(accounts)
+    return templates.TemplateResponse("compras.html", {
+        "request": request, "user": user, "accounts": accounts,
+        "perms": user_permissions(user),
+    })
+
+
+@app.get("/api/compras/{account_id}")
+async def api_compras_list(request: Request, account_id: int):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    user = get_user(user_id)
+    cost_aid = _cost_account_id_for(user, account_id)
+    rows = db_fetchall(
+        "SELECT id, sku, qty, cost, iva_rate, created_at FROM purchase_items"
+        " WHERE account_id=:aid ORDER BY created_at",
+        {"aid": cost_aid},
+    )
+    return {
+        "items": [
+            {
+                "id": r["id"],
+                "sku": r["sku"],
+                "qty": float(r["qty"]),
+                "cost": float(r["cost"]),
+                "iva_rate": float(r["iva_rate"] if r["iva_rate"] is not None else 21),
+                "created_at": r["created_at"].isoformat() if r.get("created_at") else None,
+            }
+            for r in rows
+        ],
+    }
+
+
+@app.post("/api/compras/{account_id}")
+async def api_compras_add(
+    request: Request, account_id: int,
+    sku: str = Form(...),
+    qty: float = Form(...),
+    cost: float = Form(...),
+    iva_rate: Optional[str] = Form(None),
+):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    sku = (sku or "").strip()
+    if not sku or qty <= 0 or cost <= 0:
+        raise HTTPException(400, "SKU, cantidad y costo son obligatorios")
+    user = get_user(user_id)
+    cost_aid = _cost_account_id_for(user, account_id)
+    try:
+        rate_val = float(iva_rate) if iva_rate is not None and iva_rate != "" else 21.0
+    except ValueError:
+        rate_val = 21.0
+    db_execute(
+        "INSERT INTO purchase_items (account_id, sku, qty, cost, iva_rate)"
+        " VALUES (:aid, :sku, :qty, :cost, :iva_rate)",
+        {"aid": cost_aid, "sku": sku, "qty": qty, "cost": cost, "iva_rate": rate_val},
+    )
+    return {"ok": True}
+
+
+@app.delete("/api/compras/{account_id}/{item_id}")
+async def api_compras_delete(request: Request, account_id: int, item_id: int):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    user = get_user(user_id)
+    cost_aid = _cost_account_id_for(user, account_id)
+    db_execute(
+        "DELETE FROM purchase_items WHERE id=:id AND account_id=:aid",
+        {"id": item_id, "aid": cost_aid},
+    )
+    return {"ok": True}
+
+
+@app.post("/api/compras/{account_id}/ingreso")
+async def api_compras_ingreso(request: Request, account_id: int):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    user = get_user(user_id)
+    cost_aid = _cost_account_id_for(user, account_id)
+    body = await request.json()
+    ids = [int(i) for i in (body.get("ids") or [])]
+    if not ids:
+        raise HTTPException(400, "Falta seleccionar renglones")
+    # SQLAlchemy/pg8000 no manejan bien ANY(:lista) — armamos el placeholder IN expandido
+    # (mismo patrón que /api/descuentos/{account_id}/bulk-delete).
+    placeholders = ", ".join([f":i{i}" for i in range(len(ids))])
+    params = {"aid": cost_aid}
+    for i, v in enumerate(ids):
+        params[f"i{i}"] = v
+    rows = db_fetchall(
+        f"SELECT id, sku, cost, iva_rate FROM purchase_items"
+        f" WHERE account_id=:aid AND id IN ({placeholders})",
+        params,
+    )
+    if not rows:
+        return {"ok": True, "ingresados": 0}
+    today_iso = datetime.utcnow().date().isoformat()
+    saved = db_save_product_costs(cost_aid, [
+        {"sku": r["sku"], "cost": float(r["cost"]), "iva_rate": float(r["iva_rate"] or 21), "valid_from": today_iso}
+        for r in rows
+    ])
+    del_placeholders = ", ".join([f":d{i}" for i in range(len(rows))])
+    del_params = {"aid": cost_aid}
+    for i, r in enumerate(rows):
+        del_params[f"d{i}"] = r["id"]
+    db_execute(
+        f"DELETE FROM purchase_items WHERE account_id=:aid AND id IN ({del_placeholders})",
+        del_params,
+    )
+    _invalidate_all_user_accounts_cache(user, account_id)
+    return {"ok": True, "ingresados": saved}
 
 
 # ════════════════════════ STOCK VALORIZADO ════════════════════════
@@ -10444,6 +10606,7 @@ PAGES = [
     ("ranking",     "Ranking por SKU"),
     ("etiquetas",   "Etiquetas"),
     ("stock",       "Stock valorizado"),
+    ("compras",     "Compras"),
     ("margen",      "Margen"),
     ("base_sku",    "SKUs"),
     ("pvp",         "PVP"),

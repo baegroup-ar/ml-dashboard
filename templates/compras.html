@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Compras · Panel BAE</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Cantarell:ital,wght@0,400;0,700;1,400&amp;display=swap" rel="stylesheet"><link rel="icon" type="image/png" href="/static/bae-favicon.png">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Cantarell', 'Inter', system-ui, sans-serif; background: #fff; color: #111; }
+    nav { background: #fff; border-bottom: 1px solid #e5e5e3; padding: 0 1.5rem; height: 56px; display: flex; align-items: center; justify-content: space-between; }
+    .nav-brand { font-weight: 600; font-size: 15px; display: flex; align-items: center; gap: 8px; }
+    .nav-brand span { background: #EAF1FF; color: #005CFF; border-radius: 6px; padding: 2px 8px; font-size: 12px; }
+    .nav-right { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+    .btn-nav { padding: 6px 14px; border: 1px solid #ddd; border-radius: 8px; background: #fff; font-size: 13px; cursor: pointer; text-decoration: none; color: #111; }
+    .nav-dropdown { position: relative; display: inline-block; }
+    .nav-dropdown .dropdown-trigger.active { color: #005CFF; font-weight: 500; border-color: #005CFF; }
+    .nav-dropdown .dropdown-menu { display: none; position: absolute; top: calc(100% + 4px); left: 0; background: #fff; border: 1px solid #ddd; border-radius: 8px; min-width: 170px; z-index: 100; box-shadow: 0 6px 16px rgba(0,0,0,0.10); padding: 6px; flex-direction: column; }
+    .nav-dropdown:hover .dropdown-menu { display: flex; }
+    .dropdown-menu a.dropdown-item, .dropdown-menu span.dropdown-item { display: block; padding: 8px 10px; font-size: 13px; color: #111; text-decoration: none; border-radius: 6px; white-space: nowrap; cursor: pointer; }
+    .dropdown-menu a.dropdown-item:hover { background: #f5f5f3; }
+    .dropdown-menu span.dropdown-item.active { color: #005CFF; font-weight: 500; background: #EAF1FF; cursor: default; }
+    .btn-blue { background: #005CFF; color: #fff !important; border-color: #005CFF; }
+    .btn-blue:hover { background: #2970e0 !important; }
+    main { max-width: 1100px; margin: 0 auto; padding: 1.5rem; }
+    h1 { font-size: 20px; font-weight: 600; margin-bottom: 6px; }
+    p.lead { font-size: 13px; color: #888; margin-bottom: 1.25rem; }
+    .card { background: #fff; border: 1px solid #e5e5e3; border-radius: 12px; padding: 1.25rem; margin-bottom: 1.25rem; }
+    .card h3 { font-size: 14px; font-weight: 600; color: #444; margin-bottom: 12px; }
+    .account-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .account-bar label { font-size: 13px; color: #666; }
+    .account-bar select { flex: 1; min-width: 220px; padding: 7px 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 14px; font-family: 'Inter', sans-serif; }
+    .add-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .add-row input, .add-row select { padding: 7px 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 13px; font-family: 'Inter', sans-serif; }
+    .add-row input.sku { width: 180px; text-transform: uppercase; }
+    .add-row input.qty { width: 90px; }
+    .add-row input.cost { width: 110px; }
+    .add-row select.iva { width: 110px; }
+    .add-row button { padding: 8px 16px; border: none; border-radius: 8px; background: #005CFF; color: #fff; font-size: 13px; cursor: pointer; }
+    .add-row button:hover { background: #2970e0; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 12px; }
+    th { padding: 10px 14px; text-align: left; color: #888; font-weight: 500; border-bottom: 1px solid #eee; font-size: 12px; }
+    td { padding: 10px 14px; border-bottom: 1px solid #f0f0ee; color: #333; }
+    tr:last-child td { border-bottom: none; }
+    .actions { text-align: right; white-space: nowrap; }
+    .btn-delete { color: #c0392b; background: none; border: none; cursor: pointer; font-size: 12px; padding: 4px 8px; border-radius: 6px; }
+    .btn-delete:hover { background: #fce9e9; }
+    .btn-ingreso { color: #fff; background: #1a8a5a; border: none; cursor: pointer; font-size: 12px; padding: 5px 12px; border-radius: 6px; font-weight: 500; }
+    .btn-ingreso:hover { background: #157047; }
+    .empty { padding: 2rem; text-align: center; color: #aaa; font-size: 13px; }
+    .msg { padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-top: 10px; }
+    .msg.ok { background: #e6f5ee; color: #1a8a5a; border: 1px solid #c5e9d8; }
+    .msg.err { background: #fce9e9; color: #c0392b; border: 1px solid #f5c6c6; }
+    .count { font-size: 12px; color: #888; }
+    .no-accounts { text-align: center; padding: 4rem; color: #888; font-size: 14px; }
+    .bulk-bar { display: none; align-items: center; gap: 12px; background: #EAF1FF; border: 1px solid #cfe0ff; border-radius: 8px; padding: 8px 14px; margin-bottom: 10px; font-size: 13px; }
+    .bulk-bar.show { display: flex; }
+    .bulk-bar button { padding: 6px 14px; border: none; border-radius: 8px; background: #1a8a5a; color: #fff; font-size: 13px; cursor: pointer; }
+    .bulk-bar button:hover { background: #157047; }
+  </style>
+</head>
+<body>
+<nav>
+  <div class="nav-brand">
+    <img src="/static/bae-icon.png" alt="Tienda Bae" style="height:32px;width:auto;display:block;" />
+    Tienda Bae App
+  </div>
+  <div class="nav-right">
+    {% if 'dashboard' in perms or 'reputacion' in perms or 'descuentos' in perms or 'ranking' in perms or 'etiquetas' in perms or 'publicaciones' in perms or 'fotos' in perms %}
+    <div class="nav-dropdown">
+      <span class="btn-nav dropdown-trigger">Mercadolibre ▾</span>
+      <div class="dropdown-menu">
+        {% if 'dashboard' in perms %}<a href="/dashboard" class="dropdown-item">Dashboard</a>{% endif %}
+        {% if 'reputacion' in perms %}<a href="/reputacion" class="dropdown-item">Reputación</a>{% endif %}
+        {% if 'descuentos' in perms %}<a href="/descuentos" class="dropdown-item">Descuentos</a>{% endif %}
+        {% if 'ranking' in perms %}<a href="/ranking" class="dropdown-item">Ranking</a>{% endif %}
+        {% if 'etiquetas' in perms %}<a href="/etiquetas" class="dropdown-item">Etiquetas</a>{% endif %}
+        {% if 'publicaciones' in perms %}<a href="/publicaciones" class="dropdown-item">Publicaciones</a>{% endif %}
+        {% if 'fotos' in perms %}<a href="/fotos" class="dropdown-item">Fotos</a>{% endif %}
+      </div>
+    </div>
+    {% endif %}
+    {% if 'costos' in perms or 'pvp' in perms or 'clientes' in perms or 'base_sku' in perms or 'envios_flex' in perms %}
+    <div class="nav-dropdown">
+      <span class="btn-nav dropdown-trigger">Base de Datos ▾</span>
+      <div class="dropdown-menu">
+        {% if 'costos' in perms %}<a href="/costos" class="dropdown-item">Costos (CMV)</a>{% endif %}
+        {% if 'pvp' in perms %}<a href="/pvp" class="dropdown-item">PVP</a>{% endif %}
+        {% if 'clientes' in perms %}<a href="/clientes" class="dropdown-item">Clientes</a>{% endif %}
+        {% if 'base_sku' in perms %}<a href="/base-sku" class="dropdown-item">SKUs</a>{% endif %}
+        {% if 'envios_flex' in perms %}<a href="/costos/envios-flex" class="dropdown-item">Envíos Flex</a>{% endif %}
+      </div>
+    </div>
+    {% endif %}
+    {% if 'stock' in perms %}<a href="/stock" class="btn-nav">Stock valorizado</a>{% endif %}
+    <span style="color:#005CFF;font-weight:500;">Compras</span>
+    {% if 'margen' in perms %}<a href="/margen" class="btn-nav">Margen</a>{% endif %}
+    <span style="color:#888;">{{ user.name }}</span>
+    {% if user.is_admin %}<a href="/admin" style="font-size:12px;color:#005CFF;text-decoration:none;">Admin</a>{% endif %}
+    <a href="/logout" class="btn-nav">Salir</a>
+
+  </div>
+</nav>
+
+<main>
+  <h1>Compras</h1>
+  <p class="lead">
+    Cargá acá los renglones de una recepción de mercadería (SKU, cantidad, costo <b>sin IVA</b> y tasa de IVA).
+    Cuando confirmás el <b>Ingreso</b> de un renglón (individual o en bloque), el costo se manda a
+    <a href="/costos" style="color:#005CFF;">Costos (CMV)</a> con la fecha de hoy y el renglón desaparece de esta lista.
+  </p>
+
+  {% if accounts %}
+  <div class="card">
+    <div class="account-bar">
+      <label>Cuenta ML:</label>
+      <select id="account-select" onchange="onAccountChange()">
+        {% set default_nick = 'TIENDA BAE' %}
+        {% set has_default = accounts | selectattr('nickname', 'equalto', default_nick) | list | length > 0 %}
+        {% for acc in accounts %}
+        <option value="{{ acc.id }}" {% if acc.nickname == default_nick or (not has_default and loop.first) %}selected{% endif %}>{{ acc.nickname }}</option>
+        {% endfor %}
+      </select>
+      <span class="count" id="count-label"></span>
+    </div>
+    <div style="font-size:12px;color:#888;margin-top:8px;">
+      Los costos de CMV se comparten entre las cuentas de la misma empresa; la cuenta de arriba solo define de dónde te trae el listado.
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Agregar renglón</h3>
+    <div class="add-row">
+      <input type="text" id="new-sku" class="sku" placeholder="SKU (ej. SOP68-443)" />
+      <input type="number" id="new-qty" class="qty" placeholder="Cantidad" step="1" min="0" />
+      <input type="number" id="new-cost" class="cost" placeholder="Costo sin IVA" step="0.01" min="0" />
+      <select id="new-iva" class="iva" title="Condición de IVA">
+        <option value="21" selected>21%</option>
+        <option value="10.5">10.5%</option>
+        <option value="0">Exento (0%)</option>
+      </select>
+      <button onclick="addItem()">Agregar</button>
+    </div>
+    <div id="add-msg"></div>
+  </div>
+
+  <div class="card">
+    <h3>Renglones pendientes</h3>
+    <div class="bulk-bar" id="bulk-bar">
+      <span id="bulk-count">0 seleccionados</span>
+      <button onclick="ingresoBulk()">Ingresar seleccionados</button>
+    </div>
+    <div style="overflow-x:auto;">
+      <table>
+        <thead><tr>
+          <th style="width:30px;"><input type="checkbox" id="chk-all" onchange="toggleAll(this.checked)" /></th>
+          <th>SKU</th><th>Cantidad</th><th>Costo s/IVA</th><th>Cond. IVA</th><th>Valorizado</th><th class="actions">Acciones</th>
+        </tr></thead>
+        <tbody id="items-tbody">
+          <tr><td colspan="7" class="empty">Cargando...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% else %}
+  <div class="no-accounts">
+    <p style="font-size:18px;font-weight:500;margin-bottom:8px;">No tenés cuentas de MercadoLibre conectadas</p>
+    <p style="margin-bottom:1.5rem;">Conectá tu primera cuenta desde el <a href="/dashboard" style="color:#005CFF;">Dashboard</a>.</p>
+  </div>
+  {% endif %}
+</main>
+
+<script>
+  const fmt = n => '$' + Number(n).toLocaleString('es-AR', {minimumFractionDigits:2, maximumFractionDigits:2});
+  let currentAccountId = document.getElementById('account-select')?.value;
+  let allItems = [];
+  const SEL = new Set();
+
+  function onAccountChange() {
+    currentAccountId = document.getElementById('account-select').value;
+    SEL.clear();
+    loadItems();
+  }
+
+  async function loadItems() {
+    if(!currentAccountId) return;
+    const tbody = document.getElementById('items-tbody');
+    tbody.innerHTML = '<tr><td colspan="7" class="empty">Cargando...</td></tr>';
+    try {
+      const r = await fetch(`/api/compras/${currentAccountId}`);
+      if(!r.ok) throw new Error('Error al cargar');
+      const data = await r.json();
+      allItems = data.items || [];
+      renderTable();
+    } catch(e) {
+      tbody.innerHTML = `<tr><td colspan="7" class="empty">Error: ${e.message}</td></tr>`;
+    }
+  }
+
+  function renderTable() {
+    const tbody = document.getElementById('items-tbody');
+    document.getElementById('count-label').textContent =
+      `${allItems.length} renglón${allItems.length===1?'':'es'} pendiente${allItems.length===1?'':'s'}`;
+    if(!allItems.length) {
+      tbody.innerHTML = '<tr><td colspan="7" class="empty">No hay renglones pendientes. Agregá uno arriba.</td></tr>';
+      updateBulkBar();
+      return;
+    }
+    tbody.innerHTML = allItems.map(it => {
+      const rate = Number(it.iva_rate || 0);
+      const ivaLabel = rate === 0 ? 'Exento' : `${rate}%`;
+      const valorizado = it.qty * it.cost;
+      const checked = SEL.has(it.id) ? 'checked' : '';
+      return `
+        <tr data-id="${it.id}">
+          <td><input type="checkbox" class="chk-row" ${checked} onchange="chkRow(${it.id}, this.checked)" /></td>
+          <td><b>${it.sku}</b></td>
+          <td>${it.qty}</td>
+          <td>${fmt(it.cost)}</td>
+          <td style="font-size:12px;color:#555;">${ivaLabel}</td>
+          <td style="color:#1a8a5a;">${fmt(valorizado)}</td>
+          <td class="actions">
+            <button class="btn-ingreso" onclick="ingresoOne(${it.id})">Ingreso</button>
+            <button class="btn-delete" onclick="deleteItem(${it.id})">Eliminar</button>
+          </td>
+        </tr>
+      `;
+    }).join('');
+    updateBulkBar();
+  }
+
+  function chkRow(id, checked) {
+    if(checked) SEL.add(id); else SEL.delete(id);
+    updateBulkBar();
+  }
+
+  function toggleAll(checked) {
+    SEL.clear();
+    if(checked) allItems.forEach(it => SEL.add(it.id));
+    renderTable();
+  }
+
+  function updateBulkBar() {
+    const bar = document.getElementById('bulk-bar');
+    const n = SEL.size;
+    document.getElementById('bulk-count').textContent = `${n} seleccionado${n===1?'':'s'}`;
+    bar.classList.toggle('show', n > 0);
+    const chkAll = document.getElementById('chk-all');
+    if(chkAll) chkAll.checked = allItems.length > 0 && n === allItems.length;
+  }
+
+  async function addItem() {
+    if(!currentAccountId) return;
+    const sku = (document.getElementById('new-sku').value || '').trim();
+    const qty = parseFloat(document.getElementById('new-qty').value);
+    const cost = parseFloat(document.getElementById('new-cost').value);
+    const ivaRate = document.getElementById('new-iva').value;
+    const msg = document.getElementById('add-msg');
+    if(!sku || isNaN(qty) || qty <= 0 || isNaN(cost) || cost <= 0) {
+      msg.innerHTML = '<div class="msg err">SKU, cantidad y costo válidos son obligatorios.</div>';
+      return;
+    }
+    const form = new FormData();
+    form.append('sku', sku);
+    form.append('qty', String(qty));
+    form.append('cost', String(cost));
+    form.append('iva_rate', ivaRate);
+    try {
+      const r = await fetch(`/api/compras/${currentAccountId}`, { method: 'POST', body: form });
+      if(!r.ok) throw new Error('Error al guardar');
+      msg.innerHTML = '';
+      document.getElementById('new-sku').value = '';
+      document.getElementById('new-qty').value = '';
+      document.getElementById('new-cost').value = '';
+      document.getElementById('new-iva').value = '21';
+      document.getElementById('new-sku').focus();
+      await loadItems();
+    } catch(e) {
+      msg.innerHTML = `<div class="msg err">${e.message}</div>`;
+    }
+  }
+
+  async function deleteItem(id) {
+    if(!confirm('¿Eliminar este renglón pendiente?')) return;
+    try {
+      const r = await fetch(`/api/compras/${currentAccountId}/${id}`, { method: 'DELETE' });
+      if(!r.ok) throw new Error('Error');
+      SEL.delete(id);
+      await loadItems();
+    } catch(e) {
+      alert(e.message);
+    }
+  }
+
+  async function ingresoIds(ids) {
+    const r = await fetch(`/api/compras/${currentAccountId}/ingreso`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids }),
+    });
+    if(!r.ok) throw new Error('Error al confirmar el ingreso');
+    ids.forEach(id => SEL.delete(id));
+    await loadItems();
+  }
+
+  async function ingresoOne(id) {
+    try {
+      await ingresoIds([id]);
+    } catch(e) {
+      alert(e.message);
+    }
+  }
+
+  async function ingresoBulk() {
+    if(!SEL.size) return;
+    if(!confirm(`¿Confirmar el ingreso de ${SEL.size} renglón(es) a Costos CMV?`)) return;
+    try {
+      await ingresoIds(Array.from(SEL));
+    } catch(e) {
+      alert(e.message);
+    }
+  }
+
+  if(currentAccountId) loadItems();
+</script>
+</body>
+</html>
