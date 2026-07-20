@@ -55,6 +55,9 @@
     .bulk-bar.show { display: flex; }
     .bulk-bar button { padding: 6px 14px; border: none; border-radius: 8px; background: #1a8a5a; color: #fff; font-size: 13px; cursor: pointer; }
     .bulk-bar button:hover { background: #157047; }
+    .bulk-bar button.bulk-delete { background: #c0392b; }
+    .bulk-bar button.bulk-delete:hover { background: #a5301f; }
+    tfoot td { padding: 10px 14px; border-top: 2px solid #e5e5e3; font-weight: 600; color: #111; }
   </style>
 </head>
 <body>
@@ -137,6 +140,7 @@
     <div class="bulk-bar" id="bulk-bar">
       <span id="bulk-count">0 seleccionados</span>
       <button onclick="ingresoBulk()">Ingresar seleccionados</button>
+      <button class="bulk-delete" onclick="deleteBulk()">Eliminar seleccionados</button>
     </div>
     <div style="overflow-x:auto;">
       <table>
@@ -147,6 +151,17 @@
         <tbody id="items-tbody">
           <tr><td colspan="7" class="empty">Cargando...</td></tr>
         </tbody>
+        <tfoot id="items-tfoot" style="display:none;">
+          <tr>
+            <td></td>
+            <td>Total</td>
+            <td id="total-qty"></td>
+            <td></td>
+            <td></td>
+            <td id="total-valorizado"></td>
+            <td></td>
+          </tr>
+        </tfoot>
       </table>
     </div>
   </div>
@@ -181,13 +196,20 @@
 
   function renderTable() {
     const tbody = document.getElementById('items-tbody');
+    const tfoot = document.getElementById('items-tfoot');
     document.getElementById('count-label').textContent =
       `${allItems.length} renglón${allItems.length===1?'':'es'} pendiente${allItems.length===1?'':'s'}`;
     if(!allItems.length) {
       tbody.innerHTML = '<tr><td colspan="7" class="empty">No hay renglones pendientes. Agregá uno arriba.</td></tr>';
+      tfoot.style.display = 'none';
       updateBulkBar();
       return;
     }
+    tfoot.style.display = '';
+    const totalQty = allItems.reduce((s, it) => s + Number(it.qty || 0), 0);
+    const totalValorizado = allItems.reduce((s, it) => s + Number(it.qty || 0) * Number(it.cost || 0), 0);
+    document.getElementById('total-qty').textContent = totalQty.toLocaleString('es-AR');
+    document.getElementById('total-valorizado').textContent = fmt(totalValorizado);
     tbody.innerHTML = allItems.map(it => {
       const rate = Number(it.iva_rate || 0);
       const ivaLabel = rate === 0 ? 'Exento' : `${rate}%`;
@@ -298,6 +320,24 @@
     if(!confirm(`¿Confirmar el ingreso de ${SEL.size} renglón(es) a Costos CMV?`)) return;
     try {
       await ingresoIds(Array.from(SEL));
+    } catch(e) {
+      alert(e.message);
+    }
+  }
+
+  async function deleteBulk() {
+    if(!SEL.size) return;
+    if(!confirm(`¿Eliminar ${SEL.size} renglón(es) pendiente(s)? No se manda nada a Costos CMV.`)) return;
+    const ids = Array.from(SEL);
+    try {
+      const r = await fetch(`/api/compras/${ACCOUNT_ID}/bulk-delete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids }),
+      });
+      if(!r.ok) throw new Error('Error al eliminar');
+      ids.forEach(id => SEL.delete(id));
+      await loadItems();
     } catch(e) {
       alert(e.message);
     }

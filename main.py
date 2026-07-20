@@ -2221,6 +2221,14 @@ async def api_compras_add(
     return {"ok": True}
 
 
+def _in_placeholders(ids: list, prefix: str = "i"):
+    """Arma un IN (:i0, :i1, ...) expandido + dict de params — SQLAlchemy/pg8000
+    no manejan bien ANY(:lista) (mismo patrón que /api/descuentos/.../bulk-delete)."""
+    placeholders = ", ".join([f":{prefix}{i}" for i in range(len(ids))])
+    params = {f"{prefix}{i}": v for i, v in enumerate(ids)}
+    return placeholders, params
+
+
 @app.delete("/api/compras/{account_id}/{item_id}")
 async def api_compras_delete(request: Request, account_id: int, item_id: int):
     user_id = get_session_user_id(request)
@@ -2238,6 +2246,29 @@ async def api_compras_delete(request: Request, account_id: int, item_id: int):
     return {"ok": True}
 
 
+@app.post("/api/compras/{account_id}/bulk-delete")
+async def api_compras_bulk_delete(request: Request, account_id: int):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    user = get_user(user_id)
+    cost_aid = _cost_account_id_for(user, account_id)
+    body = await request.json()
+    ids = [int(i) for i in (body.get("ids") or [])]
+    if not ids:
+        raise HTTPException(400, "Falta seleccionar renglones")
+    placeholders, params = _in_placeholders(ids)
+    params["aid"] = cost_aid
+    db_execute(
+        f"DELETE FROM purchase_items WHERE account_id=:aid AND id IN ({placeholders})",
+        params,
+    )
+    return {"ok": True, "deleted": len(ids)}
+
+
 @app.post("/api/compras/{account_id}/ingreso")
 async def api_compras_ingreso(request: Request, account_id: int):
     user_id = get_session_user_id(request)
@@ -2252,16 +2283,12 @@ async def api_compras_ingreso(request: Request, account_id: int):
     ids = [int(i) for i in (body.get("ids") or [])]
     if not ids:
         raise HTTPException(400, "Falta seleccionar renglones")
-    # SQLAlchemy/pg8000 no manejan bien ANY(:lista) — armamos el placeholder IN expandido
-    # (mismo patrón que /api/descuentos/{account_id}/bulk-delete).
-    placeholders = ", ".join([f":i{i}" for i in range(len(ids))])
-    params = {"aid": cost_aid}
-    for i, v in enumerate(ids):
-        params[f"i{i}"] = v
+    sel_placeholders, sel_params = _in_placeholders(ids)
+    sel_params["aid"] = cost_aid
     rows = db_fetchall(
         f"SELECT id, sku, cost, iva_rate FROM purchase_items"
-        f" WHERE account_id=:aid AND id IN ({placeholders})",
-        params,
+        f" WHERE account_id=:aid AND id IN ({sel_placeholders})",
+        sel_params,
     )
     if not rows:
         return {"ok": True, "ingresados": 0}
@@ -2270,10 +2297,8 @@ async def api_compras_ingreso(request: Request, account_id: int):
         {"sku": r["sku"], "cost": float(r["cost"]), "iva_rate": float(r["iva_rate"] or 21), "valid_from": today_iso}
         for r in rows
     ])
-    del_placeholders = ", ".join([f":d{i}" for i in range(len(rows))])
-    del_params = {"aid": cost_aid}
-    for i, r in enumerate(rows):
-        del_params[f"d{i}"] = r["id"]
+    del_placeholders, del_params = _in_placeholders([r["id"] for r in rows], "d")
+    del_params["aid"] = cost_aid
     db_execute(
         f"DELETE FROM purchase_items WHERE account_id=:aid AND id IN ({del_placeholders})",
         del_params,
