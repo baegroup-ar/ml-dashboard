@@ -2141,6 +2141,9 @@ async def api_costos_upload(request: Request, account_id: int):
 
 @app.get("/compras", response_class=HTMLResponse)
 async def compras_page(request: Request):
+    """Compras no tiene selector de cuenta: los costos CMV se comparten entre
+    las cuentas del dueño (_cost_account_id_for), así que -igual que Margen-
+    trabaja siempre sobre la cuenta ancla (_margen_account_id)."""
     user_id = get_session_user_id(request)
     if not user_id:
         return RedirectResponse("/")
@@ -2150,8 +2153,9 @@ async def compras_page(request: Request):
         return _r
     accounts = get_visible_accounts(user_id, user)
     accounts = await refresh_visible_account_nicknames(accounts)
+    account_id = _margen_account_id(accounts)
     return templates.TemplateResponse("compras.html", {
-        "request": request, "user": user, "accounts": accounts,
+        "request": request, "user": user, "account_id": account_id,
         "perms": user_permissions(user),
     })
 

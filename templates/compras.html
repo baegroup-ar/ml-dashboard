@@ -28,9 +28,6 @@
     p.lead { font-size: 13px; color: #888; margin-bottom: 1.25rem; }
     .card { background: #fff; border: 1px solid #e5e5e3; border-radius: 12px; padding: 1.25rem; margin-bottom: 1.25rem; }
     .card h3 { font-size: 14px; font-weight: 600; color: #444; margin-bottom: 12px; }
-    .account-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-    .account-bar label { font-size: 13px; color: #666; }
-    .account-bar select { flex: 1; min-width: 220px; padding: 7px 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 14px; font-family: 'Inter', sans-serif; }
     .add-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
     .add-row input, .add-row select { padding: 7px 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 13px; font-family: 'Inter', sans-serif; }
     .add-row input.sku { width: 180px; text-transform: uppercase; }
@@ -111,22 +108,12 @@
     <a href="/costos" style="color:#005CFF;">Costos (CMV)</a> con la fecha de hoy y el renglón desaparece de esta lista.
   </p>
 
-  {% if accounts %}
-  <div class="card">
-    <div class="account-bar">
-      <label>Cuenta ML:</label>
-      <select id="account-select" onchange="onAccountChange()">
-        {% set default_nick = 'TIENDA BAE' %}
-        {% set has_default = accounts | selectattr('nickname', 'equalto', default_nick) | list | length > 0 %}
-        {% for acc in accounts %}
-        <option value="{{ acc.id }}" {% if acc.nickname == default_nick or (not has_default and loop.first) %}selected{% endif %}>{{ acc.nickname }}</option>
-        {% endfor %}
-      </select>
-      <span class="count" id="count-label"></span>
+  {% if account_id %}
+  <div class="card" style="display:flex;align-items:center;justify-content:space-between;">
+    <div style="font-size:12px;color:#888;">
+      Los costos de CMV se comparten entre todas las cuentas de la empresa: no hace falta elegir cuenta.
     </div>
-    <div style="font-size:12px;color:#888;margin-top:8px;">
-      Los costos de CMV se comparten entre las cuentas de la misma empresa; la cuenta de arriba solo define de dónde te trae el listado.
-    </div>
+    <span class="count" id="count-label"></span>
   </div>
 
   <div class="card">
@@ -173,22 +160,16 @@
 
 <script>
   const fmt = n => '$' + Number(n).toLocaleString('es-AR', {minimumFractionDigits:2, maximumFractionDigits:2});
-  let currentAccountId = document.getElementById('account-select')?.value;
+  const ACCOUNT_ID = {{ account_id or 'null' }};
   let allItems = [];
   const SEL = new Set();
 
-  function onAccountChange() {
-    currentAccountId = document.getElementById('account-select').value;
-    SEL.clear();
-    loadItems();
-  }
-
   async function loadItems() {
-    if(!currentAccountId) return;
+    if(!ACCOUNT_ID) return;
     const tbody = document.getElementById('items-tbody');
     tbody.innerHTML = '<tr><td colspan="7" class="empty">Cargando...</td></tr>';
     try {
-      const r = await fetch(`/api/compras/${currentAccountId}`);
+      const r = await fetch(`/api/compras/${ACCOUNT_ID}`);
       if(!r.ok) throw new Error('Error al cargar');
       const data = await r.json();
       allItems = data.items || [];
@@ -251,7 +232,7 @@
   }
 
   async function addItem() {
-    if(!currentAccountId) return;
+    if(!ACCOUNT_ID) return;
     const sku = (document.getElementById('new-sku').value || '').trim();
     const qty = parseFloat(document.getElementById('new-qty').value);
     const cost = parseFloat(document.getElementById('new-cost').value);
@@ -267,7 +248,7 @@
     form.append('cost', String(cost));
     form.append('iva_rate', ivaRate);
     try {
-      const r = await fetch(`/api/compras/${currentAccountId}`, { method: 'POST', body: form });
+      const r = await fetch(`/api/compras/${ACCOUNT_ID}`, { method: 'POST', body: form });
       if(!r.ok) throw new Error('Error al guardar');
       msg.innerHTML = '';
       document.getElementById('new-sku').value = '';
@@ -284,7 +265,7 @@
   async function deleteItem(id) {
     if(!confirm('¿Eliminar este renglón pendiente?')) return;
     try {
-      const r = await fetch(`/api/compras/${currentAccountId}/${id}`, { method: 'DELETE' });
+      const r = await fetch(`/api/compras/${ACCOUNT_ID}/${id}`, { method: 'DELETE' });
       if(!r.ok) throw new Error('Error');
       SEL.delete(id);
       await loadItems();
@@ -294,7 +275,7 @@
   }
 
   async function ingresoIds(ids) {
-    const r = await fetch(`/api/compras/${currentAccountId}/ingreso`, {
+    const r = await fetch(`/api/compras/${ACCOUNT_ID}/ingreso`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ids }),
@@ -322,7 +303,7 @@
     }
   }
 
-  if(currentAccountId) loadItems();
+  if(ACCOUNT_ID) loadItems();
 </script>
 </body>
 </html>
