@@ -28,6 +28,13 @@
     p.lead { font-size: 13px; color: #888; margin-bottom: 1.25rem; }
     .card { background: #fff; border: 1px solid #e5e5e3; border-radius: 12px; padding: 1.25rem; margin-bottom: 1.25rem; }
     .card h3 { font-size: 14px; font-weight: 600; color: #444; margin-bottom: 12px; }
+    .upload-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+    .upload-row input[type=file] { font-size: 13px; }
+    .upload-row button { padding: 8px 16px; border: none; border-radius: 8px; background: #1a8a5a; color: #fff; font-size: 13px; cursor: pointer; }
+    .upload-row button:hover { background: #157047; }
+    .upload-row button:disabled { background: #ccc; cursor: not-allowed; }
+    .help-box { background: #EAF1FF; border-left: 3px solid #005CFF; padding: 10px 14px; font-size: 12px; color: #666; margin-top: 10px; }
+    .help-box code { background: #fff; padding: 1px 6px; border-radius: 4px; border: 1px solid #e5e5e3; font-family: monospace; }
     .add-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
     .add-row input, .add-row select { padding: 7px 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 13px; font-family: 'Inter', sans-serif; }
     .add-row input.sku { width: 180px; text-transform: uppercase; }
@@ -117,6 +124,24 @@
       Los costos de CMV se comparten entre todas las cuentas de la empresa: no hace falta elegir cuenta.
     </div>
     <span class="count" id="count-label"></span>
+  </div>
+
+  <div class="card">
+    <h3>Cargar desde Excel o CSV</h3>
+    <div class="upload-row">
+      <input type="file" id="file-input" accept=".xlsx,.xlsm,.csv" />
+      <button onclick="uploadFile()" id="btn-upload">Subir archivo</button>
+      <a href="/api/compras/template" download="plantilla_compras.xlsx"
+         style="padding:8px 14px;border:1px solid #005CFF;border-radius:8px;background:#fff;color:#005CFF;font-size:13px;text-decoration:none;">
+        Descargar plantilla
+      </a>
+    </div>
+    <div class="help-box">
+      Columnas esperadas: <code>SKU</code>, <code>Cantidad</code>, <code>Costo</code> (sin IVA) y opcionalmente
+      <code>IVA</code> (tasa: <code>21</code>, <code>10.5</code>, <code>0</code> o <code>Exento</code>; default <b>21%</b>).
+      Cada fila queda como renglón pendiente, igual que si la cargaras a mano.
+    </div>
+    <div id="upload-msg"></div>
   </div>
 
   <div class="card">
@@ -251,6 +276,38 @@
     bar.classList.toggle('show', n > 0);
     const chkAll = document.getElementById('chk-all');
     if(chkAll) chkAll.checked = allItems.length > 0 && n === allItems.length;
+  }
+
+  async function uploadFile() {
+    if(!ACCOUNT_ID) return;
+    const input = document.getElementById('file-input');
+    const btn = document.getElementById('btn-upload');
+    const msg = document.getElementById('upload-msg');
+    if(!input.files.length) {
+      msg.innerHTML = '<div class="msg err">Seleccioná un archivo primero.</div>';
+      return;
+    }
+    btn.disabled = true;
+    btn.textContent = 'Subiendo...';
+    msg.innerHTML = '';
+    const form = new FormData();
+    form.append('file', input.files[0]);
+    try {
+      const r = await fetch(`/api/compras/${ACCOUNT_ID}/upload`, { method: 'POST', body: form });
+      if(!r.ok) {
+        const t = await r.text();
+        throw new Error(t || 'Error al subir');
+      }
+      const data = await r.json();
+      msg.innerHTML = `<div class="msg ok">${data.saved} renglón(es) agregado(s) (de ${data.rows_parsed} filas leídas).</div>`;
+      input.value = '';
+      await loadItems();
+    } catch(e) {
+      msg.innerHTML = `<div class="msg err">${e.message}</div>`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Subir archivo';
+    }
   }
 
   async function addItem() {

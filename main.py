@@ -2139,6 +2139,201 @@ async def api_costos_upload(request: Request, account_id: int):
 # de acá. La cantidad es solo para el "Valorizado" en pantalla, no se persiste
 # en product_costs (que no tiene noción de cantidad).
 
+def parse_excel_compras(content: bytes) -> list:
+    """Devuelve [{sku, qty, cost, iva_rate}, ...] desde xlsx. Mismo criterio de
+    columnas flexibles que parse_excel_costs, sin columna de fecha (la vigencia
+    la pone recién el "Ingreso")."""
+    import io
+    from openpyxl import load_workbook
+    wb = load_workbook(io.BytesIO(content), data_only=True, read_only=True)
+    ws = wb.active
+    rows = list(ws.iter_rows(values_only=True))
+    if not rows:
+        return []
+    header = None
+    data_start = 0
+    for idx, row in enumerate(rows[:5]):
+        if row is None:
+            continue
+        normalized = [str(c).strip().lower() if c is not None else "" for c in row]
+        if any("sku" in n for n in normalized):
+            header = normalized
+            data_start = idx + 1
+            break
+    if not header:
+        return []
+    sku_idx = _find_col(header, ["sku"])
+    qty_idx = _find_col(header, ["cantidad", "qty", "cant"])
+    cost_idx = _find_col(header, ["costo", "cost", "precio"])
+    iva_idx = _find_col(header, ["iva"])
+    if sku_idx is None or qty_idx is None or cost_idx is None:
+        return []
+    items = []
+    for row in rows[data_start:]:
+        if row is None or len(row) <= max(sku_idx, qty_idx, cost_idx):
+            continue
+        sku = row[sku_idx]
+        qty = row[qty_idx]
+        cost = row[cost_idx]
+        if sku is None or qty is None or cost is None:
+            continue
+        iva_rate = _parse_iva_rate_cell(row[iva_idx]) if iva_idx is not None and len(row) > iva_idx else 21.0
+        items.append({"sku": str(sku).strip(), "qty": qty, "cost": cost, "iva_rate": iva_rate})
+    return items
+
+
+def parse_csv_compras(content: bytes) -> list:
+    """Devuelve [{sku, qty, cost, iva_rate}, ...] desde csv."""
+    import csv, io
+    text_content = content.decode("utf-8-sig", errors="ignore")
+    sample = text_content[:2048]
+    sep = ";" if sample.count(";") > sample.count(",") else ","
+    reader = csv.reader(io.StringIO(text_content), delimiter=sep)
+    rows = list(reader)
+    if not rows:
+        return []
+    header = [(c or "").strip().lower() for c in rows[0]]
+    sku_idx = _find_col(header, ["sku"])
+    qty_idx = _find_col(header, ["cantidad", "qty", "cant"])
+    cost_idx = _find_col(header, ["costo", "cost", "precio"])
+    iva_idx = _find_col(header, ["iva"])
+    if sku_idx is None or qty_idx is None or cost_idx is None:
+        return []
+
+    def _num(raw):
+        raw = (raw or "").strip()
+        if sep == ";":
+            raw = raw.replace(".", "").replace(",", ".")
+        else:
+            raw = raw.replace(",", "")
+        return raw
+
+    items = []
+    for row in rows[1:]:
+        if len(row) <= max(sku_idx, qty_idx, cost_idx):
+            continue
+        sku = (row[sku_idx] or "").strip()
+        raw_qty = _num(row[qty_idx])
+        raw_cost = _num(row[cost_idx])
+        if not sku or not raw_qty or not raw_cost:
+            continue
+        try:
+            qty = float(raw_qty)
+            cost = float(raw_cost)
+        except ValueError:
+            continue
+        iva_rate = _parse_iva_rate_cell(row[iva_idx]) if iva_idx is not None and len(row) > iva_idx else 21.0
+        items.append({"sku": sku, "qty": qty, "cost": cost, "iva_rate": iva_rate})
+    return items
+
+
+@app.get("/api/compras/template")
+async def api_compras_template(request: Request):
+    """Genera un Excel modelo (SKU, Cantidad, Costo, IVA) con filas de ejemplo."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    import io
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from fastapi.responses import StreamingResponse
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Compras"
+    headers = ["SKU", "Cantidad", "Costo", "IVA"]
+    ws.append(headers)
+    header_fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
+    header_font = Font(bold=True, color="000000")
+    for col_idx, _ in enumerate(headers, start=1):
+        cell = ws.cell(row=1, column=col_idx)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center")
+    examples = [
+        ["SOP68-443", 50, 5000.00, 21],
+        ["SOP78-446", 20, 8500.50, 10.5],
+        ["SOP22G-44T", 100, 3200.00, 0],   # Exento
+    ]
+    for row in examples:
+        ws.append(row)
+    ws.column_dimensions["A"].width = 20
+    ws.column_dimensions["B"].width = 12
+    ws.column_dimensions["C"].width = 14
+    ws.column_dimensions["D"].width = 10
+
+    ws2 = wb.create_sheet("Instrucciones")
+    instr = [
+        ["Plantilla de carga de Compras"],
+        [""],
+        ["Columnas:"],
+        ["SKU", "Identificador único del producto (coincide con el seller_sku de ML)."],
+        ["Cantidad", "Unidades recibidas de ese SKU en esta compra."],
+        ["Costo", "Costo SIN IVA (el sistema le aplica la tasa de IVA automáticamente)."],
+        ["IVA", "Tasa de IVA: 21, 10.5, 0 (exento). También acepta 'Exento'. Default 21."],
+        [""],
+        ["Notas:"],
+        ["", "Cada fila queda como renglón pendiente; no se manda nada a Costos CMV hasta tocar \"Ingreso\"."],
+        ["", "La fecha de vigencia en Costos CMV es la del día en que hacés el Ingreso, no la de este archivo."],
+    ]
+    for row in instr:
+        ws2.append(row)
+    ws2.column_dimensions["A"].width = 14
+    ws2.column_dimensions["B"].width = 80
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="plantilla_compras.xlsx"'},
+    )
+
+
+@app.post("/api/compras/{account_id}/upload")
+async def api_compras_upload(request: Request, account_id: int):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    user = get_user(user_id)
+    cost_aid = _cost_account_id_for(user, account_id)
+    form = await request.form()
+    upload = form.get("file")
+    if upload is None or not hasattr(upload, "read"):
+        raise HTTPException(400, "Falta el archivo")
+    content = await upload.read()
+    filename = (getattr(upload, "filename", "") or "").lower()
+    try:
+        if filename.endswith(".xlsx") or filename.endswith(".xlsm"):
+            items = parse_excel_compras(content)
+        else:
+            items = parse_csv_compras(content)
+    except Exception as e:
+        raise HTTPException(400, f"No pude leer el archivo: {e}")
+    saved = 0
+    for it in items:
+        sku = (it.get("sku") or "").strip()
+        try:
+            qty = float(it.get("qty") or 0)
+            cost = float(it.get("cost") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not sku or qty <= 0 or cost <= 0:
+            continue
+        db_execute(
+            "INSERT INTO purchase_items (account_id, sku, qty, cost, iva_rate)"
+            " VALUES (:aid, :sku, :qty, :cost, :iva_rate)",
+            {"aid": cost_aid, "sku": sku, "qty": qty, "cost": cost,
+             "iva_rate": float(it.get("iva_rate") or 21)},
+        )
+        saved += 1
+    return {"ok": True, "saved": saved, "rows_parsed": len(items)}
+
+
 @app.get("/compras", response_class=HTMLResponse)
 async def compras_page(request: Request):
     """Compras no tiene selector de cuenta: los costos CMV se comparten entre
