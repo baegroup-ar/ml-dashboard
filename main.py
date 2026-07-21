@@ -4,9 +4,11 @@ import secrets
 import asyncio
 import json
 from urllib.parse import urlencode
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, date
 from typing import Optional
 from contextlib import asynccontextmanager
+from collections import Counter
+import calendar as _calmod
 
 from fastapi import FastAPI, Request, HTTPException, Form
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, Response
@@ -295,6 +297,10 @@ def init_db():
         conn.execute(text("ALTER TABLE product_costs ADD COLUMN IF NOT EXISTS valid_from DATE"))
         conn.execute(text("ALTER TABLE product_costs ADD COLUMN IF NOT EXISTS iva_included BOOLEAN DEFAULT FALSE"))
         conn.execute(text("ALTER TABLE product_costs ADD COLUMN IF NOT EXISTS iva_rate NUMERIC(5,2) DEFAULT 21"))
+        # qty: solo la llenan los ingresos de Compras (marca la fila como compra
+        # real, sin_iva/con_iva calculables); costos cargados a mano/Excel/PVP
+        # quedan con qty NULL y no cuentan para las Métricas de compra.
+        conn.execute(text("ALTER TABLE product_costs ADD COLUMN IF NOT EXISTS qty NUMERIC(12,2)"))
         conn.execute(text("UPDATE product_costs SET valid_from = CAST(updated_at AS DATE) WHERE valid_from IS NULL"))
         conn.execute(text("ALTER TABLE product_costs ALTER COLUMN valid_from SET NOT NULL"))
         # Cambiar PK a (account_id, sku, valid_from) si todavía no lo es.
@@ -1631,7 +1637,10 @@ def cost_with_iva(entry: dict) -> float:
 
 
 def db_save_product_costs(account_id: int, items: list):
-    """Inserta/actualiza lista de {sku, cost, iva_rate, valid_from}."""
+    """Inserta/actualiza lista de {sku, cost, iva_rate, valid_from, qty}.
+    `qty` es opcional: solo lo cargan los ingresos de Compras (marca la fila
+    como una compra real para las Métricas). Si no viene, NO se borra un qty
+    ya guardado ese mismo SKU+fecha (COALESCE en el UPDATE)."""
     if not items:
         return 0
     params = []
@@ -1653,19 +1662,25 @@ def db_save_product_costs(account_id: int, items: list):
             iva_rate = float(it.get("iva_rate") if it.get("iva_rate") is not None else 21)
         except (TypeError, ValueError):
             iva_rate = 21.0
+        qty = it.get("qty")
+        try:
+            qty = float(qty) if qty is not None else None
+        except (TypeError, ValueError):
+            qty = None
         params.append({
             "aid": account_id, "sku": sku, "cost": cost,
-            "iva_rate": iva_rate, "vf": vf,
+            "iva_rate": iva_rate, "vf": vf, "qty": qty,
         })
     if not params:
         return 0
     with engine.connect() as conn:
         conn.execute(text(
-            "INSERT INTO product_costs (account_id, sku, cost, iva_rate, valid_from, updated_at)"
-            " VALUES (:aid, :sku, :cost, :iva_rate, :vf, NOW())"
+            "INSERT INTO product_costs (account_id, sku, cost, iva_rate, valid_from, qty, updated_at)"
+            " VALUES (:aid, :sku, :cost, :iva_rate, :vf, :qty, NOW())"
             " ON CONFLICT (account_id, sku, valid_from) DO UPDATE SET"
             " cost = EXCLUDED.cost,"
             " iva_rate = EXCLUDED.iva_rate,"
+            " qty = COALESCE(EXCLUDED.qty, product_costs.qty),"
             " updated_at = NOW()"
         ), params)
         conn.commit()
@@ -2485,18 +2500,29 @@ async def api_compras_ingreso(request: Request, account_id: int):
     sel_placeholders, sel_params = _in_placeholders(ids)
     sel_params["aid"] = cost_aid
     rows = db_fetchall(
-        f"SELECT id, sku, cost, iva_rate FROM purchase_items"
+        f"SELECT id, sku, qty, cost, iva_rate FROM purchase_items"
         f" WHERE account_id=:aid AND id IN ({sel_placeholders})",
         sel_params,
     )
     if not rows:
         return {"ok": True, "ingresados": 0}
     today_iso = datetime.utcnow().date().isoformat()
+    # product_costs solo admite una fila por SKU+fecha: si el mismo SKU viene en
+    # más de un renglón del ingreso, se agrupan sumando cantidad y promediando
+    # el costo ponderado por cantidad (así qty*cost sigue dando el total pagado).
+    grouped = {}
+    for r in rows:
+        sku = r["sku"]
+        qty = float(r["qty"] or 0)
+        cost = float(r["cost"])
+        iva_rate = float(r["iva_rate"]) if r["iva_rate"] is not None else 21.0
+        g = grouped.setdefault(sku, {"qty": 0.0, "amount": 0.0, "iva_rate": iva_rate})
+        g["qty"] += qty
+        g["amount"] += qty * cost
     saved = db_save_product_costs(cost_aid, [
-        {"sku": r["sku"], "cost": float(r["cost"]),
-         "iva_rate": float(r["iva_rate"]) if r["iva_rate"] is not None else 21.0,
-         "valid_from": today_iso}
-        for r in rows
+        {"sku": sku, "cost": (g["amount"] / g["qty"]) if g["qty"] else 0.0,
+         "iva_rate": g["iva_rate"], "valid_from": today_iso, "qty": g["qty"]}
+        for sku, g in grouped.items()
     ])
     del_placeholders, del_params = _in_placeholders([r["id"] for r in rows], "d")
     del_params["aid"] = cost_aid
@@ -2506,6 +2532,105 @@ async def api_compras_ingreso(request: Request, account_id: int):
     )
     _invalidate_all_user_accounts_cache(user, account_id)
     return {"ok": True, "ingresados": saved}
+
+
+# ─── Métricas de compra: semana comercial (lunes a sábado, domingo no cuenta) ───
+# Cada bloque lunes-sábado se le asigna al año-mes donde caen más de sus 6 días
+# (si el 1° del mes no es lunes, el bloque que lo contiene puede "pertenecer"
+# al mes anterior si ese mes se queda con más días del bloque; simétricamente
+# el último bloque del mes puede pertenecer al mes siguiente). Las semanas se
+# numeran 1..N en orden dentro del mes dueño de cada bloque. Verificado contra
+# ejemplos reales: julio 2026 (1° miércoles) da 5 semanas (1-4, 6-11, 13-18,
+# 20-25, 27-31); agosto 2026 (1° sábado) da 4 semanas (3-8, 10-15, 17-22, 24-29)
+# porque el bloque del 1/8 se lo queda julio y el del 31/8 se lo queda septiembre.
+_WEEK_TAG_CACHE: dict = {}
+
+
+def _business_week_block(d: date):
+    """(lunes_del_bloque, [6 fechas lunes..sábado]) que contiene a `d`.
+    Un domingo se adjudica al bloque que cierra el sábado anterior."""
+    if d.weekday() == 6:  # domingo
+        d = d - timedelta(days=1)
+    block_start = d - timedelta(days=d.weekday())
+    return block_start, [block_start + timedelta(days=i) for i in range(6)]
+
+
+def _business_week_owning_month(days6):
+    counts = Counter((bd.year, bd.month) for bd in days6)
+    return max(counts.items(), key=lambda kv: (kv[1], kv[0]))[0]
+
+
+def _business_week_tags_for_month(year: int, month: int) -> dict:
+    """{fecha: n_semana} de todos los días de los bloques lun-sáb 'dueños'
+    de este año-mes (puede incluir un puñado de días del mes vecino cuando
+    ese bloque cruza el límite de mes pero la mayoría cae acá)."""
+    key = (year, month)
+    if key in _WEEK_TAG_CACHE:
+        return _WEEK_TAG_CACHE[key]
+    first = date(year, month, 1)
+    last = date(year, month, _calmod.monthrange(year, month)[1])
+    d = first - timedelta(days=8)
+    d = d - timedelta(days=d.weekday())  # alinear a lunes
+    scan_end = last + timedelta(days=8)
+    owned_blocks = []
+    while d <= scan_end:
+        days6 = [d + timedelta(days=i) for i in range(6)]
+        if _business_week_owning_month(days6) == key:
+            owned_blocks.append(days6)
+        d += timedelta(days=7)
+    tags = {}
+    for i, days6 in enumerate(owned_blocks, start=1):
+        for bd in days6:
+            tags[bd] = i
+    _WEEK_TAG_CACHE[key] = tags
+    return tags
+
+
+def _business_week_tag(d: date):
+    """(año, mes, semana) 'comercial' de la fecha `d` (ver
+    _business_week_tags_for_month). El año/mes puede diferir del calendario
+    de `d` en los pocos días de borde que un bloque le cede al mes vecino."""
+    _, days6 = _business_week_block(d)
+    year, month = _business_week_owning_month(days6)
+    tags = _business_week_tags_for_month(year, month)
+    return year, month, tags.get(d, 1)
+
+
+@app.get("/api/compras/{account_id}/metrics")
+async def api_compras_metrics(request: Request, account_id: int):
+    """Filas de CMV que vienen de un Ingreso de Compras (qty IS NOT NULL),
+    con el tag de año/mes/semana comercial para armar el pivot en el frontend."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    user = get_user(user_id)
+    cost_aid = _cost_account_id_for(user, account_id)
+    rows = db_fetchall(
+        "SELECT sku, qty, cost, iva_rate, valid_from FROM product_costs"
+        " WHERE account_id=:aid AND qty IS NOT NULL ORDER BY valid_from",
+        {"aid": cost_aid},
+    )
+    items = []
+    for r in rows:
+        vf = r["valid_from"]
+        if not hasattr(vf, "year"):
+            continue
+        year, month, week = _business_week_tag(vf)
+        qty = float(r["qty"])
+        cost = float(r["cost"])
+        iva_rate = float(r["iva_rate"]) if r["iva_rate"] is not None else 21.0
+        total_sin_iva = qty * cost
+        items.append({
+            "sku": r["sku"], "qty": qty, "cost": cost, "iva_rate": iva_rate,
+            "valid_from": vf.isoformat(),
+            "year": year, "month": month, "week": week,
+            "total_sin_iva": total_sin_iva,
+            "total_con_iva": total_sin_iva * (1 + iva_rate / 100.0),
+        })
+    return {"items": items}
 
 
 # ════════════════════════ STOCK VALORIZADO ════════════════════════
