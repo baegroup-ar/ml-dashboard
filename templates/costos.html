@@ -196,10 +196,10 @@
     <div style="overflow-x:auto;">
       <table>
         <thead><tr>
-          <th>SKU</th><th>Costo sin IVA</th><th>IVA</th><th>Costo con IVA</th><th>Cantidad</th><th>Vigente desde</th><th>Actualizado</th><th class="actions">Acciones</th>
+          <th>SKU</th><th>Costo sin IVA</th><th>IVA</th><th>Costo con IVA</th><th>Cantidad</th><th>Valorizado</th><th>Vigente desde</th><th>Actualizado</th><th class="actions">Acciones</th>
         </tr></thead>
         <tbody id="costs-tbody">
-          <tr><td colspan="8" class="empty">Cargando...</td></tr>
+          <tr><td colspan="9" class="empty">Cargando...</td></tr>
         </tbody>
       </table>
     </div>
@@ -253,7 +253,7 @@
   async function loadCosts() {
     if(!currentAccountId) return;
     const tbody = document.getElementById('costs-tbody');
-    tbody.innerHTML = '<tr><td colspan="8" class="empty">Cargando...</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9" class="empty">Cargando...</td></tr>';
     try {
       const r = await fetch(`/api/costos/${currentAccountId}`);
       if(!r.ok) throw new Error('Error al cargar');
@@ -261,7 +261,7 @@
       allItems = data.items || [];
       renderTable();
     } catch(e) {
-      tbody.innerHTML = `<tr><td colspan="8" class="empty">Error: ${e.message}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="9" class="empty">Error: ${e.message}</td></tr>`;
     }
   }
 
@@ -275,7 +275,7 @@
     document.getElementById('count-label').textContent =
       `${uniqueSkus} SKU${uniqueSkus===1?'':'s'} · ${allItems.length} entrada${allItems.length===1?'':'s'}`;
     if(!items.length) {
-      tbody.innerHTML = `<tr><td colspan="8" class="empty">${filter ? 'Sin resultados.' : 'Todavía no hay costos cargados.'}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="9" class="empty">${filter ? 'Sin resultados.' : 'Todavía no hay costos cargados.'}</td></tr>`;
       return;
     }
     tbody.innerHTML = items.map(it => {
@@ -285,6 +285,7 @@
       const skuEsc = it.sku.replace(/'/g, "\\'");
       const rowId = `${it.sku}|${it.valid_from}`.replace(/[^a-zA-Z0-9_]/g, '_');
       const qtyVal = it.qty != null ? it.qty : '';
+      const valorizado = it.qty != null ? it.qty * costoConIva : null;
       return `
         <tr data-row-id="${rowId}" data-old-sku="${it.sku}" data-old-vf="${it.valid_from}">
           <td class="c-sku"><b>${it.sku}</b></td>
@@ -292,6 +293,7 @@
           <td class="c-iva" style="font-size:12px;color:#555;">${ivaLabel}</td>
           <td class="c-cwi" style="font-size:12px;color:#1a8a5a;">${fmt(costoConIva)}</td>
           <td class="c-qty" style="font-size:12px;">${it.qty != null ? Math.round(it.qty).toLocaleString('es-AR') : '—'}</td>
+          <td class="c-val" style="font-size:12px;color:#1a8a5a;">${valorizado != null ? fmt(valorizado) : '—'}</td>
           <td class="c-vf" style="font-size:12px;">${it.valid_from || '—'}</td>
           <td style="color:#888;font-size:12px;">${it.updated_at ? new Date(it.updated_at + 'Z').toLocaleString('es-AR', {dateStyle:'short', timeStyle:'short'}) : ''}</td>
           <td class="actions">
@@ -312,6 +314,7 @@
     tr.querySelector('.c-iva').innerHTML = `<input type="number" id="edit-iva" value="${ivaRate}" step="0.5" min="0" max="100" />`;
     tr.querySelector('.c-cwi').textContent = '—';
     tr.querySelector('.c-qty').innerHTML = `<input type="number" id="edit-qty" value="${qty}" step="1" min="0" placeholder="Opcional" />`;
+    tr.querySelector('.c-val').textContent = '—';
     tr.querySelector('.c-vf').innerHTML = `<input type="date" id="edit-vf" value="${validFrom}" />`;
     tr.querySelector('.actions').innerHTML = `
       <button class="btn-save" onclick="saveEdit('${rowId}')">Guardar</button>
