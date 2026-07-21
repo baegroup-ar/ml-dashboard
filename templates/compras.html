@@ -41,6 +41,7 @@
     .add-row input.qty { width: 90px; }
     .add-row input.cost { width: 110px; }
     .add-row select.iva { width: 110px; }
+    .add-row input[type=date] { width: 140px; }
     .add-row button { padding: 8px 16px; border: none; border-radius: 8px; background: #005CFF; color: #fff; font-size: 13px; cursor: pointer; }
     .add-row button:hover { background: #2970e0; }
     table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 12px; }
@@ -50,8 +51,13 @@
     .actions { text-align: right; white-space: nowrap; }
     .btn-delete { color: #c0392b; background: none; border: none; cursor: pointer; font-size: 12px; padding: 4px 8px; border-radius: 6px; }
     .btn-delete:hover { background: #fce9e9; }
+    .btn-edit { color: #005CFF; background: none; border: none; cursor: pointer; font-size: 12px; padding: 4px 8px; border-radius: 6px; }
+    .btn-edit:hover { background: #e8f1fd; }
+    .btn-save { color: #1a8a5a; background: none; border: none; cursor: pointer; font-size: 12px; padding: 4px 8px; border-radius: 6px; }
+    .btn-save:hover { background: #e6f5ee; }
     .btn-ingreso { color: #fff; background: #1a8a5a; border: none; cursor: pointer; font-size: 12px; padding: 5px 12px; border-radius: 6px; font-weight: 500; }
     .btn-ingreso:hover { background: #157047; }
+    .row-edit input { padding: 4px 6px; border: 1px solid #ddd; border-radius: 4px; font-size: 12px; font-family: 'Inter', sans-serif; width: 100%; }
     .empty { padding: 2rem; text-align: center; color: #aaa; font-size: 13px; }
     .msg { padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-top: 10px; }
     .msg.ok { background: #e6f5ee; color: #1a8a5a; border: 1px solid #c5e9d8; }
@@ -65,6 +71,21 @@
     .bulk-bar button.bulk-delete { background: #c0392b; }
     .bulk-bar button.bulk-delete:hover { background: #a5301f; }
     tfoot td { padding: 10px 14px; border-top: 2px solid #e5e5e3; font-weight: 600; color: #111; }
+    .search-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+    .search-row input { flex: 1; padding: 7px 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 13px; }
+    .tabs { display: flex; gap: 6px; margin-bottom: 14px; }
+    .tab-btn { padding: 8px 18px; border: 1px solid #ddd; border-radius: 8px; background: #fff; font-size: 13px; cursor: pointer; color: #444; }
+    .tab-btn.active { background: #005CFF; color: #fff; border-color: #005CFF; font-weight: 500; }
+    .num { text-align: right; }
+    .tree-row { cursor: pointer; }
+    .tree-row:hover { background: #f9f9f8; }
+    .tree-row.leaf { cursor: default; }
+    .tree-row.leaf:hover { background: transparent; }
+    .tree-toggle { display: inline-block; width: 14px; color: #005CFF; font-size: 11px; }
+    .tree-label-1 { font-weight: 600; }
+    .tree-label-2 { padding-left: 20px; }
+    .tree-label-3 { padding-left: 40px; color: #444; }
+    .tree-label-4 { padding-left: 60px; color: #666; font-size: 12px; }
   </style>
 </head>
 <body>
@@ -88,11 +109,10 @@
       </div>
     </div>
     {% endif %}
-    {% if 'costos' in perms or 'pvp' in perms or 'clientes' in perms or 'base_sku' in perms or 'envios_flex' in perms %}
+    {% if 'pvp' in perms or 'clientes' in perms or 'base_sku' in perms or 'envios_flex' in perms %}
     <div class="nav-dropdown">
       <span class="btn-nav dropdown-trigger">Base de Datos ▾</span>
       <div class="dropdown-menu">
-        {% if 'costos' in perms %}<a href="/costos" class="dropdown-item">Costos (CMV)</a>{% endif %}
         {% if 'pvp' in perms %}<a href="/pvp" class="dropdown-item">PVP</a>{% endif %}
         {% if 'clientes' in perms %}<a href="/clientes" class="dropdown-item">Clientes</a>{% endif %}
         {% if 'base_sku' in perms %}<a href="/base-sku" class="dropdown-item">SKUs</a>{% endif %}
@@ -113,83 +133,195 @@
 <main>
   <h1>Compras</h1>
   <p class="lead">
-    Cargá acá los renglones de una recepción de mercadería (SKU, cantidad, costo <b>sin IVA</b> y tasa de IVA).
-    Cuando confirmás el <b>Ingreso</b> de un renglón (individual o en bloque), el costo se manda a
-    <a href="/costos" style="color:#005CFF;">Costos (CMV)</a> con la fecha de hoy y el renglón desaparece de esta lista.
+    Costos de mercadería (CMV), métricas de compra y renglones de posibles compras pendientes de ingresar,
+    todo en un solo lugar.
   </p>
 
   {% if account_id %}
-  <div class="card" style="display:flex;align-items:center;justify-content:space-between;">
-    <div style="font-size:12px;color:#888;">
-      Los costos de CMV se comparten entre todas las cuentas de la empresa: no hace falta elegir cuenta.
-    </div>
-    <span class="count" id="count-label"></span>
+  <div class="tabs">
+    <button class="tab-btn" id="tab-btn-metricas" onclick="switchTab('metricas')">Métricas</button>
+    {% if has_costos %}<button class="tab-btn" id="tab-btn-costos" onclick="switchTab('costos')">Costos</button>{% endif %}
+    {% if has_compras %}<button class="tab-btn" id="tab-btn-pendientes" onclick="switchTab('pendientes')">Posible Compra</button>{% endif %}
   </div>
 
-  <div class="card">
-    <h3>Cargar desde Excel o CSV</h3>
-    <div class="upload-row">
-      <input type="file" id="file-input" accept=".xlsx,.xlsm,.csv" />
-      <button onclick="uploadFile()" id="btn-upload">Subir archivo</button>
-      <a href="/api/compras/template" download="plantilla_compras.xlsx"
-         style="padding:8px 14px;border:1px solid #005CFF;border-radius:8px;background:#fff;color:#005CFF;font-size:13px;text-decoration:none;">
-        Descargar plantilla
-      </a>
+  <div id="panel-metricas" style="display:none">
+    <div class="card">
+      <h3>Métricas de compra</h3>
+      <p style="font-size:12px;color:#888;margin-bottom:10px;">
+        Solo cuenta lo que tiene <b>Cantidad</b> cargada en Costos (a mano, por Excel, o vía un Ingreso
+        confirmado en <b>Posible Compra</b>). Si un costo se cargó sin cantidad, no cuenta como compra real
+        y no aparece acá. La semana es "comercial": lunes a sábado, arranca el primer día hábil del mes y
+        la última semana cierra el último día hábil.
+      </p>
+      <div class="search-row">
+        <input type="text" id="metrics-filter-sku" placeholder="Buscar por SKU..." oninput="renderMetricsTree()" />
+        <span class="count" id="metrics-count-label"></span>
+      </div>
+      <div style="overflow-x:auto;">
+        <table>
+          <thead><tr>
+            <th>Año / Mes / Semana / SKU</th><th class="num">Cantidad</th><th class="num">Total sin IVA</th><th class="num">Total con IVA</th>
+          </tr></thead>
+          <tbody id="metrics-tbody">
+            <tr><td colspan="4" class="empty">Cargando...</td></tr>
+          </tbody>
+        </table>
+      </div>
     </div>
-    <div class="help-box">
-      Columnas esperadas: <code>SKU</code>, <code>Cantidad</code>, <code>Costo</code> (sin IVA) y opcionalmente
-      <code>IVA</code> (tasa: <code>21</code>, <code>10.5</code>, <code>0</code> o <code>Exento</code>; default <b>21%</b>).
-      Cada fila queda como renglón pendiente, igual que si la cargaras a mano.
-    </div>
-    <div id="upload-msg"></div>
   </div>
 
-  <div class="card">
-    <h3>Agregar renglón</h3>
-    <div class="add-row">
-      <input type="text" id="new-sku" class="sku" placeholder="SKU (ej. SOP68-443)" />
-      <input type="number" id="new-qty" class="qty" placeholder="Cantidad" step="1" min="0" />
-      <input type="number" id="new-cost" class="cost" placeholder="Costo sin IVA" step="0.01" min="0" />
-      <select id="new-iva" class="iva" title="Condición de IVA">
-        <option value="21" selected>21%</option>
-        <option value="10.5">10.5%</option>
-        <option value="0">Exento (0%)</option>
-      </select>
-      <button onclick="addItem()">Agregar</button>
+  {% if has_costos %}
+  <div id="panel-costos" style="display:none">
+    <div class="card">
+      <h3>Costos de mercadería (CMV)</h3>
+      <p style="font-size:12px;color:#888;">
+        Cargá el costo de cada SKU <b>sin IVA</b>, con la <b>fecha de vigencia</b> y la <b>tasa de IVA</b> que
+        le corresponde (21%, 10.5%, 0 si está exento, etc.). Cada venta toma el costo vigente al momento
+        de la venta y el sistema aplica la tasa automáticamente para que sea comparable con
+        monto/comisión/envío de ML, que vienen con IVA incluido. Los costos se comparten entre todas las
+        cuentas de la empresa: no hace falta elegir cuenta.
+      </p>
+      <div style="font-size:12px;color:#888;margin-top:8px;" id="count-label"></div>
     </div>
-    <div id="add-msg"></div>
-  </div>
 
-  <div class="card">
-    <h3>Renglones pendientes</h3>
-    <div class="bulk-bar" id="bulk-bar">
-      <span id="bulk-count">0 seleccionados</span>
-      <button onclick="ingresoBulk()">Ingresar seleccionados</button>
-      <button class="bulk-delete" onclick="deleteBulk()">Eliminar seleccionados</button>
+    <div class="card">
+      <h3>Cargar desde Excel o CSV</h3>
+      <div class="upload-row">
+        <input type="file" id="costos-file-input" accept=".xlsx,.xlsm,.csv" />
+        <button onclick="uploadCostosFile()" id="btn-costos-upload">Subir archivo</button>
+        <a href="#" onclick="downloadCostos(event)"
+           style="padding:8px 14px;border:1px solid #1a8a5a;border-radius:8px;background:#fff;color:#1a8a5a;font-size:13px;text-decoration:none;">
+          ⬇ Descargar cargados
+        </a>
+        <a href="/api/costos/template" download="plantilla_costos.xlsx"
+           style="padding:8px 14px;border:1px solid #005CFF;border-radius:8px;background:#fff;color:#005CFF;font-size:13px;text-decoration:none;">
+          Descargar plantilla
+        </a>
+      </div>
+      <div class="help-box">
+        Columnas esperadas: <code>SKU</code>, <code>Costo</code> (sin IVA), opcionalmente
+        <code>Fecha</code> (vigencia desde, <code>YYYY-MM-DD</code> o <code>DD/MM/YYYY</code>; si falta, hoy),
+        <code>IVA</code> (tasa: <code>21</code>, <code>10.5</code>, <code>0</code> o <code>Exento</code>;
+        default <b>21%</b>) y <code>Cantidad</code> (opcional: si la cargás, esa fila cuenta como una
+        compra real en <b>Métricas</b>). Cada combinación SKU+Fecha es una versión histórica.
+        Bajate la plantilla para tener un Excel listo con las columnas y filas de ejemplo.
+      </div>
+      <div id="costos-upload-msg"></div>
     </div>
-    <div style="overflow-x:auto;">
-      <table>
-        <thead><tr>
-          <th style="width:30px;"><input type="checkbox" id="chk-all" onchange="toggleAll(this.checked)" /></th>
-          <th>SKU</th><th>Cantidad</th><th>Costo s/IVA</th><th>Cond. IVA</th><th>Valorizado</th><th class="actions">Acciones</th>
-        </tr></thead>
-        <tbody id="items-tbody">
-          <tr><td colspan="7" class="empty">Cargando...</td></tr>
-        </tbody>
-        <tfoot id="items-tfoot" style="display:none;">
-          <tr>
-            <td></td>
-            <td>Total</td>
-            <td id="total-qty"></td>
-            <td></td>
-            <td></td>
-            <td id="total-valorizado"></td>
-            <td></td>
-          </tr>
-        </tfoot>
-      </table>
+
+    <div class="card">
+      <h3>Agregar / actualizar manualmente</h3>
+      <div class="add-row">
+        <input type="text" id="manual-sku" class="sku" placeholder="SKU (ej. SOP68-443)" />
+        <input type="number" id="manual-cost" class="cost" placeholder="Costo sin IVA" step="0.01" min="0" />
+        <input type="date" id="manual-fecha" title="Vigente desde" />
+        <input type="number" id="manual-iva" class="cost" placeholder="IVA %" step="0.5" min="0" max="100" value="21" title="Tasa de IVA (21, 10.5, 0 = exento)" />
+        <input type="number" id="manual-qty" class="cost" placeholder="Cantidad (opcional)" step="1" min="0" title="Si la cargás, cuenta como compra real en Métricas" />
+        <button onclick="addCost()">Guardar</button>
+      </div>
+      <div style="font-size:11px;color:#888;margin-top:6px;">
+        Si dejás la fecha vacía toma hoy. Tasa por defecto 21%, escribí <code>10.5</code> o <code>0</code> según corresponda.
+        Cantidad es opcional: cargala solo si esto es una compra real que querés ver en <b>Métricas</b>.
+      </div>
+      <div id="add-msg"></div>
+    </div>
+
+    <div class="card">
+      <h3>Costos cargados</h3>
+      <div class="search-row">
+        <input type="text" id="filter-input" placeholder="Buscar por SKU..." oninput="renderCostosTable()" />
+      </div>
+      <div style="overflow-x:auto;">
+        <table>
+          <thead><tr>
+            <th>SKU</th><th>Costo sin IVA</th><th>IVA</th><th>Costo con IVA</th><th>Cantidad</th><th>Valorizado</th><th>Vigente desde</th><th>Actualizado</th><th class="actions">Acciones</th>
+          </tr></thead>
+          <tbody id="costs-tbody">
+            <tr><td colspan="9" class="empty">Cargando...</td></tr>
+          </tbody>
+        </table>
+      </div>
     </div>
   </div>
+  {% endif %}
+
+  {% if has_compras %}
+  <div id="panel-pendientes" style="display:none">
+    <div class="card" style="display:flex;align-items:center;justify-content:space-between;">
+      <div style="font-size:12px;color:#888;">
+        Cargá acá los renglones de una recepción de mercadería (SKU, cantidad, costo <b>sin IVA</b> y tasa de IVA).
+        Cuando confirmás el <b>Ingreso</b> de un renglón (individual o en bloque), el costo se manda a la
+        solapa <b>Costos</b> con la fecha de hoy y el renglón desaparece de esta lista.
+      </div>
+      <span class="count" id="pendientes-count-label"></span>
+    </div>
+
+    <div class="card">
+      <h3>Cargar desde Excel o CSV</h3>
+      <div class="upload-row">
+        <input type="file" id="file-input" accept=".xlsx,.xlsm,.csv" />
+        <button onclick="uploadPendientesFile()" id="btn-upload">Subir archivo</button>
+        <a href="/api/compras/template" download="plantilla_compras.xlsx"
+           style="padding:8px 14px;border:1px solid #005CFF;border-radius:8px;background:#fff;color:#005CFF;font-size:13px;text-decoration:none;">
+          Descargar plantilla
+        </a>
+      </div>
+      <div class="help-box">
+        Columnas esperadas: <code>SKU</code>, <code>Cantidad</code>, <code>Costo</code> (sin IVA) y opcionalmente
+        <code>IVA</code> (tasa: <code>21</code>, <code>10.5</code>, <code>0</code> o <code>Exento</code>; default <b>21%</b>).
+        Cada fila queda como renglón pendiente, igual que si la cargaras a mano.
+      </div>
+      <div id="upload-msg"></div>
+    </div>
+
+    <div class="card">
+      <h3>Agregar renglón</h3>
+      <div class="add-row">
+        <input type="text" id="new-sku" class="sku" placeholder="SKU (ej. SOP68-443)" />
+        <input type="number" id="new-qty" class="qty" placeholder="Cantidad" step="1" min="0" />
+        <input type="number" id="new-cost" class="cost" placeholder="Costo sin IVA" step="0.01" min="0" />
+        <select id="new-iva" class="iva" title="Condición de IVA">
+          <option value="21" selected>21%</option>
+          <option value="10.5">10.5%</option>
+          <option value="0">Exento (0%)</option>
+        </select>
+        <button onclick="addItem()">Agregar</button>
+      </div>
+      <div id="add-item-msg"></div>
+    </div>
+
+    <div class="card">
+      <h3>Renglones pendientes</h3>
+      <div class="bulk-bar" id="bulk-bar">
+        <span id="bulk-count">0 seleccionados</span>
+        <button onclick="ingresoBulk()">Ingresar seleccionados</button>
+        <button class="bulk-delete" onclick="deleteBulk()">Eliminar seleccionados</button>
+      </div>
+      <div style="overflow-x:auto;">
+        <table>
+          <thead><tr>
+            <th style="width:30px;"><input type="checkbox" id="chk-all" onchange="toggleAll(this.checked)" /></th>
+            <th>SKU</th><th>Cantidad</th><th>Costo s/IVA</th><th>Cond. IVA</th><th>Valorizado</th><th class="actions">Acciones</th>
+          </tr></thead>
+          <tbody id="items-tbody">
+            <tr><td colspan="7" class="empty">Cargando...</td></tr>
+          </tbody>
+          <tfoot id="items-tfoot" style="display:none;">
+            <tr>
+              <td></td>
+              <td>Total</td>
+              <td id="total-qty"></td>
+              <td></td>
+              <td></td>
+              <td id="total-valorizado"></td>
+              <td></td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+    </div>
+  </div>
+  {% endif %}
   {% else %}
   <div class="no-accounts">
     <p style="font-size:18px;font-weight:500;margin-bottom:8px;">No tenés cuentas de MercadoLibre conectadas</p>
@@ -201,11 +333,37 @@
 <script>
   const fmt = n => '$' + Number(n).toLocaleString('es-AR', {minimumFractionDigits:2, maximumFractionDigits:2});
   const ACCOUNT_ID = {{ account_id or 'null' }};
+  const INITIAL_TAB = "{{ active_tab }}";
+
+  function setPanel(id, show) {
+    const el = document.getElementById(id);
+    if (el) el.style.display = show ? '' : 'none';
+  }
+  function setTabBtn(id, active) {
+    const el = document.getElementById(id);
+    if (el) el.classList.toggle('active', active);
+  }
+
+  function switchTab(tab) {
+    setPanel('panel-metricas', tab === 'metricas');
+    setPanel('panel-costos', tab === 'costos');
+    setPanel('panel-pendientes', tab === 'pendientes');
+    setTabBtn('tab-btn-metricas', tab === 'metricas');
+    setTabBtn('tab-btn-costos', tab === 'costos');
+    setTabBtn('tab-btn-pendientes', tab === 'pendientes');
+    if (tab === 'metricas' && !metricsLoaded) loadMetrics();
+    if (tab === 'costos' && document.getElementById('panel-costos') && !costosLoaded) loadCosts();
+    if (tab === 'pendientes' && document.getElementById('panel-pendientes') && !pendientesLoaded) loadItems();
+  }
+
+  // ─── Posible Compra (renglones pendientes) ───
   let allItems = [];
+  let pendientesLoaded = false;
   const SEL = new Set();
 
   async function loadItems() {
     if(!ACCOUNT_ID) return;
+    pendientesLoaded = true;
     const tbody = document.getElementById('items-tbody');
     tbody.innerHTML = '<tr><td colspan="7" class="empty">Cargando...</td></tr>';
     try {
@@ -213,16 +371,16 @@
       if(!r.ok) throw new Error('Error al cargar');
       const data = await r.json();
       allItems = data.items || [];
-      renderTable();
+      renderPendientesTable();
     } catch(e) {
       tbody.innerHTML = `<tr><td colspan="7" class="empty">Error: ${e.message}</td></tr>`;
     }
   }
 
-  function renderTable() {
+  function renderPendientesTable() {
     const tbody = document.getElementById('items-tbody');
     const tfoot = document.getElementById('items-tfoot');
-    document.getElementById('count-label').textContent =
+    document.getElementById('pendientes-count-label').textContent =
       `${allItems.length} renglón${allItems.length===1?'':'es'} pendiente${allItems.length===1?'':'s'}`;
     if(!allItems.length) {
       tbody.innerHTML = '<tr><td colspan="7" class="empty">No hay renglones pendientes. Agregá uno arriba.</td></tr>';
@@ -266,7 +424,7 @@
   function toggleAll(checked) {
     SEL.clear();
     if(checked) allItems.forEach(it => SEL.add(it.id));
-    renderTable();
+    renderPendientesTable();
   }
 
   function updateBulkBar() {
@@ -278,7 +436,7 @@
     if(chkAll) chkAll.checked = allItems.length > 0 && n === allItems.length;
   }
 
-  async function uploadFile() {
+  async function uploadPendientesFile() {
     if(!ACCOUNT_ID) return;
     const input = document.getElementById('file-input');
     const btn = document.getElementById('btn-upload');
@@ -316,7 +474,7 @@
     const qty = parseFloat(document.getElementById('new-qty').value);
     const cost = parseFloat(document.getElementById('new-cost').value);
     const ivaRate = document.getElementById('new-iva').value;
-    const msg = document.getElementById('add-msg');
+    const msg = document.getElementById('add-item-msg');
     if(!sku || isNaN(qty) || qty <= 0 || isNaN(cost) || cost <= 0) {
       msg.innerHTML = '<div class="msg err">SKU, cantidad y costo válidos son obligatorios.</div>';
       return;
@@ -361,6 +519,9 @@
     });
     if(!r.ok) throw new Error('Error al confirmar el ingreso');
     ids.forEach(id => SEL.delete(id));
+    // El ingreso vuelca a Costos: refrescar esa solapa y las Métricas también.
+    costosLoaded = false;
+    metricsLoaded = false;
     await loadItems();
   }
 
@@ -400,7 +561,321 @@
     }
   }
 
-  if(ACCOUNT_ID) loadItems();
+  // ─── Costos (CMV) ───
+  let allCosts = [];
+  let costosLoaded = false;
+
+  function downloadCostos(e) {
+    if (e) e.preventDefault();
+    if (!ACCOUNT_ID) return;
+    window.location = `/api/costos/${ACCOUNT_ID}/export`;
+  }
+
+  async function loadCosts() {
+    if(!ACCOUNT_ID) return;
+    costosLoaded = true;
+    const tbody = document.getElementById('costs-tbody');
+    tbody.innerHTML = '<tr><td colspan="9" class="empty">Cargando...</td></tr>';
+    try {
+      const r = await fetch(`/api/costos/${ACCOUNT_ID}`);
+      if(!r.ok) throw new Error('Error al cargar');
+      const data = await r.json();
+      allCosts = data.items || [];
+      renderCostosTable();
+    } catch(e) {
+      tbody.innerHTML = `<tr><td colspan="9" class="empty">Error: ${e.message}</td></tr>`;
+    }
+  }
+
+  function renderCostosTable() {
+    const tbody = document.getElementById('costs-tbody');
+    const filter = (document.getElementById('filter-input').value || '').trim().toUpperCase();
+    const items = filter
+      ? allCosts.filter(it => (it.sku || '').toUpperCase().includes(filter))
+      : allCosts;
+    const uniqueSkus = new Set(allCosts.map(it => (it.sku || '').toUpperCase())).size;
+    document.getElementById('count-label').textContent =
+      `${uniqueSkus} SKU${uniqueSkus===1?'':'s'} · ${allCosts.length} entrada${allCosts.length===1?'':'s'}`;
+    if(!items.length) {
+      tbody.innerHTML = `<tr><td colspan="9" class="empty">${filter ? 'Sin resultados.' : 'Todavía no hay costos cargados.'}</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = items.map(it => {
+      const rate = Number(it.iva_rate || 0);
+      const costoConIva = it.cost * (1 + rate / 100);
+      const ivaLabel = rate === 0 ? 'Exento' : `${rate}%`;
+      const skuEsc = it.sku.replace(/'/g, "\\'");
+      const rowId = `${it.sku}|${it.valid_from}`.replace(/[^a-zA-Z0-9_]/g, '_');
+      const qtyVal = it.qty != null ? it.qty : '';
+      const valorizado = it.qty != null ? it.qty * costoConIva : null;
+      return `
+        <tr data-row-id="${rowId}" data-old-sku="${it.sku}" data-old-vf="${it.valid_from}">
+          <td class="c-sku"><b>${it.sku}</b></td>
+          <td class="c-cost">${fmt(it.cost)}</td>
+          <td class="c-iva" style="font-size:12px;color:#555;">${ivaLabel}</td>
+          <td class="c-cwi" style="font-size:12px;color:#1a8a5a;">${fmt(costoConIva)}</td>
+          <td class="c-qty" style="font-size:12px;">${it.qty != null ? Math.round(it.qty).toLocaleString('es-AR') : '—'}</td>
+          <td class="c-val" style="font-size:12px;color:#1a8a5a;">${valorizado != null ? fmt(valorizado) : '—'}</td>
+          <td class="c-vf" style="font-size:12px;">${it.valid_from || '—'}</td>
+          <td style="color:#888;font-size:12px;">${it.updated_at ? new Date(it.updated_at + 'Z').toLocaleString('es-AR', {dateStyle:'short', timeStyle:'short'}) : ''}</td>
+          <td class="actions">
+            <button class="btn-edit" onclick="startEdit('${rowId}', '${skuEsc}', ${it.cost}, '${it.valid_from}', ${rate}, '${qtyVal}')">Editar</button>
+            <button class="btn-delete" onclick="deleteCost('${skuEsc}', '${it.valid_from}')">Eliminar</button>
+          </td>
+        </tr>
+      `;
+    }).join('');
+  }
+
+  function startEdit(rowId, sku, cost, validFrom, ivaRate, qty) {
+    const tr = document.querySelector(`tr[data-row-id="${rowId}"]`);
+    if(!tr) return;
+    tr.classList.add('row-edit');
+    tr.querySelector('.c-sku').innerHTML = `<input type="text" id="edit-sku" value="${sku}" />`;
+    tr.querySelector('.c-cost').innerHTML = `<input type="number" id="edit-cost" value="${cost}" step="0.01" min="0" />`;
+    tr.querySelector('.c-iva').innerHTML = `<input type="number" id="edit-iva" value="${ivaRate}" step="0.5" min="0" max="100" />`;
+    tr.querySelector('.c-cwi').textContent = '—';
+    tr.querySelector('.c-qty').innerHTML = `<input type="number" id="edit-qty" value="${qty}" step="1" min="0" placeholder="Opcional" />`;
+    tr.querySelector('.c-val').textContent = '—';
+    tr.querySelector('.c-vf').innerHTML = `<input type="date" id="edit-vf" value="${validFrom}" />`;
+    tr.querySelector('.actions').innerHTML = `
+      <button class="btn-save" onclick="saveEdit('${rowId}')">Guardar</button>
+      <button class="btn-delete" onclick="loadCosts()">Cancelar</button>
+    `;
+  }
+
+  async function saveEdit(rowId) {
+    const tr = document.querySelector(`tr[data-row-id="${rowId}"]`);
+    if(!tr) return;
+    const oldSku = tr.dataset.oldSku;
+    const oldVf = tr.dataset.oldVf;
+    const newSku = (document.getElementById('edit-sku').value || '').trim();
+    const newCost = parseFloat(document.getElementById('edit-cost').value);
+    const newIva = parseFloat(document.getElementById('edit-iva').value);
+    const newVf = document.getElementById('edit-vf').value;
+    const newQtyRaw = document.getElementById('edit-qty').value;
+    if(!newSku || isNaN(newCost) || newCost <= 0 || isNaN(newIva) || !newVf) {
+      alert('Todos los campos son obligatorios.');
+      return;
+    }
+    const form = new FormData();
+    form.append('old_sku', oldSku);
+    form.append('old_valid_from', oldVf);
+    form.append('sku', newSku);
+    form.append('cost', String(newCost));
+    form.append('valid_from', newVf);
+    form.append('iva_rate', String(newIva));
+    if(newQtyRaw !== '') form.append('qty', newQtyRaw);
+    try {
+      const r = await fetch(`/api/costos/${ACCOUNT_ID}/edit`, { method: 'PUT', body: form });
+      if(!r.ok) throw new Error('Error al guardar');
+      metricsLoaded = false;
+      await loadCosts();
+    } catch(e) {
+      alert(e.message);
+    }
+  }
+
+  async function uploadCostosFile() {
+    if(!ACCOUNT_ID) return;
+    const input = document.getElementById('costos-file-input');
+    const btn = document.getElementById('btn-costos-upload');
+    const msg = document.getElementById('costos-upload-msg');
+    if(!input.files.length) {
+      msg.innerHTML = '<div class="msg err">Seleccioná un archivo primero.</div>';
+      return;
+    }
+    btn.disabled = true;
+    btn.textContent = 'Subiendo...';
+    msg.innerHTML = '';
+    const form = new FormData();
+    form.append('file', input.files[0]);
+    try {
+      const r = await fetch(`/api/costos/${ACCOUNT_ID}/upload`, { method: 'POST', body: form });
+      if(!r.ok) {
+        const t = await r.text();
+        throw new Error(t || 'Error al subir');
+      }
+      const data = await r.json();
+      msg.innerHTML = `<div class="msg ok">${data.saved} costos guardados (de ${data.rows_parsed} filas leídas).</div>`;
+      input.value = '';
+      metricsLoaded = false;
+      await loadCosts();
+    } catch(e) {
+      msg.innerHTML = `<div class="msg err">${e.message}</div>`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Subir archivo';
+    }
+  }
+
+  async function addCost() {
+    if(!ACCOUNT_ID) return;
+    const sku = (document.getElementById('manual-sku').value || '').trim();
+    const cost = parseFloat(document.getElementById('manual-cost').value);
+    const fecha = document.getElementById('manual-fecha').value || '';
+    const ivaRaw = document.getElementById('manual-iva').value;
+    const ivaRate = ivaRaw === '' ? 21 : parseFloat(ivaRaw);
+    const qtyRaw = document.getElementById('manual-qty').value;
+    const msg = document.getElementById('add-msg');
+    if(!sku || isNaN(cost) || cost <= 0) {
+      msg.innerHTML = '<div class="msg err">SKU y costo válido son obligatorios.</div>';
+      return;
+    }
+    if(isNaN(ivaRate) || ivaRate < 0 || ivaRate > 100) {
+      msg.innerHTML = '<div class="msg err">Tasa de IVA inválida (0 a 100).</div>';
+      return;
+    }
+    const form = new FormData();
+    form.append('sku', sku);
+    form.append('cost', String(cost));
+    if(fecha) form.append('valid_from', fecha);
+    form.append('iva_rate', String(ivaRate));
+    if(qtyRaw !== '') form.append('qty', qtyRaw);
+    try {
+      const r = await fetch(`/api/costos/${ACCOUNT_ID}`, { method: 'POST', body: form });
+      if(!r.ok) throw new Error('Error al guardar');
+      msg.innerHTML = '<div class="msg ok">Guardado.</div>';
+      document.getElementById('manual-sku').value = '';
+      document.getElementById('manual-cost').value = '';
+      document.getElementById('manual-fecha').value = '';
+      document.getElementById('manual-iva').value = '21';
+      document.getElementById('manual-qty').value = '';
+      metricsLoaded = false;
+      await loadCosts();
+    } catch(e) {
+      msg.innerHTML = `<div class="msg err">${e.message}</div>`;
+    }
+  }
+
+  async function deleteCost(sku, validFrom) {
+    if(!confirm(`¿Eliminar el costo de ${sku} (vigente desde ${validFrom})?`)) return;
+    try {
+      const url = `/api/costos/${ACCOUNT_ID}/${encodeURIComponent(sku)}?valid_from=${encodeURIComponent(validFrom)}`;
+      const r = await fetch(url, { method: 'DELETE' });
+      if(!r.ok) throw new Error('Error');
+      metricsLoaded = false;
+      await loadCosts();
+    } catch(e) {
+      alert(e.message);
+    }
+  }
+
+  // ─── Métricas de compra ───
+  const MONTH_NAMES = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
+  let metricsItems = null;
+  let metricsLoaded = false;
+  const METRICS_OPEN = new Set(); // claves de nodos expandidos, ej. "2026", "2026|7", "2026|7|3"
+
+  async function loadMetrics() {
+    if (!ACCOUNT_ID) return;
+    metricsLoaded = true;
+    const tbody = document.getElementById('metrics-tbody');
+    tbody.innerHTML = '<tr><td colspan="4" class="empty">Cargando...</td></tr>';
+    try {
+      const r = await fetch(`/api/costos/${ACCOUNT_ID}/metrics`);
+      if (!r.ok) throw new Error('Error al cargar');
+      const data = await r.json();
+      metricsItems = data.items || [];
+      renderMetricsTree();
+    } catch (e) {
+      tbody.innerHTML = `<tr><td colspan="4" class="empty">Error: ${e.message}</td></tr>`;
+    }
+  }
+
+  function buildMetricsTree(items) {
+    // year -> month -> week -> sku -> {qty, sinIva, conIva}
+    const tree = {};
+    for (const it of items) {
+      const y = tree[it.year] || (tree[it.year] = {});
+      const m = y[it.month] || (y[it.month] = {});
+      const w = m[it.week] || (m[it.week] = {});
+      const s = w[it.sku] || (w[it.sku] = { qty: 0, sinIva: 0, conIva: 0 });
+      s.qty += it.qty;
+      s.sinIva += it.total_sin_iva;
+      s.conIva += it.total_con_iva;
+    }
+    return tree;
+  }
+
+  function sumLeaves(node, hops) {
+    // hops = niveles de diccionario que faltan bajar hasta llegar a la hoja
+    // {qty,sinIva,conIva}: 3 desde un año (mes->semana->sku->hoja), 2 desde
+    // un mes (semana->sku->hoja), 1 desde una semana (sku->hoja).
+    if (hops === 0) return node;
+    let qty = 0, sinIva = 0, conIva = 0;
+    for (const k in node) {
+      const child = sumLeaves(node[k], hops - 1);
+      qty += child.qty; sinIva += child.sinIva; conIva += child.conIva;
+    }
+    return { qty, sinIva, conIva };
+  }
+
+  function renderMetricsTree() {
+    const tbody = document.getElementById('metrics-tbody');
+    if (!metricsItems) return;
+    const filter = (document.getElementById('metrics-filter-sku').value || '').trim().toUpperCase();
+    const items = filter ? metricsItems.filter(it => it.sku.toUpperCase().includes(filter)) : metricsItems;
+    document.getElementById('metrics-count-label').textContent =
+      `${metricsItems.length} entrada${metricsItems.length === 1 ? '' : 's'} de compra`;
+    if (!items.length) {
+      tbody.innerHTML = `<tr><td colspan="4" class="empty">${filter ? 'Sin resultados.' : 'Todavía no hay costos con cantidad cargada.'}</td></tr>`;
+      return;
+    }
+    const tree = buildMetricsTree(items);
+    const rows = [];
+    const years = Object.keys(tree).sort((a, b) => b - a);
+    for (const y of years) {
+      const yKey = `${y}`;
+      const yTot = sumLeaves(tree[y], 3);
+      rows.push(treeRow(1, yKey, y, yTot, years.length));
+      if (!METRICS_OPEN.has(yKey)) continue;
+      const months = Object.keys(tree[y]).sort((a, b) => a - b);
+      for (const m of months) {
+        const mKey = `${y}|${m}`;
+        const mTot = sumLeaves(tree[y][m], 2);
+        rows.push(treeRow(2, mKey, MONTH_NAMES[m - 1], mTot));
+        if (!METRICS_OPEN.has(mKey)) continue;
+        const weeks = Object.keys(tree[y][m]).sort((a, b) => a - b);
+        for (const w of weeks) {
+          const wKey = `${y}|${m}|${w}`;
+          const wTot = sumLeaves(tree[y][m][w], 1);
+          rows.push(treeRow(3, wKey, `Semana ${w}`, wTot));
+          if (!METRICS_OPEN.has(wKey)) continue;
+          const skus = Object.keys(tree[y][m][w]).sort();
+          for (const sku of skus) {
+            rows.push(treeRow(4, null, sku, tree[y][m][w][sku]));
+          }
+        }
+      }
+    }
+    tbody.innerHTML = rows.join('');
+  }
+
+  function treeRow(level, key, label, tot) {
+    const isLeaf = level === 4;
+    const open = key && METRICS_OPEN.has(key);
+    const toggle = isLeaf ? '' : `<span class="tree-toggle">${open ? '▼' : '▶'}</span>`;
+    const onclick = isLeaf ? '' : `onclick="toggleMetricsNode('${key}')"`;
+    return `
+      <tr class="tree-row ${isLeaf ? 'leaf' : ''}" ${onclick}>
+        <td class="tree-label-${level}">${toggle}${escHtml(String(label))}</td>
+        <td class="num">${Math.round(tot.qty).toLocaleString('es-AR')}</td>
+        <td class="num">${fmt(tot.sinIva)}</td>
+        <td class="num">${fmt(tot.conIva)}</td>
+      </tr>`;
+  }
+
+  function toggleMetricsNode(key) {
+    if (METRICS_OPEN.has(key)) METRICS_OPEN.delete(key); else METRICS_OPEN.add(key);
+    renderMetricsTree();
+  }
+
+  function escHtml(s) {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  if (ACCOUNT_ID) switchTab(INITIAL_TAB || 'pendientes');
 </script>
 </body>
 </html>

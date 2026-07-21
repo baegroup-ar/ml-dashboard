@@ -1273,7 +1273,7 @@ async def get_shipping_cost(client, shipping_id, headers) -> dict:
 # Ruta de cada pestaña (para mandar al usuario a la primera que tenga permitida).
 PAGE_ROUTES = {
     "dashboard": "/dashboard",
-    "costos": "/costos",
+    "costos": "/compras",
     "envios_flex": "/costos/envios-flex",
     "descuentos": "/descuentos",
     "ranking": "/ranking",
@@ -1855,24 +1855,10 @@ def parse_csv_costs(content: bytes) -> list:
 
 
 @app.get("/costos", response_class=HTMLResponse)
-async def costos_page(request: Request):
-    """Costos (CMV) no tiene selector de cuenta: se comparte entre las cuentas
-    del dueño (_cost_account_id_for), así que -igual que Compras y Margen-
-    trabaja siempre sobre la cuenta ancla (_margen_account_id)."""
-    user_id = get_session_user_id(request)
-    if not user_id:
-        return RedirectResponse("/")
-    user = get_user(user_id)
-    _r = _page_redirect(user, "costos")
-    if _r:
-        return _r
-    accounts = get_visible_accounts(user_id, user)
-    accounts = await refresh_visible_account_nicknames(accounts)
-    account_id = _margen_account_id(accounts)
-    return templates.TemplateResponse("costos.html", {
-        "request": request, "user": user, "account_id": account_id,
-        "perms": user_permissions(user),
-    })
+async def costos_page_redirect(request: Request):
+    """Costos se fusionó con Compras (commit de reorganización): esta ruta
+    queda solo por compatibilidad con links/favoritos viejos."""
+    return RedirectResponse("/compras?tab=costos")
 
 
 @app.get("/api/costos/template")
@@ -2496,22 +2482,41 @@ async def api_compras_upload(request: Request, account_id: int):
 
 @app.get("/compras", response_class=HTMLResponse)
 async def compras_page(request: Request):
-    """Compras no tiene selector de cuenta: los costos CMV se comparten entre
-    las cuentas del dueño (_cost_account_id_for), así que -igual que Margen-
-    trabaja siempre sobre la cuenta ancla (_margen_account_id)."""
+    """Compras y Costos (CMV) viven en una sola página con sub-solapas
+    (Métricas / Costos / Posible Compra) desde la reorganización; el acceso
+    lo da cualquiera de los dos permisos ('compras' o 'costos', legado de
+    cuando eran páginas separadas). Sin selector de cuenta: los costos CMV
+    se comparten entre las cuentas del dueño (_cost_account_id_for), así
+    que -igual que Margen- trabaja siempre sobre la cuenta ancla
+    (_margen_account_id)."""
     user_id = get_session_user_id(request)
     if not user_id:
         return RedirectResponse("/")
     user = get_user(user_id)
-    _r = _page_redirect(user, "compras")
-    if _r:
-        return _r
+    perms = user_permissions(user)
+    has_compras = "compras" in perms
+    has_costos = "costos" in perms
+    if not has_compras and not has_costos:
+        landing = _landing_path(user)
+        if landing and landing != "/compras":
+            return RedirectResponse(landing)
+        raise HTTPException(403, "No tenés permiso para acceder a esta sección")
+    requested_tab = request.query_params.get("tab")
+    valid_tabs = {"metricas", "costos", "pendientes"}
+    if requested_tab not in valid_tabs:
+        requested_tab = None
+    if requested_tab == "costos" and not has_costos:
+        requested_tab = None
+    if requested_tab == "pendientes" and not has_compras:
+        requested_tab = None
+    active_tab = requested_tab or ("pendientes" if has_compras else "costos")
     accounts = get_visible_accounts(user_id, user)
     accounts = await refresh_visible_account_nicknames(accounts)
     account_id = _margen_account_id(accounts)
     return templates.TemplateResponse("compras.html", {
         "request": request, "user": user, "account_id": account_id,
-        "perms": user_permissions(user),
+        "perms": perms, "active_tab": active_tab,
+        "has_compras": has_compras, "has_costos": has_costos,
     })
 
 
