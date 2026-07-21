@@ -2027,6 +2027,105 @@ async def api_costos_list(request: Request, account_id: int):
     }
 
 
+# ─── Métricas de compra: semana comercial (lunes a sábado, domingo no cuenta) ───
+# Cada bloque lunes-sábado se le asigna al año-mes donde caen más de sus 6 días
+# (si el 1° del mes no es lunes, el bloque que lo contiene puede "pertenecer"
+# al mes anterior si ese mes se queda con más días del bloque; simétricamente
+# el último bloque del mes puede pertenecer al mes siguiente). Las semanas se
+# numeran 1..N en orden dentro del mes dueño de cada bloque. Verificado contra
+# ejemplos reales: julio 2026 (1° miércoles) da 5 semanas (1-4, 6-11, 13-18,
+# 20-25, 27-31); agosto 2026 (1° sábado) da 4 semanas (3-8, 10-15, 17-22, 24-29)
+# porque el bloque del 1/8 se lo queda julio y el del 31/8 se lo queda septiembre.
+_WEEK_TAG_CACHE: dict = {}
+
+
+def _business_week_block(d: date):
+    """(lunes_del_bloque, [6 fechas lunes..sábado]) que contiene a `d`.
+    Un domingo se adjudica al bloque que cierra el sábado anterior."""
+    if d.weekday() == 6:  # domingo
+        d = d - timedelta(days=1)
+    block_start = d - timedelta(days=d.weekday())
+    return block_start, [block_start + timedelta(days=i) for i in range(6)]
+
+
+def _business_week_owning_month(days6):
+    counts = Counter((bd.year, bd.month) for bd in days6)
+    return max(counts.items(), key=lambda kv: (kv[1], kv[0]))[0]
+
+
+def _business_week_tags_for_month(year: int, month: int) -> dict:
+    """{fecha: n_semana} de todos los días de los bloques lun-sáb 'dueños'
+    de este año-mes (puede incluir un puñado de días del mes vecino cuando
+    ese bloque cruza el límite de mes pero la mayoría cae acá)."""
+    key = (year, month)
+    if key in _WEEK_TAG_CACHE:
+        return _WEEK_TAG_CACHE[key]
+    first = date(year, month, 1)
+    last = date(year, month, _calmod.monthrange(year, month)[1])
+    d = first - timedelta(days=8)
+    d = d - timedelta(days=d.weekday())  # alinear a lunes
+    scan_end = last + timedelta(days=8)
+    owned_blocks = []
+    while d <= scan_end:
+        days6 = [d + timedelta(days=i) for i in range(6)]
+        if _business_week_owning_month(days6) == key:
+            owned_blocks.append(days6)
+        d += timedelta(days=7)
+    tags = {}
+    for i, days6 in enumerate(owned_blocks, start=1):
+        for bd in days6:
+            tags[bd] = i
+    _WEEK_TAG_CACHE[key] = tags
+    return tags
+
+
+def _business_week_tag(d: date):
+    """(año, mes, semana) 'comercial' de la fecha `d` (ver
+    _business_week_tags_for_month). El año/mes puede diferir del calendario
+    de `d` en los pocos días de borde que un bloque le cede al mes vecino."""
+    _, days6 = _business_week_block(d)
+    year, month = _business_week_owning_month(days6)
+    tags = _business_week_tags_for_month(year, month)
+    return year, month, tags.get(d, 1)
+
+
+@app.get("/api/costos/{account_id}/metrics")
+async def api_costos_metrics(request: Request, account_id: int):
+    """Filas de CMV que vienen de un Ingreso de Compras (qty IS NOT NULL),
+    con el tag de año/mes/semana comercial para armar el pivot en el frontend."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    user = get_user(user_id)
+    cost_aid = _cost_account_id_for(user, account_id)
+    rows = db_fetchall(
+        "SELECT sku, qty, cost, iva_rate, valid_from FROM product_costs"
+        " WHERE account_id=:aid AND qty IS NOT NULL ORDER BY valid_from",
+        {"aid": cost_aid},
+    )
+    items = []
+    for r in rows:
+        vf = r["valid_from"]
+        if not hasattr(vf, "year"):
+            continue
+        year, month, week = _business_week_tag(vf)
+        qty = float(r["qty"])
+        cost = float(r["cost"])
+        iva_rate = float(r["iva_rate"]) if r["iva_rate"] is not None else 21.0
+        total_sin_iva = qty * cost
+        items.append({
+            "sku": r["sku"], "qty": qty, "cost": cost, "iva_rate": iva_rate,
+            "valid_from": vf.isoformat(),
+            "year": year, "month": month, "week": week,
+            "total_sin_iva": total_sin_iva,
+            "total_con_iva": total_sin_iva * (1 + iva_rate / 100.0),
+        })
+    return {"items": items}
+
+
 @app.post("/api/costos/{account_id}")
 async def api_costos_upsert(
     request: Request, account_id: int,
@@ -2532,105 +2631,6 @@ async def api_compras_ingreso(request: Request, account_id: int):
     )
     _invalidate_all_user_accounts_cache(user, account_id)
     return {"ok": True, "ingresados": saved}
-
-
-# ─── Métricas de compra: semana comercial (lunes a sábado, domingo no cuenta) ───
-# Cada bloque lunes-sábado se le asigna al año-mes donde caen más de sus 6 días
-# (si el 1° del mes no es lunes, el bloque que lo contiene puede "pertenecer"
-# al mes anterior si ese mes se queda con más días del bloque; simétricamente
-# el último bloque del mes puede pertenecer al mes siguiente). Las semanas se
-# numeran 1..N en orden dentro del mes dueño de cada bloque. Verificado contra
-# ejemplos reales: julio 2026 (1° miércoles) da 5 semanas (1-4, 6-11, 13-18,
-# 20-25, 27-31); agosto 2026 (1° sábado) da 4 semanas (3-8, 10-15, 17-22, 24-29)
-# porque el bloque del 1/8 se lo queda julio y el del 31/8 se lo queda septiembre.
-_WEEK_TAG_CACHE: dict = {}
-
-
-def _business_week_block(d: date):
-    """(lunes_del_bloque, [6 fechas lunes..sábado]) que contiene a `d`.
-    Un domingo se adjudica al bloque que cierra el sábado anterior."""
-    if d.weekday() == 6:  # domingo
-        d = d - timedelta(days=1)
-    block_start = d - timedelta(days=d.weekday())
-    return block_start, [block_start + timedelta(days=i) for i in range(6)]
-
-
-def _business_week_owning_month(days6):
-    counts = Counter((bd.year, bd.month) for bd in days6)
-    return max(counts.items(), key=lambda kv: (kv[1], kv[0]))[0]
-
-
-def _business_week_tags_for_month(year: int, month: int) -> dict:
-    """{fecha: n_semana} de todos los días de los bloques lun-sáb 'dueños'
-    de este año-mes (puede incluir un puñado de días del mes vecino cuando
-    ese bloque cruza el límite de mes pero la mayoría cae acá)."""
-    key = (year, month)
-    if key in _WEEK_TAG_CACHE:
-        return _WEEK_TAG_CACHE[key]
-    first = date(year, month, 1)
-    last = date(year, month, _calmod.monthrange(year, month)[1])
-    d = first - timedelta(days=8)
-    d = d - timedelta(days=d.weekday())  # alinear a lunes
-    scan_end = last + timedelta(days=8)
-    owned_blocks = []
-    while d <= scan_end:
-        days6 = [d + timedelta(days=i) for i in range(6)]
-        if _business_week_owning_month(days6) == key:
-            owned_blocks.append(days6)
-        d += timedelta(days=7)
-    tags = {}
-    for i, days6 in enumerate(owned_blocks, start=1):
-        for bd in days6:
-            tags[bd] = i
-    _WEEK_TAG_CACHE[key] = tags
-    return tags
-
-
-def _business_week_tag(d: date):
-    """(año, mes, semana) 'comercial' de la fecha `d` (ver
-    _business_week_tags_for_month). El año/mes puede diferir del calendario
-    de `d` en los pocos días de borde que un bloque le cede al mes vecino."""
-    _, days6 = _business_week_block(d)
-    year, month = _business_week_owning_month(days6)
-    tags = _business_week_tags_for_month(year, month)
-    return year, month, tags.get(d, 1)
-
-
-@app.get("/api/compras/{account_id}/metrics")
-async def api_compras_metrics(request: Request, account_id: int):
-    """Filas de CMV que vienen de un Ingreso de Compras (qty IS NOT NULL),
-    con el tag de año/mes/semana comercial para armar el pivot en el frontend."""
-    user_id = get_session_user_id(request)
-    if not user_id:
-        raise HTTPException(401)
-    acc = _account_for_user(account_id, user_id)
-    if not acc:
-        raise HTTPException(404)
-    user = get_user(user_id)
-    cost_aid = _cost_account_id_for(user, account_id)
-    rows = db_fetchall(
-        "SELECT sku, qty, cost, iva_rate, valid_from FROM product_costs"
-        " WHERE account_id=:aid AND qty IS NOT NULL ORDER BY valid_from",
-        {"aid": cost_aid},
-    )
-    items = []
-    for r in rows:
-        vf = r["valid_from"]
-        if not hasattr(vf, "year"):
-            continue
-        year, month, week = _business_week_tag(vf)
-        qty = float(r["qty"])
-        cost = float(r["cost"])
-        iva_rate = float(r["iva_rate"]) if r["iva_rate"] is not None else 21.0
-        total_sin_iva = qty * cost
-        items.append({
-            "sku": r["sku"], "qty": qty, "cost": cost, "iva_rate": iva_rate,
-            "valid_from": vf.isoformat(),
-            "year": year, "month": month, "week": week,
-            "total_sin_iva": total_sin_iva,
-            "total_con_iva": total_sin_iva * (1 + iva_rate / 100.0),
-        })
-    return {"items": items}
 
 
 # ════════════════════════ STOCK VALORIZADO ════════════════════════

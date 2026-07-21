@@ -65,6 +65,19 @@
     .search-row input { flex: 1; padding: 7px 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 13px; }
     .count { font-size: 12px; color: #888; }
     .no-accounts { text-align: center; padding: 4rem; color: #888; font-size: 14px; }
+    .tabs { display: flex; gap: 6px; margin-bottom: 14px; }
+    .tab-btn { padding: 8px 18px; border: 1px solid #ddd; border-radius: 8px; background: #fff; font-size: 13px; cursor: pointer; color: #444; }
+    .tab-btn.active { background: #005CFF; color: #fff; border-color: #005CFF; font-weight: 500; }
+    .num { text-align: right; }
+    .tree-row { cursor: pointer; }
+    .tree-row:hover { background: #f9f9f8; }
+    .tree-row.leaf { cursor: default; }
+    .tree-row.leaf:hover { background: transparent; }
+    .tree-toggle { display: inline-block; width: 14px; color: #005CFF; font-size: 11px; }
+    .tree-label-1 { font-weight: 600; }
+    .tree-label-2 { padding-left: 20px; }
+    .tree-label-3 { padding-left: 40px; color: #444; }
+    .tree-label-4 { padding-left: 60px; color: #666; font-size: 12px; }
   </style>
 </head>
 <body>
@@ -120,6 +133,12 @@
   </p>
 
   {% if account_id %}
+  <div class="tabs">
+    <button class="tab-btn active" id="tab-btn-costos" onclick="switchTab('costos')">Costos</button>
+    <button class="tab-btn" id="tab-btn-metricas" onclick="switchTab('metricas')">Métricas de compra</button>
+  </div>
+
+  <div id="panel-costos">
   <div class="card" style="display:flex;align-items:center;justify-content:space-between;">
     <div style="font-size:12px;color:#888;">
       Los costos de CMV se comparten entre todas las cuentas de la empresa: no hace falta elegir cuenta.
@@ -180,6 +199,33 @@
           <tr><td colspan="7" class="empty">Cargando...</td></tr>
         </tbody>
       </table>
+    </div>
+  </div>
+  </div>
+
+  <div id="panel-metricas" style="display:none">
+    <div class="card">
+      <h3>Métricas de compra</h3>
+      <p style="font-size:12px;color:#888;margin-bottom:10px;">
+        Solo cuenta lo que entró por un <b>Ingreso</b> confirmado en <a href="/compras" style="color:#005CFF;">Compras</a>
+        (con cantidad y fecha). Los costos cargados a mano o por Excel acá arriba no tienen cantidad y no entran
+        en estas métricas. La semana es "comercial": lunes a sábado, arranca el primer día hábil del mes y la
+        última semana cierra el último día hábil.
+      </p>
+      <div class="search-row">
+        <input type="text" id="metrics-filter-sku" placeholder="Buscar por SKU..." oninput="renderMetricsTree()" />
+        <span class="count" id="metrics-count-label"></span>
+      </div>
+      <div style="overflow-x:auto;">
+        <table>
+          <thead><tr>
+            <th>Año / Mes / Semana / SKU</th><th class="num">Cantidad</th><th class="num">Total sin IVA</th><th class="num">Total con IVA</th>
+          </tr></thead>
+          <tbody id="metrics-tbody">
+            <tr><td colspan="4" class="empty">Cargando...</td></tr>
+          </tbody>
+        </table>
+      </div>
     </div>
   </div>
   {% else %}
@@ -373,6 +419,128 @@
     } catch(e) {
       alert(e.message);
     }
+  }
+
+  // ─── Métricas de compra ───
+  const MONTH_NAMES = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
+  let metricsItems = null;
+  let metricsLoaded = false;
+  const METRICS_OPEN = new Set(); // claves de nodos expandidos, ej. "2026", "2026|7", "2026|7|3"
+
+  function switchTab(tab) {
+    document.getElementById('panel-costos').style.display = tab === 'costos' ? '' : 'none';
+    document.getElementById('panel-metricas').style.display = tab === 'metricas' ? '' : 'none';
+    document.getElementById('tab-btn-costos').classList.toggle('active', tab === 'costos');
+    document.getElementById('tab-btn-metricas').classList.toggle('active', tab === 'metricas');
+    if (tab === 'metricas' && !metricsLoaded) loadMetrics();
+  }
+
+  async function loadMetrics() {
+    if (!currentAccountId) return;
+    const tbody = document.getElementById('metrics-tbody');
+    tbody.innerHTML = '<tr><td colspan="4" class="empty">Cargando...</td></tr>';
+    try {
+      const r = await fetch(`/api/costos/${currentAccountId}/metrics`);
+      if (!r.ok) throw new Error('Error al cargar');
+      const data = await r.json();
+      metricsItems = data.items || [];
+      metricsLoaded = true;
+      renderMetricsTree();
+    } catch (e) {
+      tbody.innerHTML = `<tr><td colspan="4" class="empty">Error: ${e.message}</td></tr>`;
+    }
+  }
+
+  function buildMetricsTree(items) {
+    // year -> month -> week -> sku -> {qty, sinIva, conIva}
+    const tree = {};
+    for (const it of items) {
+      const y = tree[it.year] || (tree[it.year] = {});
+      const m = y[it.month] || (y[it.month] = {});
+      const w = m[it.week] || (m[it.week] = {});
+      const s = w[it.sku] || (w[it.sku] = { qty: 0, sinIva: 0, conIva: 0 });
+      s.qty += it.qty;
+      s.sinIva += it.total_sin_iva;
+      s.conIva += it.total_con_iva;
+    }
+    return tree;
+  }
+
+  function sumLeaves(node, hops) {
+    // hops = niveles de diccionario que faltan bajar hasta llegar a la hoja
+    // {qty,sinIva,conIva}: 3 desde un año (mes->semana->sku->hoja), 2 desde
+    // un mes (semana->sku->hoja), 1 desde una semana (sku->hoja).
+    if (hops === 0) return node;
+    let qty = 0, sinIva = 0, conIva = 0;
+    for (const k in node) {
+      const child = sumLeaves(node[k], hops - 1);
+      qty += child.qty; sinIva += child.sinIva; conIva += child.conIva;
+    }
+    return { qty, sinIva, conIva };
+  }
+
+  function renderMetricsTree() {
+    const tbody = document.getElementById('metrics-tbody');
+    if (!metricsItems) return;
+    const filter = (document.getElementById('metrics-filter-sku').value || '').trim().toUpperCase();
+    const items = filter ? metricsItems.filter(it => it.sku.toUpperCase().includes(filter)) : metricsItems;
+    document.getElementById('metrics-count-label').textContent =
+      `${metricsItems.length} entrada${metricsItems.length === 1 ? '' : 's'} de compra`;
+    if (!items.length) {
+      tbody.innerHTML = `<tr><td colspan="4" class="empty">${filter ? 'Sin resultados.' : 'Todavía no hay ingresos confirmados de Compras.'}</td></tr>`;
+      return;
+    }
+    const tree = buildMetricsTree(items);
+    const rows = [];
+    const years = Object.keys(tree).sort((a, b) => b - a);
+    for (const y of years) {
+      const yKey = `${y}`;
+      const yTot = sumLeaves(tree[y], 3);
+      rows.push(treeRow(1, yKey, y, yTot, years.length));
+      if (!METRICS_OPEN.has(yKey)) continue;
+      const months = Object.keys(tree[y]).sort((a, b) => a - b);
+      for (const m of months) {
+        const mKey = `${y}|${m}`;
+        const mTot = sumLeaves(tree[y][m], 2);
+        rows.push(treeRow(2, mKey, MONTH_NAMES[m - 1], mTot));
+        if (!METRICS_OPEN.has(mKey)) continue;
+        const weeks = Object.keys(tree[y][m]).sort((a, b) => a - b);
+        for (const w of weeks) {
+          const wKey = `${y}|${m}|${w}`;
+          const wTot = sumLeaves(tree[y][m][w], 1);
+          rows.push(treeRow(3, wKey, `Semana ${w}`, wTot));
+          if (!METRICS_OPEN.has(wKey)) continue;
+          const skus = Object.keys(tree[y][m][w]).sort();
+          for (const sku of skus) {
+            rows.push(treeRow(4, null, sku, tree[y][m][w][sku]));
+          }
+        }
+      }
+    }
+    tbody.innerHTML = rows.join('');
+  }
+
+  function treeRow(level, key, label, tot) {
+    const isLeaf = level === 4;
+    const open = key && METRICS_OPEN.has(key);
+    const toggle = isLeaf ? '' : `<span class="tree-toggle">${open ? '▼' : '▶'}</span>`;
+    const onclick = isLeaf ? '' : `onclick="toggleMetricsNode('${key}')"`;
+    return `
+      <tr class="tree-row ${isLeaf ? 'leaf' : ''}" ${onclick}>
+        <td class="tree-label-${level}">${toggle}${escHtml(String(label))}</td>
+        <td class="num">${Math.round(tot.qty).toLocaleString('es-AR')}</td>
+        <td class="num">${fmt(tot.sinIva)}</td>
+        <td class="num">${fmt(tot.conIva)}</td>
+      </tr>`;
+  }
+
+  function toggleMetricsNode(key) {
+    if (METRICS_OPEN.has(key)) METRICS_OPEN.delete(key); else METRICS_OPEN.add(key);
+    renderMetricsTree();
+  }
+
+  function escHtml(s) {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
   if(currentAccountId) loadCosts();
