@@ -119,22 +119,12 @@
     monto/comisión/envío de ML, que vienen con IVA incluido.
   </p>
 
-  {% if accounts %}
-  <div class="card">
-    <div class="account-bar">
-      <label>Cuenta ML:</label>
-      <select id="account-select" onchange="onAccountChange()">
-        {% set default_nick = 'TIENDA BAE' %}
-        {% set has_default = accounts | selectattr('nickname', 'equalto', default_nick) | list | length > 0 %}
-        {% for acc in accounts %}
-        <option value="{{ acc.id }}" {% if acc.nickname == default_nick or (not has_default and loop.first) %}selected{% endif %}>{{ acc.nickname }}</option>
-        {% endfor %}
-      </select>
-      <span class="count" id="count-label"></span>
+  {% if account_id %}
+  <div class="card" style="display:flex;align-items:center;justify-content:space-between;">
+    <div style="font-size:12px;color:#888;">
+      Los costos de CMV se comparten entre todas las cuentas de la empresa: no hace falta elegir cuenta.
     </div>
-    <div style="font-size:12px;color:#888;margin-top:8px;">
-      Los costos se guardan por cuenta. Cada cuenta de ML tiene su propio listado independiente.
-    </div>
+    <span class="count" id="count-label"></span>
   </div>
 
   <div class="card">
@@ -202,19 +192,13 @@
 
 <script>
   const fmt = n => '$' + Number(n).toLocaleString('es-AR', {minimumFractionDigits:2, maximumFractionDigits:2});
-  let currentAccountId = document.getElementById('account-select')?.value;
+  const currentAccountId = "{{ account_id }}";
   let allItems = [];
-
-  function onAccountChange() {
-    currentAccountId = document.getElementById('account-select').value;
-    loadCosts();
-  }
 
   function downloadCostos(e) {
     if (e) e.preventDefault();
-    const aid = document.getElementById('account-select').value;
-    if (!aid) return;
-    window.location = `/api/costos/${aid}/export`;
+    if (!currentAccountId) return;
+    window.location = `/api/costos/${currentAccountId}/export`;
   }
 
   async function loadCosts() {
