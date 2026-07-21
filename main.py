@@ -297,9 +297,9 @@ def init_db():
         conn.execute(text("ALTER TABLE product_costs ADD COLUMN IF NOT EXISTS valid_from DATE"))
         conn.execute(text("ALTER TABLE product_costs ADD COLUMN IF NOT EXISTS iva_included BOOLEAN DEFAULT FALSE"))
         conn.execute(text("ALTER TABLE product_costs ADD COLUMN IF NOT EXISTS iva_rate NUMERIC(5,2) DEFAULT 21"))
-        # qty: solo la llenan los ingresos de Compras (marca la fila como compra
-        # real, sin_iva/con_iva calculables); costos cargados a mano/Excel/PVP
-        # quedan con qty NULL y no cuentan para las Métricas de compra.
+        # qty: opcional, se carga en Costos (a mano o por Excel) o vía un
+        # Ingreso confirmado en Compras. Si está cargada, la fila cuenta como
+        # una compra real para las Métricas de compra; si no, queda NULL.
         conn.execute(text("ALTER TABLE product_costs ADD COLUMN IF NOT EXISTS qty NUMERIC(12,2)"))
         conn.execute(text("UPDATE product_costs SET valid_from = CAST(updated_at AS DATE) WHERE valid_from IS NULL"))
         conn.execute(text("ALTER TABLE product_costs ALTER COLUMN valid_from SET NOT NULL"))
@@ -1638,9 +1638,10 @@ def cost_with_iva(entry: dict) -> float:
 
 def db_save_product_costs(account_id: int, items: list):
     """Inserta/actualiza lista de {sku, cost, iva_rate, valid_from, qty}.
-    `qty` es opcional: solo lo cargan los ingresos de Compras (marca la fila
-    como una compra real para las Métricas). Si no viene, NO se borra un qty
-    ya guardado ese mismo SKU+fecha (COALESCE en el UPDATE)."""
+    `qty` es opcional (se carga en Costos a mano/Excel o vía un Ingreso de
+    Compras) y marca la fila como una compra real para las Métricas. Si no
+    viene, NO se borra un qty ya guardado ese mismo SKU+fecha (COALESCE en
+    el UPDATE)."""
     if not items:
         return 0
     params = []
@@ -1743,7 +1744,9 @@ def _find_col(header: list, keywords: list) -> Optional[int]:
 
 
 def parse_excel_costs(content: bytes) -> list:
-    """Devuelve [{sku, cost, iva_included, valid_from}, ...] desde xlsx."""
+    """Devuelve [{sku, cost, iva_rate, valid_from, qty}, ...] desde xlsx.
+    `qty` (columna Cantidad) es opcional: si se carga, esa fila cuenta como
+    una compra real para las Métricas (ver product_costs.qty)."""
     import io
     from openpyxl import load_workbook
     wb = load_workbook(io.BytesIO(content), data_only=True, read_only=True)
@@ -1767,6 +1770,7 @@ def parse_excel_costs(content: bytes) -> list:
     cost_idx = _find_col(header, ["costo", "cost", "precio"])
     fecha_idx = _find_col(header, ["fecha", "date", "vigencia", "desde"])
     iva_idx = _find_col(header, ["iva"])
+    qty_idx = _find_col(header, ["cantidad", "qty", "cant"])
     if sku_idx is None or cost_idx is None:
         return []
     items = []
@@ -1780,17 +1784,23 @@ def parse_excel_costs(content: bytes) -> list:
             continue
         fecha = _parse_date_cell(row[fecha_idx]) if fecha_idx is not None and len(row) > fecha_idx else None
         iva_rate = _parse_iva_rate_cell(row[iva_idx]) if iva_idx is not None and len(row) > iva_idx else 21.0
+        qty = row[qty_idx] if qty_idx is not None and len(row) > qty_idx else None
+        try:
+            qty = float(qty) if qty not in (None, "") else None
+        except (TypeError, ValueError):
+            qty = None
         items.append({
             "sku": str(sku).strip(),
             "cost": cost,
             "valid_from": fecha or today_iso,
             "iva_rate": iva_rate,
+            "qty": qty,
         })
     return items
 
 
 def parse_csv_costs(content: bytes) -> list:
-    """Devuelve [{sku, cost, iva_included, valid_from}, ...] desde csv."""
+    """Devuelve [{sku, cost, iva_rate, valid_from, qty}, ...] desde csv."""
     import csv, io
     text_content = content.decode("utf-8-sig", errors="ignore")
     sample = text_content[:2048]
@@ -1804,6 +1814,7 @@ def parse_csv_costs(content: bytes) -> list:
     cost_idx = _find_col(header, ["costo", "cost", "precio"])
     fecha_idx = _find_col(header, ["fecha", "date", "vigencia", "desde"])
     iva_idx = _find_col(header, ["iva"])
+    qty_idx = _find_col(header, ["cantidad", "qty", "cant"])
     if sku_idx is None or cost_idx is None:
         return []
     items = []
@@ -1825,10 +1836,20 @@ def parse_csv_costs(content: bytes) -> list:
             continue
         fecha = _parse_date_cell(row[fecha_idx]) if fecha_idx is not None and len(row) > fecha_idx else None
         iva_rate = _parse_iva_rate_cell(row[iva_idx]) if iva_idx is not None and len(row) > iva_idx else 21.0
+        raw_qty = (row[qty_idx] or "").strip() if qty_idx is not None and len(row) > qty_idx else ""
+        if sep == ";":
+            raw_qty = raw_qty.replace(".", "").replace(",", ".")
+        else:
+            raw_qty = raw_qty.replace(",", "")
+        try:
+            qty = float(raw_qty) if raw_qty else None
+        except ValueError:
+            qty = None
         items.append({
             "sku": sku, "cost": cost,
             "valid_from": fecha or today_iso,
             "iva_rate": iva_rate,
+            "qty": qty,
         })
     return items
 
@@ -1870,7 +1891,7 @@ async def api_costos_template(request: Request):
     ws = wb.active
     ws.title = "Costos"
 
-    headers = ["SKU", "Costo", "Fecha", "IVA"]
+    headers = ["SKU", "Costo", "Fecha", "IVA", "Cantidad"]
     ws.append(headers)
     # Estilizar header
     header_fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
@@ -1883,9 +1904,9 @@ async def api_costos_template(request: Request):
 
     # Filas de ejemplo
     examples = [
-        ["SOP68-443", 5000.00, "2025-01-15", 21],
-        ["SOP78-446", 8500.50, "2025-01-15", 10.5],
-        ["SOP22G-44T", 3200.00, "2025-02-01", 0],   # Exento
+        ["SOP68-443", 5000.00, "2025-01-15", 21, 100],
+        ["SOP78-446", 8500.50, "2025-01-15", 10.5, ""],
+        ["SOP22G-44T", 3200.00, "2025-02-01", 0, 50],   # Exento
     ]
     for row in examples:
         ws.append(row)
@@ -1895,6 +1916,7 @@ async def api_costos_template(request: Request):
     ws.column_dimensions["B"].width = 14
     ws.column_dimensions["C"].width = 14
     ws.column_dimensions["D"].width = 10
+    ws.column_dimensions["E"].width = 12
 
     # Hoja de instrucciones
     ws2 = wb.create_sheet("Instrucciones")
@@ -1906,6 +1928,7 @@ async def api_costos_template(request: Request):
         ["Costo", "Costo SIN IVA (el sistema le aplica la tasa de IVA automáticamente)."],
         ["Fecha", "Fecha de vigencia desde. Formato YYYY-MM-DD o DD/MM/YYYY. Si la dejás vacía toma hoy."],
         ["IVA", "Tasa de IVA: 21, 10.5, 0 (exento). También acepta 'Exento'. Default 21."],
+        ["Cantidad", "Opcional: cantidad comprada. Si la cargás, esta fila cuenta como una compra real en Métricas de compra."],
         [""],
         ["Notas:"],
         ["", "Cada combinación SKU + Fecha es una versión histórica."],
@@ -1940,7 +1963,7 @@ async def api_costos_export(request: Request, account_id: int):
     user = get_user(user_id)
     cost_aid = _cost_account_id_for(user, account_id)
     rows = db_fetchall(
-        "SELECT sku, cost, iva_rate, valid_from FROM product_costs"
+        "SELECT sku, cost, iva_rate, valid_from, qty FROM product_costs"
         " WHERE account_id=:aid ORDER BY sku, valid_from DESC",
         {"aid": cost_aid},
     )
@@ -1951,10 +1974,10 @@ async def api_costos_export(request: Request, account_id: int):
     wb = Workbook()
     ws = wb.active
     ws.title = "Costos"
-    ws.append(["SKU", "Costo", "Fecha", "IVA"])
+    ws.append(["SKU", "Costo", "Fecha", "IVA", "Cantidad"])
     fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
     font = Font(bold=True)
-    for col in range(1, 5):
+    for col in range(1, 6):
         c = ws.cell(row=1, column=col)
         c.fill = fill
         c.font = font
@@ -1967,20 +1990,23 @@ async def api_costos_export(request: Request, account_id: int):
             float(r.get("cost") or 0),
             vf_str,
             float(r["iva_rate"] if r.get("iva_rate") is not None else 21),
+            float(r["qty"]) if r.get("qty") is not None else "",
         ])
     ws.column_dimensions["A"].width = 20
     ws.column_dimensions["B"].width = 14
     ws.column_dimensions["C"].width = 14
     ws.column_dimensions["D"].width = 10
+    ws.column_dimensions["E"].width = 12
     ws2 = wb.create_sheet("Instrucciones")
     info = [
         ["Cómo modificar tus costos desde Excel"],
         [""],
-        ["1.", "Editá esta planilla: cambiá costos, fechas o IVA, agregá SKUs nuevos."],
+        ["1.", "Editá esta planilla: cambiá costos, fechas, IVA o cantidad, agregá SKUs nuevos."],
         ["2.", "El Costo va SIN IVA (el sistema aplica la tasa automáticamente)."],
-        ["3.", "Mantené las columnas SKU / Costo / Fecha / IVA (en ese orden)."],
+        ["3.", "Mantené las columnas SKU / Costo / Fecha / IVA / Cantidad (en ese orden)."],
         ["4.", "Subila desde 'Cargar desde Excel o CSV' con 'Subir archivo'."],
         ["5.", "Cada SKU + Fecha es una versión histórica; las ventas toman la vigente."],
+        ["6.", "Cantidad es opcional: si la cargás, esa fila cuenta como compra real en Métricas de compra."],
     ]
     for r in info:
         ws2.append(r)
@@ -2009,7 +2035,7 @@ async def api_costos_list(request: Request, account_id: int):
     user = get_user(user_id)
     cost_aid = _cost_account_id_for(user, account_id)
     rows = db_fetchall(
-        "SELECT sku, cost, iva_rate, valid_from, updated_at FROM product_costs"
+        "SELECT sku, cost, iva_rate, valid_from, qty, updated_at FROM product_costs"
         " WHERE account_id=:aid ORDER BY valid_from DESC, sku",
         {"aid": cost_aid},
     )
@@ -2020,6 +2046,7 @@ async def api_costos_list(request: Request, account_id: int):
                 "cost": float(r["cost"]),
                 "iva_rate": float(r["iva_rate"] if r["iva_rate"] is not None else 21),
                 "valid_from": r["valid_from"].isoformat() if hasattr(r["valid_from"], "isoformat") else str(r["valid_from"]),
+                "qty": float(r["qty"]) if r.get("qty") is not None else None,
                 "updated_at": r["updated_at"].isoformat() if r.get("updated_at") else None,
             }
             for r in rows
@@ -2091,8 +2118,9 @@ def _business_week_tag(d: date):
 
 @app.get("/api/costos/{account_id}/metrics")
 async def api_costos_metrics(request: Request, account_id: int):
-    """Filas de CMV que vienen de un Ingreso de Compras (qty IS NOT NULL),
-    con el tag de año/mes/semana comercial para armar el pivot en el frontend."""
+    """Filas de CMV con cantidad cargada (qty IS NOT NULL) -sea a mano, por
+    Excel en Costos, o vía un Ingreso confirmado en Compras-, con el tag de
+    año/mes/semana comercial para armar el pivot en el frontend."""
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
@@ -2133,7 +2161,10 @@ async def api_costos_upsert(
     cost: float = Form(...),
     valid_from: Optional[str] = Form(None),
     iva_rate: Optional[str] = Form(None),
+    qty: Optional[str] = Form(None),
 ):
+    """`qty` (Cantidad) es opcional: si se carga, esta entry cuenta como una
+    compra real para las Métricas de compra (product_costs.qty)."""
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
@@ -2146,10 +2177,14 @@ async def api_costos_upsert(
         rate_val = float(iva_rate) if iva_rate is not None and iva_rate != "" else 21.0
     except ValueError:
         rate_val = 21.0
+    try:
+        qty_val = float(qty) if qty is not None and qty != "" else None
+    except ValueError:
+        qty_val = None
     saved = db_save_product_costs(cost_aid, [{
         "sku": sku, "cost": cost,
         "valid_from": valid_from or datetime.utcnow().date().isoformat(),
-        "iva_rate": rate_val,
+        "iva_rate": rate_val, "qty": qty_val,
     }])
     _invalidate_all_user_accounts_cache(user, account_id)
     return {"ok": True, "saved": saved}
@@ -2164,10 +2199,13 @@ async def api_costos_edit(
     cost: float = Form(...),
     valid_from: str = Form(...),
     iva_rate: Optional[str] = Form(None),
+    qty: Optional[str] = Form(None),
 ):
     """Edita una entry de costo: borra la vieja (old_sku, old_valid_from)
     e inserta la nueva. Sirve para corregir errores de carga incluyendo
-    cambios de SKU o fecha."""
+    cambios de SKU o fecha. `qty` viaja siempre desde el frontend (el valor
+    actual de la fila, editado o no) para no perder la cantidad al borrar
+    e insertar de nuevo."""
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
@@ -2180,6 +2218,10 @@ async def api_costos_edit(
         rate_val = float(iva_rate) if iva_rate is not None and iva_rate != "" else 21.0
     except ValueError:
         rate_val = 21.0
+    try:
+        qty_val = float(qty) if qty is not None and qty != "" else None
+    except ValueError:
+        qty_val = None
     # Borrar entry vieja
     db_execute(
         "DELETE FROM product_costs WHERE account_id=:aid AND sku=:sku AND valid_from=:vf",
@@ -2189,7 +2231,7 @@ async def api_costos_edit(
     saved = db_save_product_costs(cost_aid, [{
         "sku": sku, "cost": cost,
         "valid_from": valid_from,
-        "iva_rate": rate_val,
+        "iva_rate": rate_val, "qty": qty_val,
     }])
     _invalidate_all_user_accounts_cache(user, account_id)
     return {"ok": True, "saved": saved}
