@@ -1991,7 +1991,7 @@ async def api_costos_list(request: Request, account_id: int):
     cost_aid = _cost_account_id_for(user, account_id)
     rows = db_fetchall(
         "SELECT sku, cost, iva_rate, valid_from, updated_at FROM product_costs"
-        " WHERE account_id=:aid ORDER BY sku, valid_from DESC",
+        " WHERE account_id=:aid ORDER BY valid_from DESC, sku",
         {"aid": cost_aid},
     )
     return {
