@@ -2489,7 +2489,9 @@ async def api_compras_ingreso(request: Request, account_id: int):
         return {"ok": True, "ingresados": 0}
     today_iso = datetime.utcnow().date().isoformat()
     saved = db_save_product_costs(cost_aid, [
-        {"sku": r["sku"], "cost": float(r["cost"]), "iva_rate": float(r["iva_rate"] or 21), "valid_from": today_iso}
+        {"sku": r["sku"], "cost": float(r["cost"]),
+         "iva_rate": float(r["iva_rate"]) if r["iva_rate"] is not None else 21.0,
+         "valid_from": today_iso}
         for r in rows
     ])
     del_placeholders, del_params = _in_placeholders([r["id"] for r in rows], "d")
@@ -4157,7 +4159,8 @@ def _margen_current_cost(versioned: dict, sku: str, today_iso: str, variant_map=
     combo/variante (ej. SOP68-443-3C-CE → SOP68-443) herede el costo real."""
     entry = find_cost_for_date(versioned, sku, today_iso)
     if entry:
-        return float(entry["cost"]), float(entry.get("iva_rate") or 21)
+        iva = entry.get("iva_rate")
+        return float(entry["cost"]), (float(iva) if iva is not None else 21.0)
     if variant_map:
         originals = variant_map.get(sku) or variant_map.get((sku or "").upper())
         if originals:
@@ -4170,7 +4173,8 @@ def _margen_current_cost(versioned: dict, sku: str, today_iso: str, variant_map=
                     total += float(oe["cost"]) * float(qty or 1)
                     found = True
                     if rate is None:
-                        rate = float(oe.get("iva_rate") or 21)
+                        iva = oe.get("iva_rate")
+                        rate = float(iva) if iva is not None else 21.0
             if found:
                 return total, (rate if rate is not None else 21.0)
     return None, 21.0
@@ -4227,7 +4231,8 @@ def _margen_resolve_cost(sku, manual_map_u, versioned, today_iso, variant_map_u,
     # 3) CMV propio directo (solo si NO está asociado en base SKU)
     e = _cmv_direct_entry(versioned, su, today_iso)
     if e:
-        return float(e["cost"]), float(e.get("iva_rate") or 21)
+        iva = e.get("iva_rate")
+        return float(e["cost"]), (float(iva) if iva is not None else 21.0)
     # 4) sufijo de cuota → base (recursivo: capta manual o CMV del base)
     for fb in _sku_fallbacks(su):
         c, iva = _margen_resolve_cost(fb, manual_map_u, versioned, today_iso, variant_map_u, seen)
