@@ -262,7 +262,7 @@
     </div>
     <div class="row" style="margin-bottom:8px;">
       <button class="green" onclick="importCostos()">↻ Importar costos (CMV)</button>
-      <span style="font-size:11px;color:#888;">El <b>costo se guarda</b> (azul = manual; vacío = vuelve a CMV). La <b>Com. var %</b> se hereda del SKU original (base SKU) y se guarda si la editás; vacía = vuelve a heredar. Com. fija y envío se editan solo para simular. “Importar costos” vuelve a CMV los SKU que estén en la base de costos; los manuales (sin CMV) se mantienen.</span>
+      <span style="font-size:11px;color:#888;">El <b>costo se guarda</b> (azul = manual; vacío = vuelve a CMV). La <b>Com. var %</b> se hereda del SKU original (base SKU) y se guarda si la editás; vacía = vuelve a heredar. Com. fija sale de los tramos configurados; envío se edita solo para simular. “Importar costos” vuelve a CMV los SKU que estén en la base de costos; los manuales (sin CMV) se mantienen.</span>
     </div>
     <div style="overflow-x:auto;">
       <table>
@@ -296,7 +296,6 @@ let ITEMS = [];
 let CONFIG = {};
 let DEFAULTS = {};
 let TAB = 'resumen';
-const FIJA_OVERRIDE = new Map();    // sku -> com. fija $ s/IVA simulada (no persiste)
 const ENVIO_OVERRIDE = new Map();   // sku -> envío $ s/IVA simulado (no persiste)
 const SEL = { resumen: new Set(), meli: new Set() };   // SKUs seleccionados por tab
 const PARAM_KEYS = ['fija_t1_max','fija_t1_val','fija_t2_max','fija_t2_val','fija_t3_val','envio_threshold','envio_promedio','comision_var_default','com_premium3','com_premium6','com_premium9','com_premium12'];
@@ -323,7 +322,7 @@ async function loadAll() {
     DEFAULTS = j.defaults || {};
     TIPOS = j.tipos || TIPOS;
   } catch (e) { ITEMS = []; }
-  FIJA_OVERRIDE.clear(); ENVIO_OVERRIDE.clear();
+  ENVIO_OVERRIDE.clear();
   SEL.resumen.clear(); SEL.meli.clear();
   fillParams();
   populateBulkTipo();
@@ -451,7 +450,7 @@ function computeRow(it) {
   const comAmt = pvp * cv / f;
   const ccf = comCuotasFrac(it);
   const comCuotasAmt = pvp * ccf / f;
-  const fijaAmt = FIJA_OVERRIDE.has(it.sku) ? FIJA_OVERRIDE.get(it.sku) : fijaOf(pvp) / f;
+  const fijaAmt = fijaOf(pvp) / f;
   const envioAmt = ENVIO_OVERRIDE.has(it.sku) ? ENVIO_OVERRIDE.get(it.sku)
                   : (pvp >= CONFIG.envio_threshold ? CONFIG.envio_promedio / f : 0);
   const cobro = pvpSin - comAmt - comCuotasAmt - fijaAmt - envioAmt;
@@ -522,8 +521,7 @@ function renderMeli() {
           onchange="editComVar('${esc(it.sku)}', this)"></td>
       <td class="num" title="Comisión por cuotas del tipo ${esc(it.tipo_publicacion||'Clasica')}">${pct(c.ccf)}</td>
       <td class="num" title="Com. var + Com. cuotas">${fmt(c.comCombinedAmt)}</td>
-      <td class="num"><input type="number" class="num-input cell-edit" style="width:80px" value="${Math.round(c.fijaAmt)}" step="0.01" min="0"
-          onchange="editFija('${esc(it.sku)}', this)"></td>
+      <td class="num">${fmt(c.fijaAmt)}</td>
       <td class="num"><input type="number" class="num-input cell-edit" style="width:80px" value="${Math.round(c.envioAmt)}" step="0.01" min="0"
           onchange="editEnvio('${esc(it.sku)}', this)"></td>
       <td class="num">${fmt(c.cobro)}</td>
@@ -592,11 +590,6 @@ async function editCosto(sku, el) {
     // Recarga para propagar el costo del original a sus variantes/combos.
     if (r.ok) await loadAll();
   } catch (e) { renderActive(); }
-}
-function editFija(sku, el) {
-  const v = parseFloat(el.value);
-  if (isNaN(v)) FIJA_OVERRIDE.delete(sku); else FIJA_OVERRIDE.set(sku, v);
-  renderActive();
 }
 function editEnvio(sku, el) {
   const v = parseFloat(el.value);
