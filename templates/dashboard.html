@@ -42,11 +42,14 @@
     .live-dot { width: 8px; height: 8px; background: #1a8a5a; border-radius: 50%; animation: pulse 2s infinite; }
     @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
 
-    .cards-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 1.5rem; }
-    @media (min-width: 1750px) { .cards-grid { grid-template-columns: repeat(9, 1fr); } }
-    .metric-card { background: #fff; border: 1px solid #e5e5e3; border-radius: 12px; padding: 1rem 1rem; position: relative; }
-    .metric-card .label { font-size: 12px; color: #888; margin-bottom: 8px; white-space: nowrap; }
-    .metric-card .value { font-size: 17px; font-weight: 600; white-space: nowrap; }
+    /* Columnas fijas (no auto-fit): así las 9 tarjetas quedan SIEMPRE en una
+       sola fila sin importar el ancho de pantalla; si el espacio aprieta, el
+       texto de adentro pasa a una 2da línea en vez de mandar la tarjeta
+       siguiente a otra fila. */
+    .cards-grid { display: grid; grid-template-columns: repeat(9, minmax(0, 1fr)); gap: 8px; margin-bottom: 1.5rem; }
+    .metric-card { background: #fff; border: 1px solid #e5e5e3; border-radius: 12px; padding: 0.85rem 0.7rem; position: relative; min-width: 0; }
+    .metric-card .label { font-size: 11px; color: #888; margin-bottom: 6px; overflow-wrap: break-word; }
+    .metric-card .value { font-size: 16px; font-weight: 600; overflow-wrap: break-word; }
     .value.green { color: #1a8a5a; }
     .value.red { color: #c0392b; }
     .value.orange { color: #c47a1e; }
