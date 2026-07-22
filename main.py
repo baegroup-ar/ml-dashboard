@@ -4380,6 +4380,50 @@ def margen_save_config(account_id: int, params: dict) -> dict:
     return merged
 
 
+MARGEN_ENVIO_LOOKBACK_DAYS = 90
+_MARGEN_ENVIO_CACHE: dict = {}
+_MARGEN_ENVIO_CACHE_TTL_SECONDS = 600
+
+
+def _margen_envio_auto_map(account_ids: list, days: int = MARGEN_ENVIO_LOOKBACK_DAYS) -> dict:
+    """{SKU_UPPER: costo_envio_con_iva} desde la venta más reciente con Colecta
+    de cada SKU, en las últimas `days` de TODAS las cuentas dadas — como un
+    BUSCARV: como `db_fetch_order_snapshots` ya viene ordenado por fecha/hora
+    desc por cuenta, se mezclan y reordenan todas juntas y gana la primera
+    coincidencia (=la más reciente) por SKU. Solo ventas de UN ÚNICO ítem: en
+    un paquete con varios SKU no hay forma de atribuirle el envío a uno solo
+    sin ambigüedad. Cacheado 10 min (misma cuenta de Margen no cambia seguido)."""
+    key = tuple(sorted(account_ids))
+    cached = _MARGEN_ENVIO_CACHE.get(key)
+    now = datetime.utcnow()
+    if cached and (now - cached["at"]).total_seconds() < _MARGEN_ENVIO_CACHE_TTL_SECONDS:
+        return cached["map"]
+    today = now.date()
+    df = str(today - timedelta(days=max(1, days) - 1))
+    dt = str(today)
+    all_orders = []
+    for aid in account_ids:
+        all_orders.extend(db_fetch_order_snapshots(aid, df, dt))
+    all_orders.sort(key=lambda o: (o.get("fecha") or "", o.get("hora") or ""), reverse=True)
+    out: dict = {}
+    for o in all_orders:
+        if o.get("estado") != "paid":
+            continue
+        if _ENVIO_GROUPS.get(o.get("logistic_type") or "") != "colecta":
+            continue
+        items = o.get("items") or []
+        if len(items) != 1:
+            continue
+        sku = (items[0].get("sku") or "").strip().upper()
+        if not sku or sku in out:
+            continue
+        envio = float(o.get("envio") or 0)
+        if envio > 0:
+            out[sku] = envio
+    _MARGEN_ENVIO_CACHE[key] = {"at": now, "map": out}
+    return out
+
+
 def _margen_fija(pvp_con_iva: float, p: dict) -> float:
     """Cargo fijo (con IVA) según tramos. >= envio_threshold -> 0 (paga envío)."""
     if not pvp_con_iva or pvp_con_iva >= p["envio_threshold"]:
@@ -4392,12 +4436,15 @@ def _margen_fija(pvp_con_iva: float, p: dict) -> float:
 
 
 def margen_compute(pvp_meli, iva_rate, comision_var, costo_sin_iva, p,
-                   com_cuotas_frac=0.0, envio_manual=None) -> Optional[dict]:
+                   com_cuotas_frac=0.0, envio_manual=None, envio_auto=None) -> Optional[dict]:
     """Desglose de margen para un SKU. `pvp_meli` con IVA; `costo_sin_iva` neto.
     `com_cuotas_frac` = comisión por cuotas (fracción) según el tipo Premium; se
     resta como la comisión variable. Todo se netea con el factor de IVA del SKU.
-    `envio_manual` (ya neteado de IVA, mismo criterio que costo_sin_iva) pisa el
-    envío promedio por tramo si viene cargado; None => el cálculo por defecto."""
+    Envío (solo aplica si pvp_meli >= envio_threshold, si no es 0): `envio_manual`
+    (ya neteado de IVA, mismo criterio que costo_sin_iva) pisa todo si viene
+    cargado; si no, `envio_auto` (CON IVA, costo real de la última venta con
+    Colecta de ese SKU — ver `_margen_envio_auto_map`) reemplaza al envío
+    promedio configurado cuando está disponible."""
     if not pvp_meli or pvp_meli <= 0:
         return None
     factor = 1 + (float(iva_rate or 0) / 100.0)
@@ -4409,8 +4456,11 @@ def margen_compute(pvp_meli, iva_rate, comision_var, costo_sin_iva, p,
     fija_amt = _margen_fija(pvp_meli, p) / factor
     if envio_manual is not None:
         envio_amt = float(envio_manual)
+    elif pvp_meli >= p["envio_threshold"]:
+        envio_base = float(envio_auto) if envio_auto is not None else p["envio_promedio"]
+        envio_amt = envio_base / factor
     else:
-        envio_amt = (p["envio_promedio"] / factor) if pvp_meli >= p["envio_threshold"] else 0.0
+        envio_amt = 0.0
     cobro = pvp_sin_iva - comision_var_amt - com_cuotas_amt - fija_amt - envio_amt
     costo = float(costo_sin_iva or 0)
     resultado = cobro - costo
@@ -4599,6 +4649,8 @@ async def api_margen_data(request: Request, account_id: int):
     versioned = db_get_product_costs(cost_aid)
     variant_map = _get_variant_map(cost_aid)   # componente -> [(original, qty)]
     today_iso = (datetime.utcnow() - timedelta(hours=3)).date().isoformat()
+    sales_aids = [a["id"] for a in get_visible_accounts(user_id, user)] or [account_id]
+    envio_auto_map = _margen_envio_auto_map(sales_aids)
     rows = db_fetchall(
         "SELECT sku, price, desc_meli, comision_var, costo_manual, tipo_publicacion, envio_manual"
         " FROM product_sale_prices WHERE account_id=:a ORDER BY sku", {"a": account_id})
@@ -4623,7 +4675,8 @@ async def api_margen_data(request: Request, account_id: int):
         comvar = _margen_resolve_comvar(sku, comvar_map_u, variant_map_u)
         inherit = r["comision_var"] is None and comvar is not None
         envio_manual = float(r["envio_manual"]) if r["envio_manual"] is not None else None
-        comp = margen_compute(pvp_meli, iva_rate, comvar, costo, p, ccf, envio_manual)
+        envio_auto = envio_auto_map.get((sku or "").strip().upper())
+        comp = margen_compute(pvp_meli, iva_rate, comvar, costo, p, ccf, envio_manual, envio_auto)
         items.append({
             "sku": sku,
             "pvp_lista": lista,
@@ -4637,6 +4690,7 @@ async def api_margen_data(request: Request, account_id: int):
             "costo_sin_iva": costo,
             "costo_manual": float(r["costo_manual"]) if r["costo_manual"] is not None else None,
             "envio_manual": envio_manual,
+            "envio_auto": envio_auto,
             "iva_rate": iva_rate,
             "renta": comp["renta"] if comp else None,
         })
@@ -5014,6 +5068,8 @@ async def api_margen_export_list(request: Request, account_id: int, view: str = 
     versioned = db_get_product_costs(cost_aid)
     variant_map = _get_variant_map(cost_aid)
     today_iso = (datetime.utcnow() - timedelta(hours=3)).date().isoformat()
+    sales_aids = [a["id"] for a in get_visible_accounts(user_id, user)] or [account_id]
+    envio_auto_map = _margen_envio_auto_map(sales_aids)
     rows = db_fetchall(
         "SELECT sku, price, desc_meli, comision_var, costo_manual, tipo_publicacion, envio_manual"
         " FROM product_sale_prices WHERE account_id=:a ORDER BY sku", {"a": account_id})
@@ -5056,8 +5112,10 @@ async def api_margen_export_list(request: Request, account_id: int, view: str = 
         tipo = _margen_tipo_resolve(sku, r["tipo_publicacion"])
         ccf = _margen_com_cuotas_frac(tipo, p)
         comvar = _margen_resolve_comvar(sku, comvar_map_u, variant_map_u)
-        envio_manual = envio_manual_map.get((sku or "").strip().upper())
-        comp = margen_compute(pvp_meli, iva_rate, comvar, costo, p, ccf, envio_manual)
+        sku_u = (sku or "").strip().upper()
+        envio_manual = envio_manual_map.get(sku_u)
+        envio_auto = envio_auto_map.get(sku_u)
+        comp = margen_compute(pvp_meli, iva_rate, comvar, costo, p, ccf, envio_manual, envio_auto)
         renta_pct = round(comp["renta"] * 100, 2) if comp and comp["renta"] is not None else None
         if view == "resumen":
             ws.append([sku, r2(lista), (round(desc * 100, 2) if desc is not None else None),
