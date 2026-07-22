@@ -21,7 +21,7 @@
     .dropdown-menu a.dropdown-item, .dropdown-menu span.dropdown-item { display: block; padding: 8px 10px; font-size: 13px; color: #111; text-decoration: none; border-radius: 6px; white-space: nowrap; cursor: pointer; }
     .dropdown-menu a.dropdown-item:hover { background: #f5f5f3; }
     .dropdown-menu span.dropdown-item.active { color: #005CFF; font-weight: 500; background: #EAF1FF; cursor: default; }
-    main { max-width: 1320px; margin: 0 auto; padding: 1.5rem; }
+    main { max-width: 1800px; margin: 0 auto; padding: 1.5rem 0.75rem; }
     h1 { font-size: 20px; font-weight: 600; margin-bottom: 6px; }
     p.lead { font-size: 13px; color: #888; margin-bottom: 1.25rem; }
     .card { background: #fff; border: 1px solid #e5e5e3; border-radius: 12px; padding: 1.25rem; margin-bottom: 1.25rem; }
@@ -34,11 +34,11 @@
     button.green { padding: 8px 16px; border: none; border-radius: 8px; background: #1a8a5a; color: #fff; font-size: 13px; cursor: pointer; }
     button.ghost { padding: 8px 14px; border: 1px solid #ddd; border-radius: 8px; background: #fff; color: #111; font-size: 13px; cursor: pointer; }
     button:disabled { background: #ccc !important; color: #fff !important; cursor: not-allowed; }
-    table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 12px; }
-    th { padding: 9px 9px; text-align: left; color: #888; font-weight: 500; border-bottom: 1px solid #eee; font-size: 12px; white-space: nowrap; }
-    td { padding: 8px 9px; border-bottom: 1px solid #f0f0ee; color: #333; white-space: nowrap; }
-    /* La 1ra columna (SKU) sí puede ocupar lo que necesite; el resto va compacto. */
-    th:first-child, td:first-child { white-space: normal; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 12px; }
+    th { padding: 7px 6px; text-align: left; color: #888; font-weight: 500; border-bottom: 1px solid #eee; font-size: 11px; white-space: nowrap; }
+    td { padding: 6px 6px; height: 34px; border-bottom: 1px solid #f0f0ee; color: #333; white-space: nowrap; }
+    /* Ninguna columna hace wrap (ni siquiera la de SKU): así todas las filas
+       quedan de la misma altura, sea cual sea el largo del contenido. */
     tbody tr:hover { background: #fafaf8; }
     .num { text-align: right; font-variant-numeric: tabular-nums; }
     .empty { padding: 2rem; text-align: center; color: #aaa; font-size: 13px; }
