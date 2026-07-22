@@ -4572,15 +4572,45 @@ def _margen_resolve_cost(sku, manual_map_u, versioned, today_iso, variant_map_u,
 
 
 def _margen_maps(rows, variant_map):
-    """Arma manual_map, variant_map y comvar_map keyeados en mayúsculas."""
+    """Arma manual_map, variant_map, comvar_map y envio_manual_map keyeados en
+    mayúsculas."""
     manual_map_u = {(r["sku"] or "").strip().upper():
                     (float(r["costo_manual"]) if r["costo_manual"] is not None else None)
                     for r in rows}
     comvar_map_u = {(r["sku"] or "").strip().upper():
                     (float(r["comision_var"]) if r["comision_var"] is not None else None)
                     for r in rows}
+    envio_manual_map_u = {(r["sku"] or "").strip().upper(): float(r["envio_manual"])
+                          for r in rows if r.get("envio_manual") is not None}
     variant_map_u = {(k or "").strip().upper(): v for k, v in variant_map.items()}
-    return manual_map_u, variant_map_u, comvar_map_u
+    return manual_map_u, variant_map_u, comvar_map_u, envio_manual_map_u
+
+
+def _margen_resolve_envio(sku, envio_manual_map_u, envio_auto_map_u, variant_map_u, seen=None):
+    """(valor, es_manual) — mismo criterio de precedencia que _margen_resolve_cost
+    pero SIN escalar por cantidad (el envío es el mismo paquete físico, no se
+    multiplica por qty de combo): 1) envío manual propio (gana) 2) base SKU
+    asociada (variantes/combos, recursivo) MANDA sobre el auto propio — así una
+    variante/combo (ej. -3C, -6C) toma el MISMO envío que su original 3) auto
+    propio (venta real con Colecta, solo si NO está asociado o el original no
+    resolvió nada) 4) None (cae al envío promedio configurado). `es_manual`
+    indica si hay que aplicarlo salteando el umbral de envío gratis (igual que
+    un manual propio) o respetándolo (igual que el auto/envío promedio)."""
+    if seen is None:
+        seen = set()
+    su = (sku or "").strip().upper()
+    if not su or su in seen:
+        return None, False
+    seen.add(su)
+    if su in envio_manual_map_u:
+        return envio_manual_map_u[su], True
+    for (orig, _qty) in (variant_map_u.get(su) or []):
+        v, is_manual = _margen_resolve_envio(orig, envio_manual_map_u, envio_auto_map_u, variant_map_u, seen)
+        if v is not None:
+            return v, is_manual
+    if su in envio_auto_map_u:
+        return envio_auto_map_u[su], False
+    return None, False
 
 
 def _margen_resolve_comvar(sku, comvar_map_u, variant_map_u, seen=None):
@@ -4661,7 +4691,7 @@ async def api_margen_data(request: Request, account_id: int):
     rows = db_fetchall(
         "SELECT sku, price, desc_meli, comision_var, costo_manual, tipo_publicacion, envio_manual"
         " FROM product_sale_prices WHERE account_id=:a ORDER BY sku", {"a": account_id})
-    manual_map_u, variant_map_u, comvar_map_u = _margen_maps(rows, variant_map)
+    manual_map_u, variant_map_u, comvar_map_u, envio_manual_map_u = _margen_maps(rows, variant_map)
     items = []
     for r in rows:
         sku = r["sku"]
@@ -4681,9 +4711,16 @@ async def api_margen_data(request: Request, account_id: int):
         # `comvar_inherit` = el efectivo se heredó del original.
         comvar = _margen_resolve_comvar(sku, comvar_map_u, variant_map_u)
         inherit = r["comision_var"] is None and comvar is not None
-        envio_manual = float(r["envio_manual"]) if r["envio_manual"] is not None else None
-        envio_auto = envio_auto_map.get((sku or "").strip().upper())
-        comp = margen_compute(pvp_meli, iva_rate, comvar, costo, p, ccf, envio_manual, envio_auto)
+        # Envío: propio (manual u obtenido de ventas reales) → hereda del
+        # original (misma lógica que costo/com. var): una variante/combo toma
+        # el MISMO envío que su original, sin escalar por cantidad.
+        envio_resolved, envio_is_manual = _margen_resolve_envio(
+            sku, envio_manual_map_u, envio_auto_map, variant_map_u)
+        envio_manual_own = float(r["envio_manual"]) if r["envio_manual"] is not None else None
+        comp = margen_compute(
+            pvp_meli, iva_rate, comvar, costo, p, ccf,
+            envio_manual=(envio_resolved if envio_is_manual else None),
+            envio_auto=(envio_resolved if not envio_is_manual else None))
         items.append({
             "sku": sku,
             "pvp_lista": lista,
@@ -4696,8 +4733,9 @@ async def api_margen_data(request: Request, account_id: int):
             "com_cuotas": ccf,
             "costo_sin_iva": costo,
             "costo_manual": float(r["costo_manual"]) if r["costo_manual"] is not None else None,
-            "envio_manual": envio_manual,
-            "envio_auto": envio_auto,
+            "envio_manual": envio_manual_own,
+            "envio_effective": envio_resolved,
+            "envio_bypass_gate": envio_is_manual,
             "iva_rate": iva_rate,
             "renta": comp["renta"] if comp else None,
         })
@@ -5080,10 +5118,7 @@ async def api_margen_export_list(request: Request, account_id: int, view: str = 
     rows = db_fetchall(
         "SELECT sku, price, desc_meli, comision_var, costo_manual, tipo_publicacion, envio_manual"
         " FROM product_sale_prices WHERE account_id=:a ORDER BY sku", {"a": account_id})
-    manual_map_u, variant_map_u, comvar_map_u = _margen_maps(rows, variant_map)
-    envio_manual_map = {(r["sku"] or "").strip().upper():
-                        (float(r["envio_manual"]) if r["envio_manual"] is not None else None)
-                        for r in rows}
+    manual_map_u, variant_map_u, comvar_map_u, envio_manual_map_u = _margen_maps(rows, variant_map)
 
     import io
     from openpyxl import Workbook
@@ -5119,10 +5154,12 @@ async def api_margen_export_list(request: Request, account_id: int, view: str = 
         tipo = _margen_tipo_resolve(sku, r["tipo_publicacion"])
         ccf = _margen_com_cuotas_frac(tipo, p)
         comvar = _margen_resolve_comvar(sku, comvar_map_u, variant_map_u)
-        sku_u = (sku or "").strip().upper()
-        envio_manual = envio_manual_map.get(sku_u)
-        envio_auto = envio_auto_map.get(sku_u)
-        comp = margen_compute(pvp_meli, iva_rate, comvar, costo, p, ccf, envio_manual, envio_auto)
+        envio_resolved, envio_is_manual = _margen_resolve_envio(
+            sku, envio_manual_map_u, envio_auto_map, variant_map_u)
+        comp = margen_compute(
+            pvp_meli, iva_rate, comvar, costo, p, ccf,
+            envio_manual=(envio_resolved if envio_is_manual else None),
+            envio_auto=(envio_resolved if not envio_is_manual else None))
         renta_pct = round(comp["renta"] * 100, 2) if comp and comp["renta"] is not None else None
         if view == "resumen":
             ws.append([sku, r2(lista), (round(desc * 100, 2) if desc is not None else None),

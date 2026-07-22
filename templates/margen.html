@@ -261,7 +261,7 @@
     </div>
     <div class="row" style="margin-bottom:8px;">
       <button class="green" onclick="importCostos()">↻ Importar costos (CMV)</button>
-      <span style="font-size:11px;color:#888;">El <b>costo</b> y el <b>envío</b> se guardan (azul = manual; vacío = vuelve a auto-completar). El envío auto-completa con el costo real de la última venta con Colecta de ese SKU (últimos 90 días, todas las cuentas); si no encuentra ninguna, usa el envío promedio configurado. Ambos casos solo aplican si el PVP llega al umbral de envío gratis. La <b>Com. var %</b> se hereda del SKU original (base SKU) y se guarda si la editás; vacía = vuelve a heredar. Com. fija sale de los tramos configurados (no es editable). “Importar costos” vuelve a CMV los SKU que estén en la base de costos; los manuales (sin CMV) se mantienen.</span>
+      <span style="font-size:11px;color:#888;">El <b>costo</b> y el <b>envío</b> se guardan (azul = manual; vacío = vuelve a auto-completar). Los dos se heredan igual que la <b>Com. var %</b>: una variante/combo (ej. -3C, -6C) toma el MISMO valor que su SKU original de base SKU, sin escalar por cantidad en el caso del envío. El envío auto-completa con el costo real de la última venta con Colecta de ese SKU u original (últimos 90 días, todas las cuentas); si no encuentra ninguna, usa el envío promedio configurado. Ambos casos solo aplican si el PVP llega al umbral de envío gratis. Com. fija sale de los tramos configurados (no es editable). “Importar costos” vuelve a CMV los SKU que estén en la base de costos; los manuales (sin CMV) se mantienen.</span>
     </div>
     <div style="overflow:auto;max-height:65vh;">
       <table>
@@ -448,14 +448,16 @@ function computeRow(it) {
   const ccf = comCuotasFrac(it);
   const comCuotasAmt = pvp * ccf / f;
   const fijaAmt = fijaOf(pvp) / f;
-  // Envío: manual (editado, ya neto) > real de la última venta con Colecta de
-  // ese SKU (envio_auto: el backend ya le sacó el 21% fijo de IVA de envíos,
-  // NO el iva_rate del SKU, así que se usa directo sin dividir por `f` de
-  // nuevo) > promedio configurado (ese sí se divide por `f`). Solo aplica si
-  // el PVP llega al umbral de envío gratis (si no, el comprador paga y es 0).
+  // Envío: `envio_effective` ya viene resuelto del backend con la MISMA
+  // herencia que costo/com. var (una variante/combo toma el mismo envío que
+  // su original — ver _margen_resolve_envio). Si `envio_bypass_gate` es true
+  // (manual, propio o heredado) se aplica siempre; si no, solo si el PVP
+  // llega al umbral de envío gratis, y si no hay dato cae al promedio
+  // configurado (ese sí se divide por `f`, ya que `envio_effective` viene
+  // neto y se usa directo).
   let envioAmt;
-  if (it.envio_manual != null) envioAmt = it.envio_manual;
-  else if (pvp >= CONFIG.envio_threshold) envioAmt = it.envio_auto != null ? it.envio_auto : (CONFIG.envio_promedio / f);
+  if (it.envio_bypass_gate && it.envio_effective != null) envioAmt = it.envio_effective;
+  else if (pvp >= CONFIG.envio_threshold) envioAmt = it.envio_effective != null ? it.envio_effective : (CONFIG.envio_promedio / f);
   else envioAmt = 0;
   const cobro = pvpSin - comAmt - comCuotasAmt - fijaAmt - envioAmt;
   const comCombinedAmt = comAmt + comCuotasAmt;   // Com. var $ = var + cuotas
@@ -528,8 +530,9 @@ function renderMeli() {
       <td class="num">${fmt(c.fijaAmt)}</td>
       <td class="num"><input type="number" class="num-input cell-edit ${it.envio_manual != null ? 'cost-manual' : ''}" style="width:80px" value="${Math.round(c.envioAmt)}" step="0.01" min="0"
           title="${it.envio_manual != null ? 'Envío manual (editado). Vaciá para volver a auto-completar.'
-                  : (it.envio_auto != null ? 'Envío real de la última venta con Colecta de este SKU (auto). Editá para fijar uno manual.'
-                  : 'Envío promedio configurado (sin ventas con Colecta recientes de este SKU). Editá para fijar uno manual.')}"
+                  : (it.envio_bypass_gate ? 'Envío manual heredado del SKU original (base SKU).'
+                  : (it.envio_effective != null ? 'Envío real de la última venta con Colecta (propio o heredado del SKU original). Editá para fijar uno manual.'
+                  : 'Envío promedio configurado (sin ventas con Colecta recientes de este SKU ni del original). Editá para fijar uno manual.'))}"
           onchange="editEnvio('${esc(it.sku)}', this)"></td>
       <td class="num">${fmt(c.cobro)}</td>
       <td class="num"><input type="number" class="num-input cell-edit ${it.costo_manual != null ? 'cost-manual' : ''}" style="width:90px" value="${Math.round(c.costo)}" step="0.01" min="0"
@@ -601,13 +604,14 @@ async function editCosto(sku, el) {
 async function editEnvio(sku, el) {
   const it = ITEMS.find(i => i.sku === sku); if (!it) return;
   const v = el.value === '' ? null : parseFloat(el.value);
-  it.envio_manual = (v == null || isNaN(v)) ? null : v;   // null => vuelve al promedio por tramo
-  renderActive();
+  it.envio_manual = (v == null || isNaN(v)) ? null : v;   // null => vuelve a auto-completar
   try {
-    await fetch(`/api/margen/${accId()}/envio`, {
+    const r = await fetch(`/api/margen/${accId()}/envio`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sku, envio: it.envio_manual }) });
-  } catch (e) {}
+    // Recarga para propagar el envío del original a sus variantes/combos.
+    if (r.ok) await loadAll();
+  } catch (e) { renderActive(); }
 }
 async function importCostos() {
   const msg = document.getElementById('meli-msg');
