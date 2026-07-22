@@ -3723,6 +3723,7 @@ async def _build_stock_payload(account_id, acc, token, user, target_days,
     sales7 = _sales_by_sku_multi(sales_aids, sd)        # venta: TODAS las cuentas
     cost_aid = _cost_account_id_for(user, account_id)
     last_buy = _last_purchase_by_sku(cost_aid)
+    versioned_costs = db_get_product_costs(cost_aid)
     price_rows = db_fetchall(
         "SELECT sku, price, desc_meli, stock_en_camino FROM product_sale_prices WHERE account_id=:a",
         {"a": account_id})
@@ -3739,6 +3740,7 @@ async def _build_stock_payload(account_id, acc, token, user, target_days,
     variant_map = _get_variant_map(cost_aid)
 
     today_ar = (datetime.utcnow() - timedelta(hours=3)).date()
+    today_iso = today_ar.isoformat()
     # UNIVERSO = SOLO los SKU cargados en la base de precios (= los que tienen
     # stock real). Cuando se vende un COMPONENTE (variante/combo), su venta se
     # explota sobre el/los ORIGINAL(es) × cantidad. Lo que no está en la base no
@@ -3797,6 +3799,8 @@ async def _build_stock_payload(account_id, acc, token, user, target_days,
         avg_own = u_own / sd
         cobertura = round(st_total / avg_daily, 1) if avg_daily > 0 else None
         sugerido = max(0, round(avg_daily * td - st_total)) if avg_daily > 0 else 0
+        cost_entry = find_cost_for_date(versioned_costs, original, today_iso)
+        costo_con_iva = round(cost_with_iva(cost_entry), 2) if cost_entry else None
         variantes = [
             {"sku": c, "qty": q, "ventas_raw": int(sales7.get(c, 0)),
              "ventas": int(round(int(sales7.get(c, 0)) * q))}
@@ -3818,6 +3822,7 @@ async def _build_stock_payload(account_id, acc, token, user, target_days,
             "venta_prom_own": round(avg_own, 2),
             "dias_cobertura": cobertura,
             "reposicion_sugerida": sugerido,
+            "costo_con_iva": costo_con_iva,
             "variantes": variantes,
         })
     items.sort(key=lambda x: ((x["valor_venta"] is None), -(x["valor_venta"] or 0), x["sku"]))
@@ -3881,7 +3886,7 @@ async def api_stock_export(request: Request, account_id: int, target_days: int =
     ws.title = "Stock valorizado"
     headers = ["SKU", "Stock ML", "Stock Full", "En camino", "Stock total", "Precio venta",
                "Valorizado", "Última compra", "Aging (días)", f"Ventas {sd}d",
-               "Prom/día", "Días Stock", "Reposición sug."]
+               "Prom/día", "Días Stock", "Reposición sug.", "Costo c/IVA", "Estimado Compra"]
     ws.append(headers)
     fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
     for col in range(1, len(headers) + 1):
@@ -3890,6 +3895,8 @@ async def api_stock_export(request: Request, account_id: int, target_days: int =
         c.font = Font(bold=True)
         c.alignment = Alignment(horizontal="center")
     for it in items:
+        costo_iva = it.get("costo_con_iva")
+        estimado_compra = round(it["reposicion_sugerida"] * costo_iva, 2) if costo_iva is not None else ""
         ws.append([
             it["sku"],
             it["stock"],
@@ -3904,12 +3911,14 @@ async def api_stock_export(request: Request, account_id: int, target_days: int =
             it["venta_prom_diaria"],
             it["dias_cobertura"] if it.get("dias_cobertura") is not None else "",
             it["reposicion_sugerida"],
+            costo_iva if costo_iva is not None else "",
+            estimado_compra,
         ])
         # Variantes agrupadas: una fila por variante (solo SKU, stock y ventas).
         for v in (it.get("variantes") or []):
             ws.append([f"   ↳ {v['sku']}", "", "", "", v.get("stock_total", ""), "",
-                       "", "", "", v.get("ventas", ""), "", "", ""])
-    widths = [28, 10, 10, 10, 11, 14, 16, 14, 12, 10, 10, 14, 14]
+                       "", "", "", v.get("ventas", ""), "", "", "", "", ""])
+    widths = [28, 10, 10, 10, 11, 14, 16, 14, 12, 10, 10, 14, 14, 13, 15]
     for i, w in enumerate(widths, start=1):
         ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = w
     buf = io.BytesIO()
