@@ -1782,6 +1782,7 @@ def parse_excel_costs(content: bytes) -> list:
     fecha_idx = _find_col(header, ["fecha", "date", "vigencia", "desde"])
     iva_idx = _find_col(header, ["iva"])
     qty_idx = _find_col(header, ["cantidad", "qty", "cant"])
+    prov_idx = _find_col(header, ["proveedor", "provider", "prov"])
     if sku_idx is None or cost_idx is None:
         return []
     items = []
@@ -1800,12 +1801,15 @@ def parse_excel_costs(content: bytes) -> list:
             qty = float(qty) if qty not in (None, "") else None
         except (TypeError, ValueError):
             qty = None
+        proveedor = row[prov_idx] if prov_idx is not None and len(row) > prov_idx else None
+        proveedor = str(proveedor).strip() if proveedor is not None else None
         items.append({
             "sku": str(sku).strip(),
             "cost": cost,
             "valid_from": fecha or today_iso,
             "iva_rate": iva_rate,
             "qty": qty,
+            "proveedor": proveedor,
         })
     return items
 
@@ -1826,6 +1830,7 @@ def parse_csv_costs(content: bytes) -> list:
     fecha_idx = _find_col(header, ["fecha", "date", "vigencia", "desde"])
     iva_idx = _find_col(header, ["iva"])
     qty_idx = _find_col(header, ["cantidad", "qty", "cant"])
+    prov_idx = _find_col(header, ["proveedor", "provider", "prov"])
     if sku_idx is None or cost_idx is None:
         return []
     items = []
@@ -1856,11 +1861,14 @@ def parse_csv_costs(content: bytes) -> list:
             qty = float(raw_qty) if raw_qty else None
         except ValueError:
             qty = None
+        raw_prov = (row[prov_idx] or "").strip() if prov_idx is not None and len(row) > prov_idx else ""
+        proveedor = raw_prov or None  # vacío = no tocar el proveedor ya guardado (ver db_save_product_costs)
         items.append({
             "sku": sku, "cost": cost,
             "valid_from": fecha or today_iso,
             "iva_rate": iva_rate,
             "qty": qty,
+            "proveedor": proveedor,
         })
     return items
 
@@ -1888,7 +1896,7 @@ async def api_costos_template(request: Request):
     ws = wb.active
     ws.title = "Costos"
 
-    headers = ["SKU", "Costo", "Fecha", "IVA", "Cantidad"]
+    headers = ["SKU", "Costo", "Fecha", "IVA", "Cantidad", "Proveedor"]
     ws.append(headers)
     # Estilizar header
     header_fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
@@ -1901,9 +1909,9 @@ async def api_costos_template(request: Request):
 
     # Filas de ejemplo
     examples = [
-        ["SOP68-443", 5000.00, "2025-01-15", 21, 100],
-        ["SOP78-446", 8500.50, "2025-01-15", 10.5, ""],
-        ["SOP22G-44T", 3200.00, "2025-02-01", 0, 50],   # Exento
+        ["SOP68-443", 5000.00, "2025-01-15", 21, 100, "Proveedor SA"],
+        ["SOP78-446", 8500.50, "2025-01-15", 10.5, "", ""],
+        ["SOP22G-44T", 3200.00, "2025-02-01", 0, 50, "Otro Proveedor"],   # Exento
     ]
     for row in examples:
         ws.append(row)
@@ -1914,6 +1922,7 @@ async def api_costos_template(request: Request):
     ws.column_dimensions["C"].width = 14
     ws.column_dimensions["D"].width = 10
     ws.column_dimensions["E"].width = 12
+    ws.column_dimensions["F"].width = 20
 
     # Hoja de instrucciones
     ws2 = wb.create_sheet("Instrucciones")
@@ -1926,6 +1935,7 @@ async def api_costos_template(request: Request):
         ["Fecha", "Fecha de vigencia desde. Formato YYYY-MM-DD o DD/MM/YYYY. Si la dejás vacía toma hoy."],
         ["IVA", "Tasa de IVA: 21, 10.5, 0 (exento). También acepta 'Exento'. Default 21."],
         ["Cantidad", "Opcional: cantidad comprada. Si la cargás, esta fila cuenta como una compra real en Métricas de compra."],
+        ["Proveedor", "Opcional. Si la dejás vacía en una fila que ya tenía proveedor cargado, NO se lo borra (solo se actualiza si escribís un valor)."],
         [""],
         ["Notas:"],
         ["", "Cada combinación SKU + Fecha es una versión histórica."],
@@ -1960,7 +1970,7 @@ async def api_costos_export(request: Request, account_id: int):
     user = get_user(user_id)
     cost_aid = _cost_account_id_for(user, account_id)
     rows = db_fetchall(
-        "SELECT sku, cost, iva_rate, valid_from, qty FROM product_costs"
+        "SELECT sku, cost, iva_rate, valid_from, qty, proveedor FROM product_costs"
         " WHERE account_id=:aid ORDER BY sku, valid_from DESC",
         {"aid": cost_aid},
     )
@@ -1971,10 +1981,10 @@ async def api_costos_export(request: Request, account_id: int):
     wb = Workbook()
     ws = wb.active
     ws.title = "Costos"
-    ws.append(["SKU", "Costo", "Fecha", "IVA", "Cantidad"])
+    ws.append(["SKU", "Costo", "Fecha", "IVA", "Cantidad", "Proveedor"])
     fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
     font = Font(bold=True)
-    for col in range(1, 6):
+    for col in range(1, 7):
         c = ws.cell(row=1, column=col)
         c.fill = fill
         c.font = font
@@ -1988,22 +1998,25 @@ async def api_costos_export(request: Request, account_id: int):
             vf_str,
             float(r["iva_rate"] if r.get("iva_rate") is not None else 21),
             float(r["qty"]) if r.get("qty") is not None else "",
+            r.get("proveedor") or "",
         ])
     ws.column_dimensions["A"].width = 20
     ws.column_dimensions["B"].width = 14
     ws.column_dimensions["C"].width = 14
     ws.column_dimensions["D"].width = 10
     ws.column_dimensions["E"].width = 12
+    ws.column_dimensions["F"].width = 20
     ws2 = wb.create_sheet("Instrucciones")
     info = [
         ["Cómo modificar tus costos desde Excel"],
         [""],
-        ["1.", "Editá esta planilla: cambiá costos, fechas, IVA o cantidad, agregá SKUs nuevos."],
+        ["1.", "Editá esta planilla: cambiá costos, fechas, IVA, cantidad o proveedor, agregá SKUs nuevos."],
         ["2.", "El Costo va SIN IVA (el sistema aplica la tasa automáticamente)."],
-        ["3.", "Mantené las columnas SKU / Costo / Fecha / IVA / Cantidad (en ese orden)."],
+        ["3.", "Mantené las columnas SKU / Costo / Fecha / IVA / Cantidad / Proveedor (en ese orden)."],
         ["4.", "Subila desde 'Cargar desde Excel o CSV' con 'Subir archivo'."],
         ["5.", "Cada SKU + Fecha es una versión histórica; las ventas toman la vigente."],
         ["6.", "Cantidad es opcional: si la cargás, esa fila cuenta como compra real en Métricas de compra."],
+        ["7.", "Proveedor es opcional: si dejás la celda vacía, NO se borra el proveedor ya guardado para ese SKU+Fecha."],
     ]
     for r in info:
         ws2.append(r)
@@ -2326,6 +2339,7 @@ def parse_excel_compras(content: bytes) -> list:
     qty_idx = _find_col(header, ["cantidad", "qty", "cant"])
     cost_idx = _find_col(header, ["costo", "cost", "precio"])
     iva_idx = _find_col(header, ["iva"])
+    prov_idx = _find_col(header, ["proveedor", "provider", "prov"])
     if sku_idx is None or qty_idx is None or cost_idx is None:
         return []
     items = []
@@ -2338,7 +2352,10 @@ def parse_excel_compras(content: bytes) -> list:
         if sku is None or qty is None or cost is None:
             continue
         iva_rate = _parse_iva_rate_cell(row[iva_idx]) if iva_idx is not None and len(row) > iva_idx else 21.0
-        items.append({"sku": str(sku).strip(), "qty": qty, "cost": cost, "iva_rate": iva_rate})
+        proveedor = row[prov_idx] if prov_idx is not None and len(row) > prov_idx else None
+        proveedor = str(proveedor).strip() if proveedor is not None else None
+        items.append({"sku": str(sku).strip(), "qty": qty, "cost": cost, "iva_rate": iva_rate,
+                      "proveedor": proveedor})
     return items
 
 
@@ -2357,6 +2374,7 @@ def parse_csv_compras(content: bytes) -> list:
     qty_idx = _find_col(header, ["cantidad", "qty", "cant"])
     cost_idx = _find_col(header, ["costo", "cost", "precio"])
     iva_idx = _find_col(header, ["iva"])
+    prov_idx = _find_col(header, ["proveedor", "provider", "prov"])
     if sku_idx is None or qty_idx is None or cost_idx is None:
         return []
 
@@ -2383,7 +2401,8 @@ def parse_csv_compras(content: bytes) -> list:
         except ValueError:
             continue
         iva_rate = _parse_iva_rate_cell(row[iva_idx]) if iva_idx is not None and len(row) > iva_idx else 21.0
-        items.append({"sku": sku, "qty": qty, "cost": cost, "iva_rate": iva_rate})
+        raw_prov = (row[prov_idx] or "").strip() if prov_idx is not None and len(row) > prov_idx else ""
+        items.append({"sku": sku, "qty": qty, "cost": cost, "iva_rate": iva_rate, "proveedor": raw_prov or None})
     return items
 
 
@@ -2401,7 +2420,7 @@ async def api_compras_template(request: Request):
     wb = Workbook()
     ws = wb.active
     ws.title = "Compras"
-    headers = ["SKU", "Cantidad", "Costo", "IVA"]
+    headers = ["SKU", "Cantidad", "Costo", "IVA", "Proveedor"]
     ws.append(headers)
     header_fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
     header_font = Font(bold=True, color="000000")
@@ -2411,9 +2430,9 @@ async def api_compras_template(request: Request):
         cell.font = header_font
         cell.alignment = Alignment(horizontal="center")
     examples = [
-        ["SOP68-443", 50, 5000.00, 21],
-        ["SOP78-446", 20, 8500.50, 10.5],
-        ["SOP22G-44T", 100, 3200.00, 0],   # Exento
+        ["SOP68-443", 50, 5000.00, 21, "Proveedor SA"],
+        ["SOP78-446", 20, 8500.50, 10.5, ""],
+        ["SOP22G-44T", 100, 3200.00, 0, "Otro Proveedor"],   # Exento
     ]
     for row in examples:
         ws.append(row)
@@ -2421,6 +2440,7 @@ async def api_compras_template(request: Request):
     ws.column_dimensions["B"].width = 12
     ws.column_dimensions["C"].width = 14
     ws.column_dimensions["D"].width = 10
+    ws.column_dimensions["E"].width = 20
 
     ws2 = wb.create_sheet("Instrucciones")
     instr = [
@@ -2431,6 +2451,7 @@ async def api_compras_template(request: Request):
         ["Cantidad", "Unidades recibidas de ese SKU en esta compra."],
         ["Costo", "Costo SIN IVA (el sistema le aplica la tasa de IVA automáticamente)."],
         ["IVA", "Tasa de IVA: 21, 10.5, 0 (exento). También acepta 'Exento'. Default 21."],
+        ["Proveedor", "Opcional: quién te vendió esta mercadería."],
         [""],
         ["Notas:"],
         ["", "Cada fila queda como renglón pendiente; no se manda nada a Costos CMV hasta tocar \"Ingreso\"."],
@@ -2485,10 +2506,11 @@ async def api_compras_upload(request: Request, account_id: int):
         if not sku or qty <= 0 or cost <= 0:
             continue
         db_execute(
-            "INSERT INTO purchase_items (account_id, sku, qty, cost, iva_rate)"
-            " VALUES (:aid, :sku, :qty, :cost, :iva_rate)",
+            "INSERT INTO purchase_items (account_id, sku, qty, cost, iva_rate, proveedor)"
+            " VALUES (:aid, :sku, :qty, :cost, :iva_rate, :proveedor)",
             {"aid": cost_aid, "sku": sku, "qty": qty, "cost": cost,
-             "iva_rate": float(it.get("iva_rate") or 21)},
+             "iva_rate": float(it.get("iva_rate") or 21),
+             "proveedor": it.get("proveedor")},
         )
         saved += 1
     return {"ok": True, "saved": saved, "rows_parsed": len(items)}

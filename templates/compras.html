@@ -204,8 +204,9 @@
         Columnas esperadas: <code>SKU</code>, <code>Costo</code> (sin IVA), opcionalmente
         <code>Fecha</code> (vigencia desde, <code>YYYY-MM-DD</code> o <code>DD/MM/YYYY</code>; si falta, hoy),
         <code>IVA</code> (tasa: <code>21</code>, <code>10.5</code>, <code>0</code> o <code>Exento</code>;
-        default <b>21%</b>) y <code>Cantidad</code> (opcional: si la cargás, esa fila cuenta como una
-        compra real en <b>Métricas</b>). Cada combinación SKU+Fecha es una versión histórica.
+        default <b>21%</b>), <code>Cantidad</code> (opcional: si la cargás, esa fila cuenta como una
+        compra real en <b>Métricas</b>) y <code>Proveedor</code> (opcional; si la dejás vacía no borra
+        el proveedor ya cargado). Cada combinación SKU+Fecha es una versión histórica.
         Bajate la plantilla para tener un Excel listo con las columnas y filas de ejemplo.
       </div>
       <div id="costos-upload-msg"></div>
@@ -271,8 +272,8 @@
       </div>
       <div class="help-box">
         Columnas esperadas: <code>SKU</code>, <code>Cantidad</code>, <code>Costo</code> (sin IVA) y opcionalmente
-        <code>IVA</code> (tasa: <code>21</code>, <code>10.5</code>, <code>0</code> o <code>Exento</code>; default <b>21%</b>).
-        Cada fila queda como renglón pendiente, igual que si la cargaras a mano.
+        <code>IVA</code> (tasa: <code>21</code>, <code>10.5</code>, <code>0</code> o <code>Exento</code>; default <b>21%</b>)
+        y <code>Proveedor</code>. Cada fila queda como renglón pendiente, igual que si la cargaras a mano.
       </div>
       <div id="upload-msg"></div>
     </div>
