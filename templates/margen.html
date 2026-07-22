@@ -448,12 +448,14 @@ function computeRow(it) {
   const ccf = comCuotasFrac(it);
   const comCuotasAmt = pvp * ccf / f;
   const fijaAmt = fijaOf(pvp) / f;
-  // Envío: manual (editado) > real de la última venta con Colecta de ese SKU
-  // (envio_auto, viene con IVA) > promedio configurado. Solo aplica si el PVP
-  // llega al umbral de envío gratis (si no, el comprador paga y es 0).
+  // Envío: manual (editado, ya neto) > real de la última venta con Colecta de
+  // ese SKU (envio_auto: el backend ya le sacó el 21% fijo de IVA de envíos,
+  // NO el iva_rate del SKU, así que se usa directo sin dividir por `f` de
+  // nuevo) > promedio configurado (ese sí se divide por `f`). Solo aplica si
+  // el PVP llega al umbral de envío gratis (si no, el comprador paga y es 0).
   let envioAmt;
   if (it.envio_manual != null) envioAmt = it.envio_manual;
-  else if (pvp >= CONFIG.envio_threshold) envioAmt = (it.envio_auto != null ? it.envio_auto : CONFIG.envio_promedio) / f;
+  else if (pvp >= CONFIG.envio_threshold) envioAmt = it.envio_auto != null ? it.envio_auto : (CONFIG.envio_promedio / f);
   else envioAmt = 0;
   const cobro = pvpSin - comAmt - comCuotasAmt - fijaAmt - envioAmt;
   const comCombinedAmt = comAmt + comCuotasAmt;   // Com. var $ = var + cuotas

@@ -4385,14 +4385,20 @@ _MARGEN_ENVIO_CACHE: dict = {}
 _MARGEN_ENVIO_CACHE_TTL_SECONDS = 600
 
 
+MARGEN_ENVIO_IVA_RATE = 21.0   # el envío siempre factura IVA 21%, sin importar la condición de IVA del SKU.
+
+
 def _margen_envio_auto_map(account_ids: list, days: int = MARGEN_ENVIO_LOOKBACK_DAYS) -> dict:
-    """{SKU_UPPER: costo_envio_con_iva} desde la venta más reciente con Colecta
+    """{SKU_UPPER: costo_envio_sin_iva} desde la venta más reciente con Colecta
     de cada SKU, en las últimas `days` de TODAS las cuentas dadas — como un
     BUSCARV: como `db_fetch_order_snapshots` ya viene ordenado por fecha/hora
     desc por cuenta, se mezclan y reordenan todas juntas y gana la primera
     coincidencia (=la más reciente) por SKU. Solo ventas de UN ÚNICO ítem: en
     un paquete con varios SKU no hay forma de atribuirle el envío a uno solo
-    sin ambigüedad. Cacheado 10 min (misma cuenta de Margen no cambia seguido)."""
+    sin ambigüedad. El costo de envío que trae la venta viene CON IVA a la tasa
+    fija de envíos (21%, no la del SKU) — se lo sacamos acá para dejarlo neto,
+    listo para usarse directo (sin dividir de nuevo por el factor del SKU).
+    Cacheado 10 min (misma cuenta de Margen no cambia seguido)."""
     key = tuple(sorted(account_ids))
     cached = _MARGEN_ENVIO_CACHE.get(key)
     now = datetime.utcnow()
@@ -4405,6 +4411,7 @@ def _margen_envio_auto_map(account_ids: list, days: int = MARGEN_ENVIO_LOOKBACK_
     for aid in account_ids:
         all_orders.extend(db_fetch_order_snapshots(aid, df, dt))
     all_orders.sort(key=lambda o: (o.get("fecha") or "", o.get("hora") or ""), reverse=True)
+    envio_factor = 1 + MARGEN_ENVIO_IVA_RATE / 100.0
     out: dict = {}
     for o in all_orders:
         if o.get("estado") != "paid":
@@ -4417,9 +4424,9 @@ def _margen_envio_auto_map(account_ids: list, days: int = MARGEN_ENVIO_LOOKBACK_
         sku = (items[0].get("sku") or "").strip().upper()
         if not sku or sku in out:
             continue
-        envio = float(o.get("envio") or 0)
-        if envio > 0:
-            out[sku] = envio
+        envio_con_iva = float(o.get("envio") or 0)
+        if envio_con_iva > 0:
+            out[sku] = envio_con_iva / envio_factor
     _MARGEN_ENVIO_CACHE[key] = {"at": now, "map": out}
     return out
 
@@ -4442,9 +4449,10 @@ def margen_compute(pvp_meli, iva_rate, comision_var, costo_sin_iva, p,
     resta como la comisión variable. Todo se netea con el factor de IVA del SKU.
     Envío (solo aplica si pvp_meli >= envio_threshold, si no es 0): `envio_manual`
     (ya neteado de IVA, mismo criterio que costo_sin_iva) pisa todo si viene
-    cargado; si no, `envio_auto` (CON IVA, costo real de la última venta con
-    Colecta de ese SKU — ver `_margen_envio_auto_map`) reemplaza al envío
-    promedio configurado cuando está disponible."""
+    cargado. Si no, y falta el envío promedio configurado, `envio_auto` (ya
+    neto — se le sacó el 21% de IVA fijo de envíos en `_margen_envio_auto_map`,
+    NO el iva_rate del SKU — así que se usa DIRECTO, sin dividir por `factor`
+    de nuevo) lo reemplaza cuando hay una venta real reciente con Colecta."""
     if not pvp_meli or pvp_meli <= 0:
         return None
     factor = 1 + (float(iva_rate or 0) / 100.0)
@@ -4457,8 +4465,7 @@ def margen_compute(pvp_meli, iva_rate, comision_var, costo_sin_iva, p,
     if envio_manual is not None:
         envio_amt = float(envio_manual)
     elif pvp_meli >= p["envio_threshold"]:
-        envio_base = float(envio_auto) if envio_auto is not None else p["envio_promedio"]
-        envio_amt = envio_base / factor
+        envio_amt = float(envio_auto) if envio_auto is not None else (p["envio_promedio"] / factor)
     else:
         envio_amt = 0.0
     cobro = pvp_sin_iva - comision_var_amt - com_cuotas_amt - fija_amt - envio_amt
