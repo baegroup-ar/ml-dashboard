@@ -301,6 +301,9 @@ def init_db():
         # Ingreso confirmado en Compras. Si está cargada, la fila cuenta como
         # una compra real para las Métricas de compra; si no, queda NULL.
         conn.execute(text("ALTER TABLE product_costs ADD COLUMN IF NOT EXISTS qty NUMERIC(12,2)"))
+        # Proveedor: opcional, editable en Costos y en Posible Compra (se
+        # arrastra al confirmar el Ingreso).
+        conn.execute(text("ALTER TABLE product_costs ADD COLUMN IF NOT EXISTS proveedor TEXT"))
         conn.execute(text("UPDATE product_costs SET valid_from = CAST(updated_at AS DATE) WHERE valid_from IS NULL"))
         conn.execute(text("ALTER TABLE product_costs ALTER COLUMN valid_from SET NOT NULL"))
         # Cambiar PK a (account_id, sku, valid_from) si todavía no lo es.
@@ -327,6 +330,7 @@ def init_db():
                 created_at TIMESTAMP NOT NULL DEFAULT NOW()
             )
         """))
+        conn.execute(text("ALTER TABLE purchase_items ADD COLUMN IF NOT EXISTS proveedor TEXT"))
         # Tabla de tarifas Flex (costo real que el vendedor paga a la
         # mensajería, por zona de entrega y con fecha de vigencia).
         conn.execute(text("""
@@ -1668,20 +1672,27 @@ def db_save_product_costs(account_id: int, items: list):
             qty = float(qty) if qty is not None else None
         except (TypeError, ValueError):
             qty = None
+        # proveedor: si no viene (p.ej. import de Excel sin esa columna),
+        # None hace que el COALESCE de abajo preserve el proveedor ya
+        # guardado en vez de borrarlo.
+        proveedor = it.get("proveedor")
+        if proveedor is not None:
+            proveedor = str(proveedor).strip()
         params.append({
             "aid": account_id, "sku": sku, "cost": cost,
-            "iva_rate": iva_rate, "vf": vf, "qty": qty,
+            "iva_rate": iva_rate, "vf": vf, "qty": qty, "proveedor": proveedor,
         })
     if not params:
         return 0
     with engine.connect() as conn:
         conn.execute(text(
-            "INSERT INTO product_costs (account_id, sku, cost, iva_rate, valid_from, qty, updated_at)"
-            " VALUES (:aid, :sku, :cost, :iva_rate, :vf, :qty, NOW())"
+            "INSERT INTO product_costs (account_id, sku, cost, iva_rate, valid_from, qty, proveedor, updated_at)"
+            " VALUES (:aid, :sku, :cost, :iva_rate, :vf, :qty, :proveedor, NOW())"
             " ON CONFLICT (account_id, sku, valid_from) DO UPDATE SET"
             " cost = EXCLUDED.cost,"
             " iva_rate = EXCLUDED.iva_rate,"
             " qty = COALESCE(EXCLUDED.qty, product_costs.qty),"
+            " proveedor = COALESCE(EXCLUDED.proveedor, product_costs.proveedor),"
             " updated_at = NOW()"
         ), params)
         conn.commit()
@@ -2021,7 +2032,7 @@ async def api_costos_list(request: Request, account_id: int):
     user = get_user(user_id)
     cost_aid = _cost_account_id_for(user, account_id)
     rows = db_fetchall(
-        "SELECT sku, cost, iva_rate, valid_from, qty, updated_at FROM product_costs"
+        "SELECT sku, cost, iva_rate, valid_from, qty, proveedor, updated_at FROM product_costs"
         " WHERE account_id=:aid ORDER BY valid_from DESC, sku",
         {"aid": cost_aid},
     )
@@ -2031,6 +2042,7 @@ async def api_costos_list(request: Request, account_id: int):
                 "sku": r["sku"],
                 "cost": float(r["cost"]),
                 "iva_rate": float(r["iva_rate"] if r["iva_rate"] is not None else 21),
+                "proveedor": r.get("proveedor") or "",
                 "valid_from": r["valid_from"].isoformat() if hasattr(r["valid_from"], "isoformat") else str(r["valid_from"]),
                 "qty": float(r["qty"]) if r.get("qty") is not None else None,
                 "updated_at": r["updated_at"].isoformat() if r.get("updated_at") else None,
@@ -2148,6 +2160,7 @@ async def api_costos_upsert(
     valid_from: Optional[str] = Form(None),
     iva_rate: Optional[str] = Form(None),
     qty: Optional[str] = Form(None),
+    proveedor: Optional[str] = Form(None),
 ):
     """`qty` (Cantidad) es opcional: si se carga, esta entry cuenta como una
     compra real para las Métricas de compra (product_costs.qty)."""
@@ -2170,7 +2183,7 @@ async def api_costos_upsert(
     saved = db_save_product_costs(cost_aid, [{
         "sku": sku, "cost": cost,
         "valid_from": valid_from or datetime.utcnow().date().isoformat(),
-        "iva_rate": rate_val, "qty": qty_val,
+        "iva_rate": rate_val, "qty": qty_val, "proveedor": (proveedor or "").strip(),
     }])
     _invalidate_all_user_accounts_cache(user, account_id)
     return {"ok": True, "saved": saved}
@@ -2186,6 +2199,7 @@ async def api_costos_edit(
     valid_from: str = Form(...),
     iva_rate: Optional[str] = Form(None),
     qty: Optional[str] = Form(None),
+    proveedor: Optional[str] = Form(None),
 ):
     """Edita una entry de costo: borra la vieja (old_sku, old_valid_from)
     e inserta la nueva. Sirve para corregir errores de carga incluyendo
@@ -2217,7 +2231,7 @@ async def api_costos_edit(
     saved = db_save_product_costs(cost_aid, [{
         "sku": sku, "cost": cost,
         "valid_from": valid_from,
-        "iva_rate": rate_val, "qty": qty_val,
+        "iva_rate": rate_val, "qty": qty_val, "proveedor": (proveedor or "").strip(),
     }])
     _invalidate_all_user_accounts_cache(user, account_id)
     return {"ok": True, "saved": saved}
@@ -2531,7 +2545,7 @@ async def api_compras_list(request: Request, account_id: int):
     user = get_user(user_id)
     cost_aid = _cost_account_id_for(user, account_id)
     rows = db_fetchall(
-        "SELECT id, sku, qty, cost, iva_rate, created_at FROM purchase_items"
+        "SELECT id, sku, qty, cost, iva_rate, proveedor, created_at FROM purchase_items"
         " WHERE account_id=:aid ORDER BY created_at",
         {"aid": cost_aid},
     )
@@ -2543,6 +2557,7 @@ async def api_compras_list(request: Request, account_id: int):
                 "qty": float(r["qty"]),
                 "cost": float(r["cost"]),
                 "iva_rate": float(r["iva_rate"] if r["iva_rate"] is not None else 21),
+                "proveedor": r.get("proveedor") or "",
                 "created_at": r["created_at"].isoformat() if r.get("created_at") else None,
             }
             for r in rows
@@ -2557,6 +2572,7 @@ async def api_compras_add(
     qty: float = Form(...),
     cost: float = Form(...),
     iva_rate: Optional[str] = Form(None),
+    proveedor: Optional[str] = Form(None),
 ):
     user_id = get_session_user_id(request)
     if not user_id:
@@ -2574,9 +2590,46 @@ async def api_compras_add(
     except ValueError:
         rate_val = 21.0
     db_execute(
-        "INSERT INTO purchase_items (account_id, sku, qty, cost, iva_rate)"
-        " VALUES (:aid, :sku, :qty, :cost, :iva_rate)",
-        {"aid": cost_aid, "sku": sku, "qty": qty, "cost": cost, "iva_rate": rate_val},
+        "INSERT INTO purchase_items (account_id, sku, qty, cost, iva_rate, proveedor)"
+        " VALUES (:aid, :sku, :qty, :cost, :iva_rate, :proveedor)",
+        {"aid": cost_aid, "sku": sku, "qty": qty, "cost": cost, "iva_rate": rate_val,
+         "proveedor": (proveedor or "").strip()},
+    )
+    return {"ok": True}
+
+
+@app.put("/api/compras/{account_id}/{item_id}")
+async def api_compras_edit(
+    request: Request, account_id: int, item_id: int,
+    sku: str = Form(...),
+    qty: float = Form(...),
+    cost: float = Form(...),
+    iva_rate: Optional[str] = Form(None),
+    proveedor: Optional[str] = Form(None),
+):
+    """Edita un renglón pendiente de Posible Compra (SKU, cantidad, costo
+    s/IVA, condición de IVA y proveedor), todos editables inline en la
+    tabla."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    sku = (sku or "").strip()
+    if not sku or qty <= 0 or cost <= 0:
+        raise HTTPException(400, "SKU, cantidad y costo son obligatorios")
+    user = get_user(user_id)
+    cost_aid = _cost_account_id_for(user, account_id)
+    try:
+        rate_val = float(iva_rate) if iva_rate is not None and iva_rate != "" else 21.0
+    except ValueError:
+        rate_val = 21.0
+    db_execute(
+        "UPDATE purchase_items SET sku=:sku, qty=:qty, cost=:cost, iva_rate=:iva_rate,"
+        " proveedor=:proveedor WHERE id=:id AND account_id=:aid",
+        {"sku": sku, "qty": qty, "cost": cost, "iva_rate": rate_val,
+         "proveedor": (proveedor or "").strip(), "id": item_id, "aid": cost_aid},
     )
     return {"ok": True}
 
@@ -2646,7 +2699,7 @@ async def api_compras_ingreso(request: Request, account_id: int):
     sel_placeholders, sel_params = _in_placeholders(ids)
     sel_params["aid"] = cost_aid
     rows = db_fetchall(
-        f"SELECT id, sku, qty, cost, iva_rate FROM purchase_items"
+        f"SELECT id, sku, qty, cost, iva_rate, proveedor FROM purchase_items"
         f" WHERE account_id=:aid AND id IN ({sel_placeholders})",
         sel_params,
     )
@@ -2656,18 +2709,22 @@ async def api_compras_ingreso(request: Request, account_id: int):
     # product_costs solo admite una fila por SKU+fecha: si el mismo SKU viene en
     # más de un renglón del ingreso, se agrupan sumando cantidad y promediando
     # el costo ponderado por cantidad (así qty*cost sigue dando el total pagado).
+    # El proveedor se toma del primer renglón que lo tenga cargado.
     grouped = {}
     for r in rows:
         sku = r["sku"]
         qty = float(r["qty"] or 0)
         cost = float(r["cost"])
         iva_rate = float(r["iva_rate"]) if r["iva_rate"] is not None else 21.0
-        g = grouped.setdefault(sku, {"qty": 0.0, "amount": 0.0, "iva_rate": iva_rate})
+        g = grouped.setdefault(sku, {"qty": 0.0, "amount": 0.0, "iva_rate": iva_rate, "proveedor": None})
         g["qty"] += qty
         g["amount"] += qty * cost
+        if not g["proveedor"] and r.get("proveedor"):
+            g["proveedor"] = r["proveedor"]
     saved = db_save_product_costs(cost_aid, [
         {"sku": sku, "cost": (g["amount"] / g["qty"]) if g["qty"] else 0.0,
-         "iva_rate": g["iva_rate"], "valid_from": today_iso, "qty": g["qty"]}
+         "iva_rate": g["iva_rate"], "valid_from": today_iso, "qty": g["qty"],
+         "proveedor": g["proveedor"]}
         for sku, g in grouped.items()
     ])
     del_placeholders, del_params = _in_placeholders([r["id"] for r in rows], "d")

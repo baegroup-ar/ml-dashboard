@@ -58,6 +58,8 @@
     .btn-ingreso { color: #fff; background: #1a8a5a; border: none; cursor: pointer; font-size: 12px; padding: 5px 12px; border-radius: 6px; font-weight: 500; }
     .btn-ingreso:hover { background: #157047; }
     .row-edit input { padding: 4px 6px; border: 1px solid #ddd; border-radius: 4px; font-size: 12px; font-family: 'Inter', sans-serif; width: 100%; }
+    .cell-input { padding: 4px 6px; border: 1px solid #ddd; border-radius: 4px; font-size: 12px; font-family: 'Inter', sans-serif; width: 100%; background: #fff; }
+    .cell-input:focus { border-color: #005CFF; outline: none; }
     .empty { padding: 2rem; text-align: center; color: #aaa; font-size: 13px; }
     .msg { padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-top: 10px; }
     .msg.ok { background: #e6f5ee; color: #1a8a5a; border: 1px solid #c5e9d8; }
@@ -212,6 +214,7 @@
     <div class="card">
       <h3>Agregar / actualizar manualmente</h3>
       <div class="add-row">
+        <input type="text" id="manual-proveedor" class="sku" style="text-transform:none;" placeholder="Proveedor (opcional)" />
         <input type="text" id="manual-sku" class="sku" placeholder="SKU (ej. SOP68-443)" />
         <input type="number" id="manual-cost" class="cost" placeholder="Costo sin IVA" step="0.01" min="0" />
         <input type="date" id="manual-fecha" title="Vigente desde" />
@@ -234,10 +237,10 @@
       <div style="overflow:auto;max-height:65vh;">
         <table>
           <thead><tr>
-            <th>SKU</th><th>Costo sin IVA</th><th>IVA</th><th>Costo con IVA</th><th>Cantidad</th><th>Valorizado</th><th>Vigente desde</th><th>Actualizado</th><th class="actions">Acciones</th>
+            <th>Proveedor</th><th>SKU</th><th>Costo sin IVA</th><th>IVA</th><th>Costo con IVA</th><th>Cantidad</th><th>Valorizado</th><th>Vigente desde</th><th>Actualizado</th><th class="actions">Acciones</th>
           </tr></thead>
           <tbody id="costs-tbody">
-            <tr><td colspan="9" class="empty">Cargando...</td></tr>
+            <tr><td colspan="10" class="empty">Cargando...</td></tr>
           </tbody>
         </table>
       </div>
@@ -277,6 +280,7 @@
     <div class="card">
       <h3>Agregar renglón</h3>
       <div class="add-row">
+        <input type="text" id="new-proveedor" class="sku" style="text-transform:none;" placeholder="Proveedor" />
         <input type="text" id="new-sku" class="sku" placeholder="SKU (ej. SOP68-443)" />
         <input type="number" id="new-qty" class="qty" placeholder="Cantidad" step="1" min="0" />
         <input type="number" id="new-cost" class="cost" placeholder="Costo sin IVA" step="0.01" min="0" />
@@ -301,13 +305,14 @@
         <table>
           <thead><tr>
             <th style="width:30px;"><input type="checkbox" id="chk-all" onchange="toggleAll(this.checked)" /></th>
-            <th>SKU</th><th>Cantidad</th><th>Costo s/IVA</th><th>Cond. IVA</th><th>Valorizado</th><th class="actions">Acciones</th>
+            <th>Proveedor</th><th>SKU</th><th>Cantidad</th><th>Costo s/IVA</th><th>Cond. IVA</th><th>Valorizado</th><th class="actions">Acciones</th>
           </tr></thead>
           <tbody id="items-tbody">
-            <tr><td colspan="7" class="empty">Cargando...</td></tr>
+            <tr><td colspan="8" class="empty">Cargando...</td></tr>
           </tbody>
           <tfoot id="items-tfoot" style="display:none;">
             <tr>
+              <td></td>
               <td></td>
               <td>Total</td>
               <td id="total-qty"></td>
@@ -365,7 +370,7 @@
     if(!ACCOUNT_ID) return;
     pendientesLoaded = true;
     const tbody = document.getElementById('items-tbody');
-    tbody.innerHTML = '<tr><td colspan="7" class="empty">Cargando...</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" class="empty">Cargando...</td></tr>';
     try {
       const r = await fetch(`/api/compras/${ACCOUNT_ID}`);
       if(!r.ok) throw new Error('Error al cargar');
@@ -373,9 +378,13 @@
       allItems = data.items || [];
       renderPendientesTable();
     } catch(e) {
-      tbody.innerHTML = `<tr><td colspan="7" class="empty">Error: ${e.message}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="8" class="empty">Error: ${e.message}</td></tr>`;
     }
   }
+
+  // Costo CON IVA a partir del costo sin IVA y la tasa (21, 10.5, 0=exento).
+  // Mismo criterio que cost_with_iva() en el backend.
+  function costWithIva(cost, rate) { return cost * (1 + (rate || 0) / 100); }
 
   function renderPendientesTable() {
     const tbody = document.getElementById('items-tbody');
@@ -383,29 +392,32 @@
     document.getElementById('pendientes-count-label').textContent =
       `${allItems.length} renglón${allItems.length===1?'':'es'} pendiente${allItems.length===1?'':'s'}`;
     if(!allItems.length) {
-      tbody.innerHTML = '<tr><td colspan="7" class="empty">No hay renglones pendientes. Agregá uno arriba.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="8" class="empty">No hay renglones pendientes. Agregá uno arriba.</td></tr>';
       tfoot.style.display = 'none';
       updateBulkBar();
       return;
     }
     tfoot.style.display = '';
-    const totalQty = allItems.reduce((s, it) => s + Number(it.qty || 0), 0);
-    const totalValorizado = allItems.reduce((s, it) => s + Number(it.qty || 0) * Number(it.cost || 0), 0);
-    document.getElementById('total-qty').textContent = totalQty.toLocaleString('es-AR');
-    document.getElementById('total-valorizado').textContent = fmt(totalValorizado);
     tbody.innerHTML = allItems.map(it => {
-      const rate = Number(it.iva_rate || 0);
-      const ivaLabel = rate === 0 ? 'Exento' : `${rate}%`;
-      const valorizado = it.qty * it.cost;
       const checked = SEL.has(it.id) ? 'checked' : '';
+      const rate = Number(it.iva_rate || 0);
       return `
         <tr data-id="${it.id}">
           <td><input type="checkbox" class="chk-row" ${checked} onchange="chkRow(${it.id}, this.checked)" /></td>
-          <td><b>${it.sku}</b></td>
-          <td>${it.qty}</td>
-          <td>${fmt(it.cost)}</td>
-          <td style="font-size:12px;color:#555;">${ivaLabel}</td>
-          <td style="color:#1a8a5a;">${fmt(valorizado)}</td>
+          <td><input type="text" class="cell-input prov-inp" value="${escAttr(it.proveedor || '')}"
+                     oninput="scheduleSaveRow(${it.id})" placeholder="—" /></td>
+          <td><input type="text" class="cell-input sku-inp" style="text-transform:uppercase;" value="${escAttr(it.sku)}"
+                     oninput="scheduleSaveRow(${it.id})" /></td>
+          <td><input type="number" class="cell-input qty-inp" value="${it.qty}" step="1" min="0"
+                     style="width:70px;" oninput="recalcRow(${it.id}); scheduleSaveRow(${it.id})" /></td>
+          <td><input type="number" class="cell-input cost-inp" value="${it.cost}" step="0.01" min="0"
+                     style="width:100px;" oninput="recalcRow(${it.id}); scheduleSaveRow(${it.id})" /></td>
+          <td><select class="cell-input iva-inp" onchange="recalcRow(${it.id}); scheduleSaveRow(${it.id})">
+                <option value="21" ${rate===21?'selected':''}>21%</option>
+                <option value="10.5" ${rate===10.5?'selected':''}>10.5%</option>
+                <option value="0" ${rate===0?'selected':''}>Exento (0%)</option>
+              </select></td>
+          <td class="val-cell" style="color:#1a8a5a;"></td>
           <td class="actions">
             <button class="btn-ingreso" onclick="ingresoOne(${it.id})">Ingreso</button>
             <button class="btn-delete" onclick="deleteItem(${it.id})">Eliminar</button>
@@ -413,7 +425,72 @@
         </tr>
       `;
     }).join('');
+    allItems.forEach(it => recalcRow(it.id));
     updateBulkBar();
+  }
+
+  function escAttr(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  // Recalcula (en vivo, sin pegarle al servidor) el Valorizado de una fila:
+  // cantidad × costo CON IVA, y actualiza el total del pie de tabla.
+  function recalcRow(id) {
+    const tr = document.querySelector(`tr[data-id="${id}"]`);
+    if(!tr) return;
+    const qty = parseFloat(tr.querySelector('.qty-inp').value) || 0;
+    const cost = parseFloat(tr.querySelector('.cost-inp').value) || 0;
+    const rate = parseFloat(tr.querySelector('.iva-inp').value) || 0;
+    const valorizado = qty * costWithIva(cost, rate);
+    tr.querySelector('.val-cell').textContent = fmt(valorizado);
+    updateTotals();
+  }
+
+  function updateTotals() {
+    let totalQty = 0, totalValorizado = 0;
+    document.querySelectorAll('#items-tbody tr[data-id]').forEach(tr => {
+      const qty = parseFloat(tr.querySelector('.qty-inp').value) || 0;
+      const cost = parseFloat(tr.querySelector('.cost-inp').value) || 0;
+      const rate = parseFloat(tr.querySelector('.iva-inp').value) || 0;
+      totalQty += qty;
+      totalValorizado += qty * costWithIva(cost, rate);
+    });
+    document.getElementById('total-qty').textContent = totalQty.toLocaleString('es-AR');
+    document.getElementById('total-valorizado').textContent = fmt(totalValorizado);
+  }
+
+  // Guarda con un pequeño debounce (el usuario puede seguir tipeando sin
+  // disparar un request por cada tecla) usando SIEMPRE el estado actual de
+  // la fila en el DOM (no el objeto viejo en memoria).
+  const SAVE_TIMERS = {};
+  function scheduleSaveRow(id) {
+    clearTimeout(SAVE_TIMERS[id]);
+    SAVE_TIMERS[id] = setTimeout(() => saveRow(id), 600);
+  }
+
+  async function saveRow(id) {
+    const tr = document.querySelector(`tr[data-id="${id}"]`);
+    if(!tr) return;
+    const proveedor = tr.querySelector('.prov-inp').value.trim();
+    const sku = tr.querySelector('.sku-inp').value.trim().toUpperCase();
+    const qty = parseFloat(tr.querySelector('.qty-inp').value);
+    const cost = parseFloat(tr.querySelector('.cost-inp').value);
+    const ivaRate = tr.querySelector('.iva-inp').value;
+    if(!sku || isNaN(qty) || qty <= 0 || isNaN(cost) || cost <= 0) return;
+    const form = new FormData();
+    form.append('sku', sku);
+    form.append('qty', String(qty));
+    form.append('cost', String(cost));
+    form.append('iva_rate', ivaRate);
+    form.append('proveedor', proveedor);
+    try {
+      const r = await fetch(`/api/compras/${ACCOUNT_ID}/${id}`, { method: 'PUT', body: form });
+      if(!r.ok) throw new Error('Error al guardar');
+      const it = allItems.find(x => x.id === id);
+      if(it) Object.assign(it, { proveedor, sku, qty, cost, iva_rate: parseFloat(ivaRate) });
+    } catch(e) {
+      console.error(e);
+    }
   }
 
   function chkRow(id, checked) {
@@ -470,6 +547,7 @@
 
   async function addItem() {
     if(!ACCOUNT_ID) return;
+    const proveedor = (document.getElementById('new-proveedor').value || '').trim();
     const sku = (document.getElementById('new-sku').value || '').trim();
     const qty = parseFloat(document.getElementById('new-qty').value);
     const cost = parseFloat(document.getElementById('new-cost').value);
@@ -484,10 +562,12 @@
     form.append('qty', String(qty));
     form.append('cost', String(cost));
     form.append('iva_rate', ivaRate);
+    form.append('proveedor', proveedor);
     try {
       const r = await fetch(`/api/compras/${ACCOUNT_ID}`, { method: 'POST', body: form });
       if(!r.ok) throw new Error('Error al guardar');
       msg.innerHTML = '';
+      document.getElementById('new-proveedor').value = '';
       document.getElementById('new-sku').value = '';
       document.getElementById('new-qty').value = '';
       document.getElementById('new-cost').value = '';
@@ -575,7 +655,7 @@
     if(!ACCOUNT_ID) return;
     costosLoaded = true;
     const tbody = document.getElementById('costs-tbody');
-    tbody.innerHTML = '<tr><td colspan="9" class="empty">Cargando...</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="10" class="empty">Cargando...</td></tr>';
     try {
       const r = await fetch(`/api/costos/${ACCOUNT_ID}`);
       if(!r.ok) throw new Error('Error al cargar');
@@ -583,7 +663,7 @@
       allCosts = data.items || [];
       renderCostosTable();
     } catch(e) {
-      tbody.innerHTML = `<tr><td colspan="9" class="empty">Error: ${e.message}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="10" class="empty">Error: ${e.message}</td></tr>`;
     }
   }
 
@@ -597,7 +677,7 @@
     document.getElementById('count-label').textContent =
       `${uniqueSkus} SKU${uniqueSkus===1?'':'s'} · ${allCosts.length} entrada${allCosts.length===1?'':'s'}`;
     if(!items.length) {
-      tbody.innerHTML = `<tr><td colspan="9" class="empty">${filter ? 'Sin resultados.' : 'Todavía no hay costos cargados.'}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="10" class="empty">${filter ? 'Sin resultados.' : 'Todavía no hay costos cargados.'}</td></tr>`;
       return;
     }
     tbody.innerHTML = items.map(it => {
@@ -605,11 +685,13 @@
       const costoConIva = it.cost * (1 + rate / 100);
       const ivaLabel = rate === 0 ? 'Exento' : `${rate}%`;
       const skuEsc = it.sku.replace(/'/g, "\\'");
+      const provEsc = (it.proveedor || '').replace(/'/g, "\\'");
       const rowId = `${it.sku}|${it.valid_from}`.replace(/[^a-zA-Z0-9_]/g, '_');
       const qtyVal = it.qty != null ? it.qty : '';
       const valorizado = it.qty != null ? it.qty * costoConIva : null;
       return `
         <tr data-row-id="${rowId}" data-old-sku="${it.sku}" data-old-vf="${it.valid_from}">
+          <td class="c-prov" style="font-size:12px;">${escHtml(it.proveedor || '—')}</td>
           <td class="c-sku"><b>${it.sku}</b></td>
           <td class="c-cost">${fmt(it.cost)}</td>
           <td class="c-iva" style="font-size:12px;color:#555;">${ivaLabel}</td>
@@ -619,7 +701,7 @@
           <td class="c-vf" style="font-size:12px;">${it.valid_from || '—'}</td>
           <td style="color:#888;font-size:12px;">${it.updated_at ? new Date(it.updated_at + 'Z').toLocaleString('es-AR', {dateStyle:'short', timeStyle:'short'}) : ''}</td>
           <td class="actions">
-            <button class="btn-edit" onclick="startEdit('${rowId}', '${skuEsc}', ${it.cost}, '${it.valid_from}', ${rate}, '${qtyVal}')">Editar</button>
+            <button class="btn-edit" onclick="startEdit('${rowId}', '${provEsc}', '${skuEsc}', ${it.cost}, '${it.valid_from}', ${rate}, '${qtyVal}')">Editar</button>
             <button class="btn-delete" onclick="deleteCost('${skuEsc}', '${it.valid_from}')">Eliminar</button>
           </td>
         </tr>
@@ -627,10 +709,11 @@
     }).join('');
   }
 
-  function startEdit(rowId, sku, cost, validFrom, ivaRate, qty) {
+  function startEdit(rowId, proveedor, sku, cost, validFrom, ivaRate, qty) {
     const tr = document.querySelector(`tr[data-row-id="${rowId}"]`);
     if(!tr) return;
     tr.classList.add('row-edit');
+    tr.querySelector('.c-prov').innerHTML = `<input type="text" id="edit-proveedor" value="${proveedor}" placeholder="Opcional" />`;
     tr.querySelector('.c-sku').innerHTML = `<input type="text" id="edit-sku" value="${sku}" />`;
     tr.querySelector('.c-cost').innerHTML = `<input type="number" id="edit-cost" value="${cost}" step="0.01" min="0" />`;
     tr.querySelector('.c-iva').innerHTML = `<input type="number" id="edit-iva" value="${ivaRate}" step="0.5" min="0" max="100" />`;
@@ -654,6 +737,7 @@
     const newIva = parseFloat(document.getElementById('edit-iva').value);
     const newVf = document.getElementById('edit-vf').value;
     const newQtyRaw = document.getElementById('edit-qty').value;
+    const newProveedor = (document.getElementById('edit-proveedor').value || '').trim();
     if(!newSku || isNaN(newCost) || newCost <= 0 || isNaN(newIva) || !newVf) {
       alert('Todos los campos son obligatorios.');
       return;
@@ -665,6 +749,7 @@
     form.append('cost', String(newCost));
     form.append('valid_from', newVf);
     form.append('iva_rate', String(newIva));
+    form.append('proveedor', newProveedor);
     if(newQtyRaw !== '') form.append('qty', newQtyRaw);
     try {
       const r = await fetch(`/api/costos/${ACCOUNT_ID}/edit`, { method: 'PUT', body: form });
@@ -711,6 +796,7 @@
 
   async function addCost() {
     if(!ACCOUNT_ID) return;
+    const proveedor = (document.getElementById('manual-proveedor').value || '').trim();
     const sku = (document.getElementById('manual-sku').value || '').trim();
     const cost = parseFloat(document.getElementById('manual-cost').value);
     const fecha = document.getElementById('manual-fecha').value || '';
@@ -731,11 +817,13 @@
     form.append('cost', String(cost));
     if(fecha) form.append('valid_from', fecha);
     form.append('iva_rate', String(ivaRate));
+    form.append('proveedor', proveedor);
     if(qtyRaw !== '') form.append('qty', qtyRaw);
     try {
       const r = await fetch(`/api/costos/${ACCOUNT_ID}`, { method: 'POST', body: form });
       if(!r.ok) throw new Error('Error al guardar');
       msg.innerHTML = '<div class="msg ok">Guardado.</div>';
+      document.getElementById('manual-proveedor').value = '';
       document.getElementById('manual-sku').value = '';
       document.getElementById('manual-cost').value = '';
       document.getElementById('manual-fecha').value = '';
