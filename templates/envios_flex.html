@@ -21,7 +21,7 @@
     .dropdown-menu a.dropdown-item, .dropdown-menu span.dropdown-item { display: block; padding: 8px 10px; font-size: 13px; color: #111; text-decoration: none; border-radius: 6px; white-space: nowrap; cursor: pointer; }
     .dropdown-menu a.dropdown-item:hover { background: #f5f5f3; }
     .dropdown-menu span.dropdown-item.active { color: #005CFF; font-weight: 500; background: #EAF1FF; cursor: default; }
-    main { max-width: 1100px; margin: 0 auto; padding: 1.5rem 0.75rem; }
+    main { max-width: 1400px; margin: 0 auto; padding: 1.5rem 0.75rem; }
     h1 { font-size: 20px; font-weight: 600; margin-bottom: 6px; }
     p.lead { font-size: 13px; color: #888; margin-bottom: 1.25rem; }
     .card { background: #fff; border: 1px solid #e5e5e3; border-radius: 12px; padding: 1.25rem; margin-bottom: 1.25rem; }
@@ -41,9 +41,9 @@
     .add-row input.iva { width: 90px; }
     .add-row button { padding: 8px 16px; border: none; border-radius: 8px; background: #005CFF; color: #fff; font-size: 13px; cursor: pointer; }
     .add-row button:hover { background: #2970e0; }
-    table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 12px; }
-    th { padding: 10px 14px; text-align: left; color: #888; font-weight: 500; border-bottom: 1px solid #eee; font-size: 12px; }
-    td { padding: 10px 14px; border-bottom: 1px solid #f0f0ee; color: #333; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 12px; }
+    th { padding: 7px 8px; text-align: left; color: #888; font-weight: 500; border-bottom: 1px solid #eee; font-size: 11px; background: #fff; position: sticky; top: 0; z-index: 2; }
+    td { padding: 6px 8px; border-bottom: 1px solid #f0f0ee; color: #333; }
     tr:last-child td { border-bottom: none; }
     .actions { text-align: right; }
     .btn-delete { color: #c0392b; background: none; border: none; cursor: pointer; font-size: 12px; padding: 4px 8px; border-radius: 6px; }
@@ -169,7 +169,7 @@
 
   <div class="card">
     <h3>Tarifas cargadas</h3>
-    <div style="overflow-x:auto;">
+    <div style="overflow:auto;max-height:65vh;">
       <table>
         <thead><tr>
           <th>Zona</th><th>Tarifa Propia (sin IVA)</th><th>IVA</th><th>Tarifa Propia con IVA</th><th>Tarifa ML</th><th>Vigente desde</th><th>Actualizado</th><th class="actions">Acciones</th>

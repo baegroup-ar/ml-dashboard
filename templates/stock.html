@@ -35,7 +35,7 @@
     button.ghost { padding: 8px 14px; border: 1px solid #ddd; border-radius: 8px; background: #fff; color: #111; font-size: 13px; cursor: pointer; }
     button:disabled { background: #ccc !important; color: #fff !important; cursor: not-allowed; }
     table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 12px; }
-    th { padding: 7px 6px; text-align: left; color: #888; font-weight: 500; border-bottom: 1px solid #eee; font-size: 11px; white-space: nowrap; }
+    th { padding: 7px 6px; text-align: left; color: #888; font-weight: 500; border-bottom: 1px solid #eee; font-size: 11px; white-space: nowrap; background: #fff; position: sticky; top: 0; z-index: 2; }
     td { padding: 6px 6px; height: 34px; border-bottom: 1px solid #f0f0ee; color: #333; white-space: nowrap; }
     /* Ninguna columna hace wrap (ni siquiera la de SKU): así todas las filas
        quedan de la misma altura, sea cual sea el largo del contenido. */
@@ -176,7 +176,7 @@
       <span><span class="lbl">SKUs con stock sin precio</span><b id="sum-sinprecio">0</b></span>
     </div>
     <div id="sales-warn"></div>
-    <div style="overflow-x:auto;">
+    <div style="overflow:auto;max-height:65vh;">
       <table>
         <thead><tr>
           <th>SKU</th><th class="num">Stock ML</th><th class="num">Stock Full</th>

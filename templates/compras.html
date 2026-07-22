@@ -23,7 +23,7 @@
     .dropdown-menu span.dropdown-item.active { color: #005CFF; font-weight: 500; background: #EAF1FF; cursor: default; }
     .btn-blue { background: #005CFF; color: #fff !important; border-color: #005CFF; }
     .btn-blue:hover { background: #2970e0 !important; }
-    main { max-width: 1100px; margin: 0 auto; padding: 1.5rem 0.75rem; }
+    main { max-width: 1400px; margin: 0 auto; padding: 1.5rem 0.75rem; }
     h1 { font-size: 20px; font-weight: 600; margin-bottom: 6px; }
     p.lead { font-size: 13px; color: #888; margin-bottom: 1.25rem; }
     .card { background: #fff; border: 1px solid #e5e5e3; border-radius: 12px; padding: 1.25rem; margin-bottom: 1.25rem; }
@@ -44,9 +44,9 @@
     .add-row input[type=date] { width: 140px; }
     .add-row button { padding: 8px 16px; border: none; border-radius: 8px; background: #005CFF; color: #fff; font-size: 13px; cursor: pointer; }
     .add-row button:hover { background: #2970e0; }
-    table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 12px; }
-    th { padding: 10px 14px; text-align: left; color: #888; font-weight: 500; border-bottom: 1px solid #eee; font-size: 12px; }
-    td { padding: 10px 14px; border-bottom: 1px solid #f0f0ee; color: #333; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 12px; }
+    th { padding: 7px 8px; text-align: left; color: #888; font-weight: 500; border-bottom: 1px solid #eee; font-size: 11px; background: #fff; position: sticky; top: 0; z-index: 2; }
+    td { padding: 6px 8px; border-bottom: 1px solid #f0f0ee; color: #333; }
     tr:last-child td { border-bottom: none; }
     .actions { text-align: right; white-space: nowrap; }
     .btn-delete { color: #c0392b; background: none; border: none; cursor: pointer; font-size: 12px; padding: 4px 8px; border-radius: 6px; }
@@ -70,7 +70,7 @@
     .bulk-bar button:hover { background: #157047; }
     .bulk-bar button.bulk-delete { background: #c0392b; }
     .bulk-bar button.bulk-delete:hover { background: #a5301f; }
-    tfoot td { padding: 10px 14px; border-top: 2px solid #e5e5e3; font-weight: 600; color: #111; }
+    tfoot td { padding: 6px 8px; border-top: 2px solid #e5e5e3; font-weight: 600; color: #111; }
     .search-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
     .search-row input { flex: 1; padding: 7px 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 13px; }
     .tabs { display: flex; gap: 6px; margin-bottom: 14px; }
@@ -157,7 +157,7 @@
         <input type="text" id="metrics-filter-sku" placeholder="Buscar por SKU..." oninput="renderMetricsTree()" />
         <span class="count" id="metrics-count-label"></span>
       </div>
-      <div style="overflow-x:auto;">
+      <div style="overflow:auto;max-height:65vh;">
         <table>
           <thead><tr>
             <th>Año / Mes / Semana / SKU</th><th class="num">Cantidad</th><th class="num">Total sin IVA</th><th class="num">Total con IVA</th>
@@ -231,7 +231,7 @@
       <div class="search-row">
         <input type="text" id="filter-input" placeholder="Buscar por SKU..." oninput="renderCostosTable()" />
       </div>
-      <div style="overflow-x:auto;">
+      <div style="overflow:auto;max-height:65vh;">
         <table>
           <thead><tr>
             <th>SKU</th><th>Costo sin IVA</th><th>IVA</th><th>Costo con IVA</th><th>Cantidad</th><th>Valorizado</th><th>Vigente desde</th><th>Actualizado</th><th class="actions">Acciones</th>
@@ -297,7 +297,7 @@
         <button onclick="ingresoBulk()">Ingresar seleccionados</button>
         <button class="bulk-delete" onclick="deleteBulk()">Eliminar seleccionados</button>
       </div>
-      <div style="overflow-x:auto;">
+      <div style="overflow:auto;max-height:65vh;">
         <table>
           <thead><tr>
             <th style="width:30px;"><input type="checkbox" id="chk-all" onchange="toggleAll(this.checked)" /></th>

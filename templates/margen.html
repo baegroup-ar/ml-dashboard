@@ -19,7 +19,7 @@
     .nav-dropdown:hover .dropdown-menu { display: flex; }
     .dropdown-menu a.dropdown-item, .dropdown-menu span.dropdown-item { display: block; padding: 8px 10px; font-size: 13px; color: #111; text-decoration: none; border-radius: 6px; white-space: nowrap; cursor: pointer; }
     .dropdown-menu a.dropdown-item:hover { background: #f5f5f3; }
-    main { max-width: 1200px; margin: 0 auto; padding: 1.5rem 0.75rem; }
+    main { max-width: 1600px; margin: 0 auto; padding: 1.5rem 0.75rem; }
     h1 { font-size: 20px; font-weight: 600; margin-bottom: 6px; }
     p.lead { font-size: 13px; color: #888; margin-bottom: 1.25rem; }
     .card { background: #fff; border: 1px solid #e5e5e3; border-radius: 12px; padding: 1.25rem; margin-bottom: 1.25rem; }
@@ -30,10 +30,10 @@
     .row select { min-width: 220px; }
     button.primary { padding: 8px 16px; border: none; border-radius: 8px; background: #005CFF; color: #fff; font-size: 13px; cursor: pointer; }
     button.green { padding: 8px 16px; border: none; border-radius: 8px; background: #1a8a5a; color: #fff; font-size: 13px; cursor: pointer; }
-    table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 12px; }
-    th { padding: 9px 10px; text-align: left; color: #888; font-weight: 500; border-bottom: 1px solid #eee; font-size: 12px; white-space: nowrap; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 12px; }
+    th { padding: 7px 7px; text-align: left; color: #888; font-weight: 500; border-bottom: 1px solid #eee; font-size: 11px; white-space: nowrap; background: #fff; position: sticky; top: 0; z-index: 2; }
     th.num, td.num { text-align: right; }
-    td { padding: 7px 10px; border-bottom: 1px solid #f0f0ee; color: #333; }
+    td { padding: 6px 7px; border-bottom: 1px solid #f0f0ee; color: #333; }
     tbody tr:hover { background: #fafaf8; }
     .empty { padding: 2rem; text-align: center; color: #aaa; font-size: 13px; }
     .no-accounts { text-align: center; padding: 4rem; color: #888; font-size: 14px; }
@@ -221,7 +221,7 @@
       <button class="primary" onclick="downloadListado('resumen')">⬇ Descargar listado</button>
       <span id="res-msg" class="bulk-msg"></span>
     </div>
-    <div style="overflow-x:auto;">
+    <div style="overflow:auto;max-height:65vh;">
       <table>
         <thead><tr>
           <th style="width:30px;"><input type="checkbox" id="res-all" onchange="toggleAll('resumen', this)"></th>
@@ -263,7 +263,7 @@
       <button class="green" onclick="importCostos()">↻ Importar costos (CMV)</button>
       <span style="font-size:11px;color:#888;">El <b>costo se guarda</b> (azul = manual; vacío = vuelve a CMV). La <b>Com. var %</b> se hereda del SKU original (base SKU) y se guarda si la editás; vacía = vuelve a heredar. Com. fija sale de los tramos configurados; envío se edita solo para simular. “Importar costos” vuelve a CMV los SKU que estén en la base de costos; los manuales (sin CMV) se mantienen.</span>
     </div>
-    <div style="overflow-x:auto;">
+    <div style="overflow:auto;max-height:65vh;">
       <table>
         <thead><tr>
           <th style="width:30px;"><input type="checkbox" id="meli-all" onchange="toggleAll('meli', this)"></th>

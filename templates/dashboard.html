@@ -24,7 +24,7 @@
     .btn-blue { background: #005CFF; color: #fff !important; border-color: #005CFF; }
     .btn-blue:hover { background: #2970e0 !important; }
     .admin-link { font-size: 12px; color: #005CFF; text-decoration: none; }
-    main { max-width: 1150px; margin: 0 auto; padding: 1.5rem 0.75rem; }
+    main { max-width: 1600px; margin: 0 auto; padding: 1.5rem 0.75rem; }
 
     .account-bar { background: #fff; border: 1px solid #e5e5e3; border-radius: 12px; padding: 1rem 1.25rem; margin-bottom: 1rem; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
     .account-bar label { font-size: 13px; color: #666; }
@@ -63,9 +63,9 @@
     .table-header { padding: 1rem 1.25rem; border-bottom: 1px solid #e5e5e3; display: flex; align-items: center; justify-content: space-between; }
     .table-header h3 { font-size: 14px; font-weight: 500; color: #444; }
     .table-header span { font-size: 12px; color: #aaa; }
-    table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    th { padding: 10px 14px; text-align: left; color: #888; font-weight: 500; border-bottom: 1px solid #eee; }
-    td { padding: 10px 14px; border-bottom: 1px solid #f0f0ee; color: #333; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    th { padding: 7px 8px; text-align: left; color: #888; font-weight: 500; border-bottom: 1px solid #eee; font-size: 11px; background: #fff; position: sticky; top: 0; z-index: 2; white-space: nowrap; }
+    td { padding: 6px 8px; border-bottom: 1px solid #f0f0ee; color: #333; }
     tr:last-child td { border-bottom: none; }
     .pill { display: inline-block; font-size: 11px; padding: 3px 9px; border-radius: 99px; font-weight: 500; }
     .pill.green { background: #e6f5ee; color: #1a8a5a; }
@@ -238,7 +238,7 @@
           </select>
         </div>
       </div>
-      <div style="overflow-x:auto;">
+      <div style="overflow:auto;max-height:65vh;">
         <table>
           <thead><tr><th>Fecha</th><th>Hora</th><th>N° Venta</th><th>Producto</th>{% if user.is_admin %}<th>Envío</th>{% endif %}<th>Unid.</th><th>Monto</th><th>Comisión</th><th>Ing. Envío</th><th>Bonif.</th><th>Costo Envío</th><th>CMV</th><th>Ganancia neta</th><th>Margen</th></tr></thead>
           <tbody id="orders-tbody"></tbody>
