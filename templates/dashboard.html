@@ -24,7 +24,7 @@
     .btn-blue { background: #005CFF; color: #fff !important; border-color: #005CFF; }
     .btn-blue:hover { background: #2970e0 !important; }
     .admin-link { font-size: 12px; color: #005CFF; text-decoration: none; }
-    main { max-width: 1600px; margin: 0 auto; padding: 1.5rem 0.75rem; }
+    main { max-width: 1850px; margin: 0 auto; padding: 1.5rem 0.75rem; }
 
     .account-bar { background: #fff; border: 1px solid #e5e5e3; border-radius: 12px; padding: 1rem 1.25rem; margin-bottom: 1rem; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
     .account-bar label { font-size: 13px; color: #666; }
@@ -42,10 +42,11 @@
     .live-dot { width: 8px; height: 8px; background: #1a8a5a; border-radius: 50%; animation: pulse 2s infinite; }
     @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
 
-    .cards-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(175px, 1fr)); gap: 12px; margin-bottom: 1.5rem; }
-    .metric-card { background: #fff; border: 1px solid #e5e5e3; border-radius: 12px; padding: 1rem 1.25rem; position: relative; }
-    .metric-card .label { font-size: 12px; color: #888; margin-bottom: 6px; }
-    .metric-card .value { font-size: 16px; font-weight: 600; word-break: break-all; }
+    .cards-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 1.5rem; }
+    @media (min-width: 1750px) { .cards-grid { grid-template-columns: repeat(9, 1fr); } }
+    .metric-card { background: #fff; border: 1px solid #e5e5e3; border-radius: 12px; padding: 1rem 1rem; position: relative; }
+    .metric-card .label { font-size: 12px; color: #888; margin-bottom: 8px; white-space: nowrap; }
+    .metric-card .value { font-size: 17px; font-weight: 600; white-space: nowrap; }
     .value.green { color: #1a8a5a; }
     .value.red { color: #c0392b; }
     .value.orange { color: #c47a1e; }
@@ -674,13 +675,13 @@
     const pctCmv = ingresos > 0 ? (cmv_total/ingresos*100).toFixed(1) : '0.0';
     const pctNet = ingresos > 0 ? (neta/ingresos*100).toFixed(1) : '0.0';
     if(!loadingDetails) {
-      document.getElementById('m-comisiones').innerHTML = `${fmt(comisiones)} <span style="font-size:11px;font-weight:400;">(${pctCom}%)</span>`;
+      document.getElementById('m-comisiones').innerHTML = `${fmt(comisiones)}<span style="display:block;font-size:11px;font-weight:400;color:#999;margin-top:2px;">(${pctCom}%)</span>`;
       document.getElementById('m-comisiones').className = 'value red';
-      document.getElementById('m-envios').innerHTML = `${fmt(envios)} <span style="font-size:11px;font-weight:400;">(${pctEnv}%)</span>`;
+      document.getElementById('m-envios').innerHTML = `${fmt(envios)}<span style="display:block;font-size:11px;font-weight:400;color:#999;margin-top:2px;">(${pctEnv}%)</span>`;
       document.getElementById('m-envios').className = 'value orange';
-      document.getElementById('m-cmv').innerHTML = `${fmt(cmv_total)} <span style="font-size:11px;font-weight:400;">(${pctCmv}%)</span>`;
+      document.getElementById('m-cmv').innerHTML = `${fmt(cmv_total)}<span style="display:block;font-size:11px;font-weight:400;color:#999;margin-top:2px;">(${pctCmv}%)</span>`;
       document.getElementById('m-cmv').className = 'value red';
-      document.getElementById('m-neta').innerHTML = `${fmt(neta)} <span style="font-size:11px;font-weight:400;">(${pctNet}%)</span>`;
+      document.getElementById('m-neta').innerHTML = `${fmt(neta)}<span style="display:block;font-size:11px;font-weight:400;color:#999;margin-top:2px;">(${pctNet}%)</span>`;
       document.getElementById('m-neta').className = 'value ' + (neta >= 0 ? 'green' : 'red');
 
       ['comisiones','envios','neta'].forEach(id => {
