@@ -117,7 +117,7 @@
 
   <div style="margin-bottom:1.25rem;">
     <h1 style="font-size:20px;font-weight:600;margin-bottom:4px;">Ponderado Envíos</h1>
-    <p style="font-size:13px;color:#888;margin:0;">Costo de envío ponderado por tipo de entrega y por SKU, sobre las ventas pagadas del período.</p>
+    <p style="font-size:13px;color:#888;margin:0;">Costo de envío ponderado por tipo de entrega y por SKU, sobre las ventas pagadas del período. <b>Envío gratis</b> = productos con precio unitario ≥ $33.000; <b>a cargo del comprador</b> = &lt; $33.000.</p>
   </div>
 
   <div class="filter-bar">
@@ -188,6 +188,11 @@
   const fmt = n => n == null ? '...' : '$' + Number(n).toLocaleString('es-AR', {minimumFractionDigits:2, maximumFractionDigits:2});
   const fmtInt = n => Number(n || 0).toLocaleString('es-AR');
   const fmtPct = n => (Number(n) || 0).toLocaleString('es-AR', {minimumFractionDigits:1, maximumFractionDigits:1}) + '%';
+
+  // Umbral de envío gratis de ML (por PRECIO UNITARIO del producto): a partir
+  // de este monto la venta va con envío gratis; por debajo, la paga el
+  // comprador. ML lo ajusta por inflación cada tanto — cambiar acá si sube.
+  const UMBRAL_ENVIO_GRATIS = 33000;
 
   const ENVIO_GROUPS_ORDER = ['flex', 'colecta', 'fulfillment', 'otro'];
   const ENVIO_GROUP_LABELS = { flex: 'Flex', colecta: 'Colecta', fulfillment: 'Full', otro: 'Acordar la entrega' };
@@ -285,29 +290,34 @@
     paid.forEach(o => {
       const items = o.items || [];
       const units = items.reduce((s, i) => s + (Number(i.cantidad) || 1), 0) || 1;
-      const ingresoEnvio = Number(o.ingreso_envio) || 0;
-      const ingreso = ingresoEnvio + (Number(o.bonificacion) || 0);
-      const gasto = Number(o.envio) || 0;
+      // Ingreso de envío = lo que aportó el comprador. ML lo registra a veces en
+      // ingreso_envio y a veces en bonificación: sumamos las dos (es lo mismo).
+      const ingreso = (Number(o.ingreso_envio) || 0) + (Number(o.bonificacion) || 0);
+      const gasto = Number(o.envio) || 0;      // costo pagado a la mensajería
       const balance = ingreso - gasto;
       const grp = envioGroup(o.logistic_type);
-      const isGratis = ingresoEnvio <= 0.01;
-      const sec = isGratis ? sections.gratis : sections.cargo;
-      sec[grp].units += units;
-      sec[grp].ingreso += ingreso;
-      sec[grp].gasto += gasto;
       cardUnits[grp] += units;
       totalUnits += units;
 
-      if(items.length) {
-        items.forEach(it => {
-          const sku = (it.sku || '').trim() || '(sin SKU)';
-          const qty = Number(it.cantidad) || 1;
-          const share = balance * (qty / units);
-          if(!skuAgg[sku]) skuAgg[sku] = { units: 0, balance: 0 };
-          skuAgg[sku].units += qty;
-          skuAgg[sku].balance += share;
-        });
-      }
+      // El envío es por orden/pack, pero la clasificación (gratis vs a cargo)
+      // es por PRECIO UNITARIO de cada producto. Prorrateamos el envío por
+      // unidades y clasificamos cada ítem por su propio precio unitario.
+      const list = items.length ? items : [{ sku: '', monto: o.monto, cantidad: units }];
+      list.forEach(it => {
+        const qty = Number(it.cantidad) || 1;
+        const share = qty / units;
+        const unitPrice = qty > 0 ? (Number(it.monto) || 0) / qty : 0;
+        const isGratis = unitPrice >= UMBRAL_ENVIO_GRATIS;
+        const sec = isGratis ? sections.gratis : sections.cargo;
+        sec[grp].units += qty;
+        sec[grp].ingreso += ingreso * share;
+        sec[grp].gasto += gasto * share;
+
+        const sku = (it.sku || '').trim() || '(sin SKU)';
+        if(!skuAgg[sku]) skuAgg[sku] = { units: 0, balance: 0 };
+        skuAgg[sku].units += qty;
+        skuAgg[sku].balance += balance * share;
+      });
     });
 
     return { sections, cardUnits, totalUnits, skuAgg };
