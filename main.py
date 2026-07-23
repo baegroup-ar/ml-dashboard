@@ -4919,6 +4919,32 @@ async def api_margen_import_costos(request: Request, account_id: int):
     return {"ok": True, "reverted": reverted}
 
 
+@app.post("/api/margen/{account_id:int}/import-envio")
+async def api_margen_import_envio(request: Request, account_id: int):
+    """Actualizar Envío Ponderado: borra el envío MANUAL de TODOS los SKU de la
+    cuenta (incluso los editados a mano), a diferencia de import-costos que solo
+    revierte los que tienen dato para volver a. Acá el pedido es "actualizar
+    absolutamente todo": los que no tengan venta en franja de envío gratis en
+    los últimos 30 días simplemente caen al envío promedio configurado, que
+    también es una actualización válida. También invalida el caché de
+    `_margen_envio_ponderado_map` para traer números frescos ya."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    user = get_user(user_id)
+    if not _account_for_user(account_id, user_id):
+        raise HTTPException(404)
+    reverted = db_fetchone(
+        "SELECT COUNT(*) AS n FROM product_sale_prices"
+        " WHERE account_id=:a AND envio_manual IS NOT NULL", {"a": account_id})
+    reverted = int(reverted["n"]) if reverted else 0
+    db_execute(
+        "UPDATE product_sale_prices SET envio_manual=NULL, updated_at=NOW()"
+        " WHERE account_id=:a", {"a": account_id})
+    _MARGEN_ENVIO_CACHE.clear()
+    return {"ok": True, "reverted": reverted}
+
+
 def _margen_norm_pct(v):
     """Normaliza un porcentaje a fracción. >1 se interpreta como % (25 -> 0.25).
     Vacío/None -> None (borra el valor)."""

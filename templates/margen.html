@@ -180,6 +180,11 @@
           <div class="fld"><label>Envío gratis desde (PVP ≥)</label><input type="number" id="p-envio_threshold" class="p-in" oninput="syncMirrors()"></div>
           <div class="fld"><label>Envío promedio $</label><input type="number" id="p-envio_promedio" class="p-in"></div>
         </div>
+        <div class="row" style="margin-top:12px;">
+          <button class="green" onclick="importEnvio()">↻ Actualizar Envío Ponderado</button>
+          <span id="envio-msg" class="bulk-msg"></span>
+        </div>
+        <div class="param-hint">Borra el envío manual de TODOS los SKU (incluso los editados a mano) y los vuelve a auto-completar con el costo de envío ponderado en vivo (o el envío promedio si el SKU no tuvo ventas con envío gratis recientes).</div>
       </div>
 
       <div class="param-section">
@@ -262,7 +267,7 @@
     </div>
     <div class="row" style="margin-bottom:8px;">
       <button class="green" onclick="importCostos()">↻ Importar costos (CMV)</button>
-      <span style="font-size:11px;color:#888;">El <b>costo</b> y el <b>envío</b> se guardan (azul = manual; vacío = vuelve a auto-completar). Los dos se heredan igual que la <b>Com. var %</b>: una variante/combo (ej. -3C, -6C) toma el MISMO valor que su SKU original de base SKU, sin escalar por cantidad en el caso del envío. El envío auto-completa con el costo real de la última venta con Colecta de ese SKU u original (últimos 90 días, todas las cuentas); si no encuentra ninguna, usa el envío promedio configurado. Ambos casos solo aplican si el PVP llega al umbral de envío gratis. Com. fija sale de los tramos configurados (no es editable). “Importar costos” vuelve a CMV los SKU que estén en la base de costos; los manuales (sin CMV) se mantienen.</span>
+      <span style="font-size:11px;color:#888;">El <b>costo</b> y el <b>envío</b> se guardan (azul = manual; vacío = vuelve a auto-completar). Los dos se heredan igual que la <b>Com. var %</b>: una variante/combo (ej. -3C, -6C) toma el MISMO valor que su SKU original de base SKU, sin escalar por cantidad en el caso del envío. El envío auto-completa con el costo de envío PONDERADO de ese SKU u original (últimos 30 días, todas las cuentas y tipos de entrega, solo ventas con envío gratis); si no encuentra ninguna, usa el envío promedio configurado. Ambos casos solo aplican si el PVP llega al umbral de envío gratis. Com. fija sale de los tramos configurados (no es editable). “Importar costos” vuelve a CMV los SKU que estén en la base de costos; los manuales (sin CMV) se mantienen. “Actualizar Envío Ponderado” (en Envío, arriba) borra el envío manual de TODOS los SKU y los actualiza en vivo.</span>
     </div>
     <div style="overflow:auto;max-height:65vh;">
       <table>
@@ -613,6 +618,16 @@ async function editEnvio(sku, el) {
     // Recarga para propagar el envío del original a sus variantes/combos.
     if (r.ok) await loadAll();
   } catch (e) { renderActive(); }
+}
+async function importEnvio() {
+  const msg = document.getElementById('envio-msg');
+  if (msg) msg.textContent = 'Actualizando envío ponderado...';
+  try {
+    const r = await fetch(`/api/margen/${accId()}/import-envio`, { method: 'POST' });
+    const j = await r.json();
+    if (msg) msg.textContent = `Listo: ${j.reverted} SKU actualizados con envío ponderado.`;
+    await loadAll();
+  } catch (e) { if (msg) msg.textContent = 'Error al actualizar.'; }
 }
 async function importCostos() {
   const msg = document.getElementById('meli-msg');
