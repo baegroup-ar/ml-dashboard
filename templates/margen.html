@@ -532,8 +532,8 @@ function renderMeli() {
       <td class="num"><input type="number" class="num-input cell-edit ${it.envio_manual != null ? 'cost-manual' : ''}" style="width:80px" value="${Math.round(c.envioAmt)}" step="0.01" min="0"
           title="${it.envio_manual != null ? 'Envío manual (editado). Vaciá para volver a auto-completar.'
                   : (it.envio_bypass_gate ? 'Envío manual heredado del SKU original (base SKU).'
-                  : (it.envio_effective != null ? 'Envío real de la última venta con Colecta (propio o heredado del SKU original). Editá para fijar uno manual.'
-                  : 'Envío promedio configurado (sin ventas con Colecta recientes de este SKU ni del original). Editá para fijar uno manual.'))}"
+                  : (it.envio_effective != null ? 'Envío ponderado de las ventas con envío gratis de este SKU (últimos 30 días, propio o heredado del SKU original). Editá para fijar uno manual.'
+                  : 'Envío promedio configurado (sin ventas con envío gratis recientes de este SKU ni del original). Editá para fijar uno manual.'))}"
           onchange="editEnvio('${esc(it.sku)}', this)"></td>
       <td class="num">${fmt(c.cobro)}</td>
       <td class="num"><input type="number" class="num-input cell-edit ${it.costo_manual != null ? 'cost-manual' : ''}" style="width:90px" value="${Math.round(c.costo)}" step="0.01" min="0"

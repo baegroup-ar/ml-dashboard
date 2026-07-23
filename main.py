@@ -4381,7 +4381,7 @@ def margen_save_config(account_id: int, params: dict) -> dict:
     return merged
 
 
-MARGEN_ENVIO_LOOKBACK_DAYS = 90
+MARGEN_ENVIO_LOOKBACK_DAYS = 30
 _MARGEN_ENVIO_CACHE: dict = {}
 _MARGEN_ENVIO_CACHE_TTL_SECONDS = 600
 
@@ -4389,18 +4389,26 @@ _MARGEN_ENVIO_CACHE_TTL_SECONDS = 600
 MARGEN_ENVIO_IVA_RATE = 21.0   # el envío siempre factura IVA 21%, sin importar la condición de IVA del SKU.
 
 
-def _margen_envio_auto_map(account_ids: list, days: int = MARGEN_ENVIO_LOOKBACK_DAYS) -> dict:
-    """{SKU_UPPER: costo_envio_sin_iva} desde la venta más reciente con Colecta
-    de cada SKU, en las últimas `days` de TODAS las cuentas dadas — como un
-    BUSCARV: como `db_fetch_order_snapshots` ya viene ordenado por fecha/hora
-    desc por cuenta, se mezclan y reordenan todas juntas y gana la primera
-    coincidencia (=la más reciente) por SKU. Solo ventas de UN ÚNICO ítem: en
-    un paquete con varios SKU no hay forma de atribuirle el envío a uno solo
-    sin ambigüedad. El costo de envío que trae la venta viene CON IVA a la tasa
-    fija de envíos (21%, no la del SKU) — se lo sacamos acá para dejarlo neto,
-    listo para usarse directo (sin dividir de nuevo por el factor del SKU).
-    Cacheado 10 min (misma cuenta de Margen no cambia seguido)."""
-    key = tuple(sorted(account_ids))
+def _margen_envio_ponderado_map(account_ids: list, envio_threshold: float,
+                                days: int = MARGEN_ENVIO_LOOKBACK_DAYS) -> dict:
+    """{SKU_UPPER: costo_envio_neto} = costo de envío PONDERADO por SKU sobre las
+    ventas con ENVÍO GRATIS (precio unitario >= `envio_threshold`) de las últimas
+    `days` de TODAS las cuentas dadas. Réplica del cálculo por SKU de la página
+    Ponderado Envíos, restringido a los ítems en franja de envío gratis (los
+    únicos que suman costo de envío en Margen).
+
+    Por cada venta se toma el NETO de envío del vendedor = envío pagado a la
+    mensajería - (ingreso del comprador + bonificación de ML) — mismo balance
+    que Ponderado Envíos, pero con signo de COSTO (positivo = gasto). Se prorratea
+    por unidades entre los ítems que califican, se acumula por SKU y se divide por
+    sus unidades → costo ponderado. El monto viene con IVA fijo de envíos (21%,
+    no el del SKU) — se lo saca acá para dejarlo neto y usarlo DIRECTO (igual que
+    el resto de Margen, sin dividir de nuevo por el factor del SKU).
+
+    Un paquete multi-SKU clasifica cada ítem por su propio precio unitario y solo
+    los que están en franja gratis suman. SKUs sin ventas en franja gratis no
+    entran (caen al envío promedio configurado). Cacheado 10 min."""
+    key = (tuple(sorted(account_ids)), float(envio_threshold or 0))
     cached = _MARGEN_ENVIO_CACHE.get(key)
     now = datetime.utcnow()
     if cached and (now - cached["at"]).total_seconds() < _MARGEN_ENVIO_CACHE_TTL_SECONDS:
@@ -4411,23 +4419,34 @@ def _margen_envio_auto_map(account_ids: list, days: int = MARGEN_ENVIO_LOOKBACK_
     all_orders = []
     for aid in account_ids:
         all_orders.extend(db_fetch_order_snapshots(aid, df, dt))
-    all_orders.sort(key=lambda o: (o.get("fecha") or "", o.get("hora") or ""), reverse=True)
     envio_factor = 1 + MARGEN_ENVIO_IVA_RATE / 100.0
-    out: dict = {}
+    umbral = float(envio_threshold or 0)
+    acc: dict = {}   # SKU -> {"cost": neto_con_iva_acumulado, "units": u}
     for o in all_orders:
         if o.get("estado") != "paid":
             continue
-        if _ENVIO_GROUPS.get(o.get("logistic_type") or "") != "colecta":
-            continue
         items = o.get("items") or []
-        if len(items) != 1:
-            continue
-        sku = (items[0].get("sku") or "").strip().upper()
-        if not sku or sku in out:
-            continue
-        envio_con_iva = float(o.get("envio") or 0)
-        if envio_con_iva > 0:
-            out[sku] = envio_con_iva / envio_factor
+        units = sum(int(i.get("cantidad") or 1) for i in items) or 1
+        # Neto de envío para el vendedor (costo, con IVA 21%): lo que paga a la
+        # mensajería menos lo que recibe (ingreso del comprador + bonificación).
+        ingreso = float(o.get("ingreso_envio") or 0) + float(o.get("bonificacion") or 0)
+        neto_con_iva = float(o.get("envio") or 0) - ingreso
+        for it in items:
+            qty = int(it.get("cantidad") or 1)
+            monto = float(it.get("monto") or 0)
+            unit_price = (monto / qty) if qty else 0.0
+            if unit_price < umbral:
+                continue   # solo franja de envío gratis
+            sku = (it.get("sku") or "").strip().upper()
+            if not sku:
+                continue
+            a = acc.setdefault(sku, {"cost": 0.0, "units": 0})
+            a["cost"] += neto_con_iva * (qty / units)
+            a["units"] += qty
+    out: dict = {}
+    for sku, a in acc.items():
+        if a["units"] > 0:
+            out[sku] = (a["cost"] / a["units"]) / envio_factor
     _MARGEN_ENVIO_CACHE[key] = {"at": now, "map": out}
     return out
 
@@ -4450,10 +4469,11 @@ def margen_compute(pvp_meli, iva_rate, comision_var, costo_sin_iva, p,
     resta como la comisión variable. Todo se netea con el factor de IVA del SKU.
     Envío (solo aplica si pvp_meli >= envio_threshold, si no es 0): `envio_manual`
     (ya neteado de IVA, mismo criterio que costo_sin_iva) pisa todo si viene
-    cargado. Si no, y falta el envío promedio configurado, `envio_auto` (ya
-    neto — se le sacó el 21% de IVA fijo de envíos en `_margen_envio_auto_map`,
-    NO el iva_rate del SKU — así que se usa DIRECTO, sin dividir por `factor`
-    de nuevo) lo reemplaza cuando hay una venta real reciente con Colecta."""
+    cargado. Si no, `envio_auto` (el costo de envío PONDERADO del SKU sobre sus
+    ventas en franja gratis, ya neto — se le sacó el 21% de IVA fijo de envíos en
+    `_margen_envio_ponderado_map`, NO el iva_rate del SKU — así que se usa DIRECTO,
+    sin dividir por `factor` de nuevo). Si el SKU no tuvo ventas en franja gratis,
+    `envio_auto` es None y cae al envío promedio configurado (`envio_promedio`)."""
     if not pvp_meli or pvp_meli <= 0:
         return None
     factor = 1 + (float(iva_rate or 0) / 100.0)
@@ -4706,7 +4726,7 @@ async def api_margen_data(request: Request, account_id: int):
     variant_map = _get_variant_map(cost_aid)   # componente -> [(original, qty)]
     today_iso = (datetime.utcnow() - timedelta(hours=3)).date().isoformat()
     sales_aids = [a["id"] for a in get_visible_accounts(user_id, user)] or [account_id]
-    envio_auto_map = _margen_envio_auto_map(sales_aids)
+    envio_auto_map = _margen_envio_ponderado_map(sales_aids, p["envio_threshold"])
     rows = db_fetchall(
         "SELECT sku, price, desc_meli, comision_var, costo_manual, tipo_publicacion, envio_manual"
         " FROM product_sale_prices WHERE account_id=:a ORDER BY sku", {"a": account_id})
@@ -5133,7 +5153,7 @@ async def api_margen_export_list(request: Request, account_id: int, view: str = 
     variant_map = _get_variant_map(cost_aid)
     today_iso = (datetime.utcnow() - timedelta(hours=3)).date().isoformat()
     sales_aids = [a["id"] for a in get_visible_accounts(user_id, user)] or [account_id]
-    envio_auto_map = _margen_envio_auto_map(sales_aids)
+    envio_auto_map = _margen_envio_ponderado_map(sales_aids, p["envio_threshold"])
     rows = db_fetchall(
         "SELECT sku, price, desc_meli, comision_var, costo_manual, tipo_publicacion, envio_manual"
         " FROM product_sale_prices WHERE account_id=:a ORDER BY sku", {"a": account_id})
