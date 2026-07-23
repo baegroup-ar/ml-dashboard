@@ -31,7 +31,7 @@
     .period-btn { padding: 6px 12px; border: 1px solid #ddd; border-radius: 8px; background: #fff; font-size: 13px; cursor: pointer; color: #555; }
     .period-btn.active { background: #005CFF; color: #fff; border-color: #005CFF; }
 
-    .cards-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; margin-bottom: 1.5rem; }
+    .cards-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-bottom: 1.5rem; }
     .metric-card { background: #fff; border: 1px solid #e5e5e3; border-radius: 12px; padding: 0.85rem 0.7rem; min-width: 0; }
     .metric-card .label { font-size: 11px; color: #888; margin-bottom: 6px; overflow-wrap: break-word; }
     .metric-card .value { font-size: 20px; font-weight: 600; overflow-wrap: break-word; }
@@ -189,14 +189,13 @@
   const fmtInt = n => Number(n || 0).toLocaleString('es-AR');
   const fmtPct = n => (Number(n) || 0).toLocaleString('es-AR', {minimumFractionDigits:1, maximumFractionDigits:1}) + '%';
 
-  const ENVIO_GROUPS_ORDER = ['flex', 'colecta', 'fulfillment', 'pickup', 'otro'];
-  const ENVIO_GROUP_LABELS = { flex: 'Flex', colecta: 'Colecta', fulfillment: 'Full', pickup: 'Retiro en persona', otro: 'Otros' };
+  const ENVIO_GROUPS_ORDER = ['flex', 'colecta', 'fulfillment', 'otro'];
+  const ENVIO_GROUP_LABELS = { flex: 'Flex', colecta: 'Colecta', fulfillment: 'Full', otro: 'Acordar la entrega' };
   function envioGroup(t) {
     if(!t) return 'otro';
     if(t === 'home_delivery' || t === 'self_service') return 'flex';
     if(t === 'xd_drop_off' || t === 'drop_off' || t === 'cross_docking') return 'colecta';
     if(t === 'fulfillment') return 'fulfillment';
-    if(t === 'pickup') return 'pickup';
     return 'otro';
   }
 

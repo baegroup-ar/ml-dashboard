@@ -238,8 +238,7 @@
             <option value="flex">Flex</option>
             <option value="colecta">Colecta</option>
             <option value="fulfillment">Full</option>
-            <option value="pickup">Retiro en persona</option>
-            <option value="otro">Otros</option>
+            <option value="otro">Acordar la entrega</option>
           </select>
         </div>
       </div>
@@ -274,7 +273,7 @@
     'drop_off': 'Colecta',
     'cross_docking': 'Colecta',
     'fulfillment': 'Full',
-    'pickup': 'Retiro en persona',
+    'pickup': 'Acordar la entrega',
     'mercadoenvios': 'Mercado Envíos',
     'mercado_envios_lite': 'ME Lite',
     'custom': 'Personalizado',
@@ -317,7 +316,6 @@
     if(t === 'home_delivery' || t === 'self_service') return 'flex';
     if(t === 'xd_drop_off' || t === 'drop_off' || t === 'cross_docking') return 'colecta';
     if(t === 'fulfillment') return 'fulfillment';
-    if(t === 'pickup') return 'pickup';
     return 'otro';
   }
 

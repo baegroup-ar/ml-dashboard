@@ -11016,14 +11016,14 @@ _ENVIO_GROUPS = {
     "xd_drop_off": "colecta", "drop_off": "colecta",
     "cross_docking": "colecta",
     "fulfillment": "fulfillment",
-    "pickup": "pickup",
+    "pickup": "otro",
 }
 _ENVIO_LABELS = {
     "home_delivery": "Flex", "self_service": "Flex",
     "xd_drop_off": "Colecta", "drop_off": "Colecta",
     "cross_docking": "Colecta",
     "fulfillment": "Full",
-    "pickup": "Retiro en persona",
+    "pickup": "Acordar la entrega",
     "mercadoenvios": "Mercado Envíos",
     "mercado_envios_lite": "ME Lite",
 }
