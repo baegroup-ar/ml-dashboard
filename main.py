@@ -561,7 +561,7 @@ CACHE_WARMER_DAYS = int(os.environ.get("CACHE_WARMER_DAYS", "7"))
 # El endpoint /billing está limitado a 5 req/min, así que esto corre aparte del
 # dashboard, en segundo plano y lento, cacheando el impuesto exacto por order_id.
 TAXES_WARMER_ENABLED = os.environ.get("TAXES_WARMER_ENABLED", "1") == "1"
-TAXES_WARMER_INTERVAL_SECONDS = int(os.environ.get("TAXES_WARMER_INTERVAL_SECONDS", "900"))  # 15 min
+TAXES_WARMER_INTERVAL_SECONDS = int(os.environ.get("TAXES_WARMER_INTERVAL_SECONDS", "600"))  # 10 min
 TAXES_WARMER_DAYS = int(os.environ.get("TAXES_WARMER_DAYS", "30"))
 TAXES_WARMER_BATCH = 100                 # order_ids por request de billing
 TAXES_WARMER_SLEEP_SECONDS = float(os.environ.get("TAXES_WARMER_SLEEP_SECONDS", "13"))  # 5/min => 12s; 13 de margen
@@ -605,47 +605,44 @@ async def _orders_cache_warmer():
         await asyncio.sleep(CACHE_WARMER_INTERVAL_SECONDS)
 
 
-async def _fetch_taxes_for_orders(client, headers, seller_id, order_ids: list) -> dict:
-    """{order_id_str: impuestos} desde /billing. Suma tax_details (original-refunded)
-    por pago, deduplicando payment_id. Si ML devuelve 429 (rate limit) corta y
-    devuelve lo que consiguió; el resto se reintenta en el próximo ciclo. NUNCA
-    lanza excepción."""
+async def _fetch_taxes_one_batch(client, headers, seller_id, batch: list):
+    """UNA sola request a /billing para hasta 100 order_ids. Devuelve
+    (ok, {order_id_str: impuestos}). `ok=False` sólo si hubo 429 (rate limit),
+    para reintentar el mismo batch más tarde. NUNCA lanza excepción. El dict
+    puede incluir order_ids hermanos de un pack que no estaban en el batch
+    (los guardamos igual, son gratis). Las ventas cuya facturación todavía no
+    está lista NO aparecen en el dict → se reintentan en el próximo ciclo."""
+    try:
+        r = await client.get(
+            f"{ML_API_URL}/billing/integration/group/ML/order/details",
+            headers=headers,
+            params={"order_ids": ",".join(batch), "seller_id": seller_id, "limit": 150},
+        )
+    except Exception:
+        return True, {}
+    if r.status_code == 429:
+        return False, {}
+    if r.status_code not in (200, 206):
+        return True, {}
+    try:
+        results = r.json().get("results") or []
+    except Exception:
+        return True, {}
     per_order: dict = {}   # oid -> {payment_id: tax}
-    unique = list(dict.fromkeys(str(o) for o in order_ids if o))
-    for i in range(0, len(unique), TAXES_WARMER_BATCH):
-        batch = unique[i:i+TAXES_WARMER_BATCH]
-        try:
-            r = await client.get(
-                f"{ML_API_URL}/billing/integration/group/ML/order/details",
-                headers=headers,
-                params={"order_ids": ",".join(batch), "seller_id": seller_id, "limit": 150},
-            )
-        except Exception:
+    for row in results:
+        oid = str(row.get("order_id") or "")
+        if not oid:
             continue
-        if r.status_code == 429:
-            break  # rate limit: cortamos, seguimos en el próximo ciclo
-        if r.status_code not in (200, 206):
-            continue
-        try:
-            results = r.json().get("results") or []
-        except Exception:
-            continue
-        for row in results:
-            oid = str(row.get("order_id") or "")
-            if not oid:
+        seen = per_order.setdefault(oid, {})
+        for p in (row.get("payment_info") or []):
+            pid = p.get("payment_id")
+            if pid in seen:
                 continue
-            seen = per_order.setdefault(oid, {})
-            for p in (row.get("payment_info") or []):
-                pid = p.get("payment_id")
-                if pid in seen:
-                    continue
-                tot = 0.0
-                for t in (p.get("tax_details") or []):
-                    tot += abs(float(t.get("original_amount") or 0)) - abs(float(t.get("refunded_amount") or 0))
-                seen[pid] = tot
-        if i + TAXES_WARMER_BATCH < len(unique):
-            await asyncio.sleep(TAXES_WARMER_SLEEP_SECONDS)  # respetar 5/min
-    return {oid: round(sum(d.values()), 2) for oid, d in per_order.items()}
+            tot = 0.0
+            for t in (p.get("tax_details") or []):
+                tot += abs(float(t.get("original_amount") or 0)) - abs(float(t.get("refunded_amount") or 0))
+            seen[pid] = tot
+    return True, {oid: round(sum(d.values()), 2) for oid, d in per_order.items()}
 
 
 def _snapshot_order_ids(payload: dict) -> list:
@@ -662,55 +659,80 @@ def _snapshot_order_ids(payload: dict) -> list:
     return [str(single)] if single else []
 
 
-async def _warm_account_taxes(acc: dict) -> int:
-    """Cachea impuestos de las ventas recientes de una cuenta que aún no estén
-    cacheadas. Devuelve cuántos order_ids nuevos guardó (-1 si falló)."""
-    try:
-        token = await refresh_ml_token(acc["id"])
-        if not token:
-            return -1
-        today = datetime.utcnow().date()
-        df = str(today - timedelta(days=max(TAXES_WARMER_DAYS - 1, 0)))
-        dt = str(today)
-        snaps = db_fetch_order_snapshots(acc["id"], df, dt)
-        order_ids: list = []
-        for payload in snaps:
-            order_ids.extend(_snapshot_order_ids(payload))
-        order_ids = list(dict.fromkeys(order_ids))
-        if not order_ids:
-            return 0
-        cached = db_get_cached_taxes(order_ids)
-        todo = [oid for oid in order_ids if oid not in cached]
-        if not todo:
-            return 0
-        headers = {"Authorization": f"Bearer {token}"}
-        async with httpx.AsyncClient(timeout=30) as client:
-            taxes = await _fetch_taxes_for_orders(client, headers, acc["ml_user_id"], todo)
-        # Guardamos también los pendientes que resolvieron en 0 (ventas sin
-        # retención) para no reintentarlos indefinidamente.
-        to_save = {oid: taxes.get(oid, 0.0) for oid in todo if oid in taxes}
-        db_save_taxes(to_save)
-        return len(to_save)
-    except Exception as e:
-        print(f"[taxes-warmer] cuenta {acc.get('id')} error: {str(e)[:160]}", flush=True)
-        return -1
+async def _build_taxes_queue(accs: list) -> list:
+    """Arma la cola de trabajo por cuenta: los order_ids pendientes (no
+    cacheados) de los últimos `TAXES_WARMER_DAYS` días, MÁS NUEVOS PRIMERO
+    (los snapshots vienen ordenados por fecha desc), partidos en batches de 100."""
+    today = datetime.utcnow().date()
+    df = str(today - timedelta(days=max(TAXES_WARMER_DAYS - 1, 0)))
+    dt = str(today)
+    queues = []
+    for acc in accs:
+        try:
+            token = await refresh_ml_token(acc["id"])
+            if not token:
+                continue
+            snaps = db_fetch_order_snapshots(acc["id"], df, dt)   # newest-first
+            oids = []
+            for payload in snaps:
+                oids.extend(_snapshot_order_ids(payload))
+            oids = list(dict.fromkeys(oids))          # preserva orden (recientes primero)
+            cached = db_get_cached_taxes(oids)
+            todo = [o for o in oids if o not in cached]
+            if not todo:
+                continue
+            batches = [todo[i:i+TAXES_WARMER_BATCH] for i in range(0, len(todo), TAXES_WARMER_BATCH)]
+            queues.append({
+                "acc": acc,
+                "headers": {"Authorization": f"Bearer {token}"},
+                "seller": acc["ml_user_id"],
+                "batches": batches,
+                "saved": 0,
+            })
+        except Exception as e:
+            print(f"[taxes-warmer] cuenta {acc.get('id')} armado error: {str(e)[:160]}", flush=True)
+    return queues
 
 
 async def _taxes_cache_warmer():
     """Loop infinito y lento (respeta 5 req/min de /billing) que cachea el
-    impuesto exacto por venta. Aislado del dashboard: si falla no afecta nada."""
-    await asyncio.sleep(90)  # arrancar después del calentador de órdenes
+    impuesto exacto por venta. Procesa ROUND-ROBIN: primero el batch más nuevo
+    de CADA cuenta, después el siguiente, etc. Así las ventas recientes de todas
+    las cuentas aparecen en los primeros ~30s, y recién después va hacia atrás
+    en el tiempo. Aislado del dashboard: si falla no afecta nada."""
+    await asyncio.sleep(15)   # arranque rápido
     while True:
         try:
             accs = db_fetchall(
                 "SELECT * FROM ml_accounts WHERE COALESCE(access_token,'') <> '' ORDER BY id"
             )
-            for acc in accs:
-                n = await _warm_account_taxes(acc)
-                if n > 0:
-                    print(f"[taxes-warmer] cuenta {acc['id']} ({acc.get('nickname')}): "
-                          f"{n} ventas con impuesto cacheado", flush=True)
-                await asyncio.sleep(2)
+            queues = await _build_taxes_queue(accs)
+            if queues:
+                async with httpx.AsyncClient(timeout=30) as client:
+                    # Mientras alguna cuenta tenga batches pendientes, tomamos el
+                    # PRIMER batch (el más nuevo) de cada una por vuelta.
+                    while any(q["batches"] for q in queues):
+                        for q in queues:
+                            if not q["batches"]:
+                                continue
+                            batch = q["batches"][0]
+                            ok, taxes = await _fetch_taxes_one_batch(
+                                client, q["headers"], q["seller"], batch)
+                            if not ok:
+                                # 429: esperamos un poco más y reintentamos el
+                                # MISMO batch en la próxima vuelta (no lo sacamos).
+                                await asyncio.sleep(TAXES_WARMER_SLEEP_SECONDS * 2)
+                                continue
+                            if taxes:
+                                db_save_taxes(taxes)
+                                q["saved"] += len(taxes)
+                            q["batches"].pop(0)
+                            await asyncio.sleep(TAXES_WARMER_SLEEP_SECONDS)  # 5/min
+                for q in queues:
+                    if q["saved"]:
+                        print(f"[taxes-warmer] cuenta {q['acc']['id']} "
+                              f"({q['acc'].get('nickname')}): {q['saved']} ventas "
+                              f"con impuesto cacheado", flush=True)
         except Exception as e:
             print(f"[taxes-warmer] ciclo error: {str(e)[:160]}", flush=True)
         await asyncio.sleep(TAXES_WARMER_INTERVAL_SECONDS)
