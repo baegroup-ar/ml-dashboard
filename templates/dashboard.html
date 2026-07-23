@@ -227,7 +227,7 @@
         </div>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
           {% if user.is_admin %}
-          <input id="sku-filter" type="text" placeholder="Buscar por SKU... (sin importar la fecha)"
+          <input id="sku-filter" type="text" placeholder="Buscar por SKU o N° de venta... (sin importar la fecha)"
                  style="flex:1;min-width:240px;padding:7px 10px;border:1px solid #ddd;border-radius:8px;font-size:13px;font-family:inherit;"
                  oninput="onSkuFilterChange()" />
           <button onclick="clearSkuFilter()" id="btn-clear-sku" style="display:none;padding:6px 12px;border:1px solid #ddd;border-radius:8px;background:#fff;font-size:12px;cursor:pointer;">Limpiar</button>
@@ -322,10 +322,12 @@
   function applyFilters(orders) {
     let out = orders;
     if(skuFilter) {
-      const f = skuFilter.toUpperCase();
+      const f = skuFilter.toUpperCase().replace(/^#/, '');
       out = out.filter(o => {
         const items = o.items || [];
-        return items.some(i => (i.sku || '').toUpperCase().includes(f));
+        const matchSku = items.some(i => (i.sku || '').toUpperCase().includes(f));
+        const ventaId = String(o.venta_id || o.id || '').toUpperCase();
+        return matchSku || ventaId.includes(f);
       });
     }
     if(envioFilter) {

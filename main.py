@@ -11174,12 +11174,14 @@ async def api_orders_export(
             cached_orders.append(o)
 
     # Filtros
-    sku_q = (sku or "").strip().upper()
+    sku_q = (sku or "").strip().upper().lstrip("#")
     envio_q = (envio or "").strip().lower()
     def _matches(o):
         if sku_q:
             items = o.get("items") or []
-            if not any(sku_q in (i.get("sku") or "").upper() for i in items):
+            matches_sku = any(sku_q in (i.get("sku") or "").upper() for i in items)
+            venta_id = str(o.get("venta_id") or o.get("id") or "").upper()
+            if not matches_sku and sku_q not in venta_id:
                 return False
         if envio_q:
             grp = _ENVIO_GROUPS.get(o.get("logistic_type") or "", "otro")

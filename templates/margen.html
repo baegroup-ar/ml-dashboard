@@ -176,13 +176,13 @@
 
       <div class="param-section">
         <div class="param-title">Envío</div>
-        <div class="param-fields">
+        <div class="param-fields" style="align-items:flex-end;">
           <div class="fld"><label>Envío gratis desde (PVP ≥)</label><input type="number" id="p-envio_threshold" class="p-in" oninput="syncMirrors()"></div>
           <div class="fld"><label>Envío promedio $</label><input type="number" id="p-envio_promedio" class="p-in"></div>
-        </div>
-        <div class="row" style="margin-top:12px;">
-          <button class="green" onclick="importEnvio()">↻ Actualizar Envío Ponderado</button>
-          <span id="envio-msg" class="bulk-msg"></span>
+          <div style="margin-left:auto;display:flex;align-items:center;gap:10px;">
+            <button class="green" onclick="importEnvio()">↻ Actualizar Envío Ponderado</button>
+            <span id="envio-msg" class="bulk-msg"></span>
+          </div>
         </div>
         <div class="param-hint">Borra el envío manual de TODOS los SKU (incluso los editados a mano) y los vuelve a auto-completar con el costo de envío ponderado en vivo (o el envío promedio si el SKU no tuvo ventas con envío gratis recientes).</div>
       </div>
