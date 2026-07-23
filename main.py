@@ -12073,6 +12073,45 @@ async def _debug_dump_order(client, headers, costs_headers, order_id: str, selle
     return entry
 
 
+@app.get("/api/debug/taxes-status")
+async def debug_taxes_status(request: Request):
+    """Estado de la caché de impuestos (read-only): cuántas ventas ya tienen el
+    impuesto cacheado y una muestra reciente. Para verificar que el calentador
+    está llenando la caché sin depender de la base."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    stat = db_fetchone(
+        "SELECT COUNT(*) AS total,"
+        " COUNT(*) FILTER (WHERE impuestos > 0) AS con_impuesto,"
+        " COALESCE(SUM(impuestos), 0) AS suma,"
+        " MAX(cached_at) AS ultimo FROM order_tax_cache"
+    ) or {}
+    sample = db_fetchall(
+        "SELECT order_id, impuestos, cached_at FROM order_tax_cache"
+        " ORDER BY cached_at DESC LIMIT 15"
+    )
+    return {
+        "total_cacheados": int(stat.get("total") or 0),
+        "con_impuesto": int(stat.get("con_impuesto") or 0),
+        "suma_impuestos": float(stat.get("suma") or 0),
+        "ultimo_cacheado": str(stat.get("ultimo")) if stat.get("ultimo") else None,
+        "muestra": [
+            {"order_id": str(r["order_id"]),
+             "impuestos": float(r["impuestos"] or 0),
+             "cached_at": str(r["cached_at"])}
+            for r in sample
+        ],
+        "warmer_config": {
+            "enabled": TAXES_WARMER_ENABLED,
+            "interval_s": TAXES_WARMER_INTERVAL_SECONDS,
+            "days": TAXES_WARMER_DAYS,
+            "batch": TAXES_WARMER_BATCH,
+            "sleep_s": TAXES_WARMER_SLEEP_SECONDS,
+        },
+    }
+
+
 @app.get("/api/debug/order/{order_id}")
 async def debug_order(request: Request, order_id: str):
     """Devuelve TODA la data cruda que devuelve ML para una orden puntual.
