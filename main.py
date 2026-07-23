@@ -1293,6 +1293,7 @@ PAGE_ROUTES = {
     "clientes": "/clientes",
     "publicaciones": "/publicaciones",
     "fotos": "/fotos",
+    "ponderado_envios": "/ponderado-envios",
 }
 
 
@@ -4669,6 +4670,24 @@ async def margen_page(request: Request):
     account_id = _margen_account_id(accounts)
     return templates.TemplateResponse("margen.html", {
         "request": request, "user": user, "account_id": account_id,
+        "perms": user_permissions(user),
+    })
+
+
+@app.get("/ponderado-envios", response_class=HTMLResponse)
+async def ponderado_envios_page(request: Request):
+    """Costo de envío ponderado por tipo de entrega y por SKU (todas las cuentas)."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse("/")
+    user = get_user(user_id)
+    _r = _page_redirect(user, "ponderado_envios")
+    if _r:
+        return _r
+    accounts = get_visible_accounts(user_id, user)
+    accounts = await refresh_visible_account_nicknames(accounts)
+    return templates.TemplateResponse("ponderado_envios.html", {
+        "request": request, "user": user, "accounts": accounts,
         "perms": user_permissions(user),
     })
 
@@ -11240,6 +11259,7 @@ PAGES = [
     ("stock",       "Stock valorizado"),
     ("compras",     "Compras"),
     ("margen",      "Margen"),
+    ("ponderado_envios", "Ponderado Envíos"),
     ("base_sku",    "SKUs"),
     ("pvp",         "PVP"),
     ("clientes",    "Clientes"),

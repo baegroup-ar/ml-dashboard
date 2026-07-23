@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Ponderado Envíos · Panel BAE</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Cantarell:ital,wght@0,400;0,700;1,400&amp;display=swap" rel="stylesheet"><link rel="icon" type="image/png" href="/static/bae-favicon.png">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Cantarell', 'Inter', system-ui, sans-serif; background: #fff; color: #111; }
+    nav { background: #fff; border-bottom: 1px solid #e5e5e3; padding: 0 1.5rem; height: 56px; display: flex; align-items: center; justify-content: space-between; }
+    .nav-brand { font-weight: 600; font-size: 15px; display: flex; align-items: center; gap: 8px; }
+    .nav-right { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+    .btn-nav { padding: 6px 14px; border: 1px solid #ddd; border-radius: 8px; background: #fff; font-size: 13px; cursor: pointer; text-decoration: none; color: #111; }
+    .nav-dropdown { position: relative; display: inline-block; }
+    .nav-dropdown .dropdown-trigger.active { color: #005CFF; font-weight: 500; border-color: #005CFF; }
+    .nav-dropdown .dropdown-menu { display: none; position: absolute; top: calc(100% + 4px); left: 0; background: #fff; border: 1px solid #ddd; border-radius: 8px; min-width: 170px; z-index: 100; box-shadow: 0 6px 16px rgba(0,0,0,0.10); padding: 6px; flex-direction: column; }
+    .nav-dropdown:hover .dropdown-menu { display: flex; }
+    .dropdown-menu a.dropdown-item, .dropdown-menu span.dropdown-item { display: block; padding: 8px 10px; font-size: 13px; color: #111; text-decoration: none; border-radius: 6px; white-space: nowrap; cursor: pointer; }
+    .dropdown-menu a.dropdown-item:hover { background: #f5f5f3; }
+    main { max-width: 1850px; margin: 0 auto; padding: 1.5rem 0.75rem; }
+
+    .account-bar { background: #fff; border: 1px solid #e5e5e3; border-radius: 12px; padding: 1rem 1.25rem; margin-bottom: 1rem; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .account-bar label { font-size: 13px; color: #666; }
+    .account-bar select { flex: 1; min-width: 180px; padding: 7px 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 14px; font-family: 'Inter', sans-serif; }
+
+    .filter-bar { background: #fff; border: 1px solid #e5e5e3; border-radius: 12px; padding: 1rem 1.25rem; margin-bottom: 1.5rem; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .filter-bar label { font-size: 13px; color: #666; }
+    .filter-bar input[type=date] { padding: 6px 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 13px; font-family: 'Inter', sans-serif; }
+    .period-btn { padding: 6px 12px; border: 1px solid #ddd; border-radius: 8px; background: #fff; font-size: 13px; cursor: pointer; color: #555; }
+    .period-btn.active { background: #005CFF; color: #fff; border-color: #005CFF; }
+
+    .cards-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; margin-bottom: 1.5rem; }
+    .metric-card { background: #fff; border: 1px solid #e5e5e3; border-radius: 12px; padding: 0.85rem 0.7rem; min-width: 0; }
+    .metric-card .label { font-size: 11px; color: #888; margin-bottom: 6px; overflow-wrap: break-word; }
+    .metric-card .value { font-size: 20px; font-weight: 600; overflow-wrap: break-word; }
+    .metric-card .sub { font-size: 11px; color: #aaa; margin-top: 2px; }
+    .value.loading { color: #ccc; font-size: 13px; }
+
+    .card { background: #fff; border: 1px solid #e5e5e3; border-radius: 12px; margin-bottom: 1.25rem; overflow: hidden; }
+    .card-header { padding: 1rem 1.25rem; border-bottom: 1px solid #e5e5e3; }
+    .card-header h3 { font-size: 14px; font-weight: 600; color: #444; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    th { padding: 7px 8px; text-align: left; color: #888; font-weight: 500; border-bottom: 1px solid #eee; font-size: 11px; background: #fff; white-space: nowrap; }
+    th.num, td.num { text-align: right; }
+    td { padding: 6px 8px; border-bottom: 1px solid #f0f0ee; color: #333; }
+    tr.total-row td { font-weight: 600; border-top: 2px solid #ddd; border-bottom: none; background: #fafaf8; }
+    tr:last-child td { border-bottom: none; }
+    .pos { color: #1a8a5a; } .neg { color: #c0392b; }
+    .sku-search { padding: 7px 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 13px; font-family: inherit; min-width: 240px; }
+    .table-scroll { overflow: auto; max-height: 65vh; }
+    th.sticky { position: sticky; top: 0; z-index: 2; }
+
+    .page-loading { text-align: center; padding: 4rem; color: #888; font-size: 14px; }
+    .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid #ddd; border-top-color: #005CFF; border-radius: 50%; animation: spin 0.7s linear infinite; vertical-align: -2px; margin-right: 6px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .last-update { font-size: 12px; color: #aaa; margin-top: 1rem; text-align: right; }
+    .no-accounts { text-align: center; padding: 4rem; color: #888; font-size: 14px; }
+    .no-accounts a { color: #005CFF; text-decoration: none; font-weight: 500; }
+    .empty { padding: 2rem; text-align: center; color: #aaa; font-size: 13px; }
+  </style>
+</head>
+<body>
+<nav>
+  <div class="nav-brand">
+    <img src="/static/bae-icon.png" alt="Tienda Bae" style="height:32px;width:auto;display:block;" />
+    Tienda Bae App
+  </div>
+  <div class="nav-right">
+    {% if 'dashboard' in perms or 'reputacion' in perms or 'descuentos' in perms or 'ranking' in perms or 'etiquetas' in perms or 'publicaciones' in perms or 'fotos' in perms %}
+    <div class="nav-dropdown">
+      <span class="btn-nav dropdown-trigger">Mercadolibre ▾</span>
+      <div class="dropdown-menu">
+        {% if 'dashboard' in perms %}<a href="/dashboard" class="dropdown-item">Dashboard</a>{% endif %}
+        {% if 'reputacion' in perms %}<a href="/reputacion" class="dropdown-item">Reputación</a>{% endif %}
+        {% if 'descuentos' in perms %}<a href="/descuentos" class="dropdown-item">Descuentos</a>{% endif %}
+        {% if 'ranking' in perms %}<a href="/ranking" class="dropdown-item">Ranking</a>{% endif %}
+        {% if 'etiquetas' in perms %}<a href="/etiquetas" class="dropdown-item">Etiquetas</a>{% endif %}
+        {% if 'publicaciones' in perms %}<a href="/publicaciones" class="dropdown-item">Publicaciones</a>{% endif %}
+        {% if 'fotos' in perms %}<a href="/fotos" class="dropdown-item">Fotos</a>{% endif %}
+      </div>
+    </div>
+    {% endif %}
+    {% if 'pvp' in perms or 'clientes' in perms or 'base_sku' in perms or 'envios_flex' in perms %}
+    <div class="nav-dropdown">
+      <span class="btn-nav dropdown-trigger">Base de Datos ▾</span>
+      <div class="dropdown-menu">
+        {% if 'pvp' in perms %}<a href="/pvp" class="dropdown-item">PVP</a>{% endif %}
+        {% if 'clientes' in perms %}<a href="/clientes" class="dropdown-item">Clientes</a>{% endif %}
+        {% if 'base_sku' in perms %}<a href="/base-sku" class="dropdown-item">SKUs</a>{% endif %}
+        {% if 'envios_flex' in perms %}<a href="/costos/envios-flex" class="dropdown-item">Envíos Flex</a>{% endif %}
+      </div>
+    </div>
+    {% endif %}
+    {% if 'stock' in perms %}<a href="/stock" class="btn-nav">Stock valorizado</a>{% endif %}
+    {% if 'compras' in perms or 'costos' in perms %}<a href="/compras" class="btn-nav">Compras</a>{% endif %}
+    {% if 'margen' in perms %}<a href="/margen" class="btn-nav">Margen</a>{% endif %}
+    <span style="color:#005CFF;font-weight:500;">Ponderado Envíos</span>
+    <span style="color:#888;">{{ user.name }}</span>
+    {% if user.is_admin %}<a href="/admin" style="font-size:12px;color:#005CFF;text-decoration:none;">Admin</a>{% endif %}
+    <a href="/logout" class="btn-nav">Salir</a>
+  </div>
+</nav>
+
+<main>
+  {% if accounts %}
+  <div class="account-bar">
+    <label>Cuenta ML:</label>
+    <select id="account-select" onchange="onAccountChange()">
+      {% if accounts|length > 1 %}<option value="all" selected>TODAS LAS CUENTAS</option>{% endif %}
+      {% for acc in accounts %}
+      <option value="{{ acc.id }}" {% if accounts|length == 1 %}selected{% endif %}>{{ acc.nickname }}</option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <div style="margin-bottom:1.25rem;">
+    <h1 style="font-size:20px;font-weight:600;margin-bottom:4px;">Ponderado Envíos</h1>
+    <p style="font-size:13px;color:#888;margin:0;">Costo de envío ponderado por tipo de entrega y por SKU, sobre las ventas pagadas del período.</p>
+  </div>
+
+  <div class="filter-bar">
+    <label>Período:</label>
+    <button class="period-btn" onclick="setPeriod('today',this)">Hoy</button>
+    <button class="period-btn" onclick="setPeriod('yesterday',this)">Ayer</button>
+    <button class="period-btn" onclick="setPeriod('7d',this)">7 días</button>
+    <button class="period-btn active" onclick="setPeriod('30d',this)">30 días</button>
+    <button class="period-btn" onclick="setPeriod('90d',this)">90 días</button>
+    <button class="period-btn" onclick="setPeriod('365d',this)">1 año</button>
+    <span style="color:#ddd;">|</span>
+    <label>Desde:</label><input type="date" id="date-from" onchange="onDateChange()" />
+    <label>Hasta:</label><input type="date" id="date-to" onchange="onDateChange()" />
+  </div>
+
+  <div id="error-box" class="no-accounts" style="display:none;color:#c0392b;"></div>
+  <div id="page-loading" class="page-loading"><span class="spinner"></span> Conectando con MercadoLibre...</div>
+
+  <div id="content" style="display:none;">
+    <div class="cards-grid" id="cards-grid"></div>
+
+    <div class="card">
+      <div class="card-header"><h3>Envío gratis</h3></div>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th class="sticky">Tipo de envío</th><th class="sticky num">Unidades</th><th class="sticky num">Ingresos</th><th class="sticky num">Gastos</th><th class="sticky num">Balance</th><th class="sticky num">Costo de Envío</th><th class="sticky num">Participación</th></tr></thead>
+          <tbody id="tbl-gratis"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><h3>Envío a cargo del comprador</h3></div>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th class="sticky">Tipo de envío</th><th class="sticky num">Unidades</th><th class="sticky num">Ingresos</th><th class="sticky num">Gastos</th><th class="sticky num">Balance</th><th class="sticky num">Costo de Envío</th><th class="sticky num">Participación</th></tr></thead>
+          <tbody id="tbl-cargo"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header" style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+        <h3>Costo de envío ponderado por SKU</h3>
+        <input class="sku-search" type="text" id="sku-search" placeholder="Buscar SKU..." oninput="renderSkuTable()" />
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th class="sticky">SKU</th><th class="sticky num">Unidades vendidas</th><th class="sticky num">Costo de Envío ponderado ($/u)</th><th class="sticky num">Envío valorizado</th></tr></thead>
+          <tbody id="tbl-sku"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <p class="last-update" id="last-update"></p>
+  </div>
+
+  {% else %}
+  <div class="no-accounts">
+    <p style="font-size:18px;font-weight:500;margin-bottom:8px;">No tenés cuentas de MercadoLibre conectadas</p>
+    <p style="margin-bottom:1.5rem;">Conectá tu primera cuenta para ver este análisis.</p>
+    <a href="/ml/connect" class="btn-nav" style="display:inline-flex;background:#005CFF;color:#fff;">+ Conectar cuenta de MercadoLibre</a>
+  </div>
+  {% endif %}
+</main>
+
+<script>
+  const fmt = n => n == null ? '...' : '$' + Number(n).toLocaleString('es-AR', {minimumFractionDigits:2, maximumFractionDigits:2});
+  const fmtInt = n => Number(n || 0).toLocaleString('es-AR');
+  const fmtPct = n => (Number(n) || 0).toLocaleString('es-AR', {minimumFractionDigits:1, maximumFractionDigits:1}) + '%';
+
+  const ENVIO_GROUPS_ORDER = ['flex', 'colecta', 'fulfillment', 'pickup', 'otro'];
+  const ENVIO_GROUP_LABELS = { flex: 'Flex', colecta: 'Colecta', fulfillment: 'Full', pickup: 'Retiro en persona', otro: 'Otros' };
+  function envioGroup(t) {
+    if(!t) return 'otro';
+    if(t === 'home_delivery' || t === 'self_service') return 'flex';
+    if(t === 'xd_drop_off' || t === 'drop_off' || t === 'cross_docking') return 'colecta';
+    if(t === 'fulfillment') return 'fulfillment';
+    if(t === 'pickup') return 'pickup';
+    return 'otro';
+  }
+
+  let currentAccountId = document.getElementById('account-select')?.value;
+  let loadSeq = 0;
+  let lastAgg = null;
+
+  function todayStr() { return new Intl.DateTimeFormat('sv', {timeZone:'America/Argentina/Buenos_Aires'}).format(new Date()); }
+  function addDays(d, n) { const dt = new Date(d + 'T12:00:00'); dt.setDate(dt.getDate()+n); return dt.toISOString().slice(0,10); }
+
+  function setPeriod(p, btn) {
+    document.querySelectorAll('.period-btn').forEach(b => b.classList.remove('active'));
+    if(btn) btn.classList.add('active');
+    const today = todayStr();
+    const df = document.getElementById('date-from');
+    const dt = document.getElementById('date-to');
+    if(p==='today'){ df.value=today; dt.value=today; }
+    else if(p==='yesterday'){ const y=addDays(today,-1); df.value=y; dt.value=y; }
+    else if(p==='7d'){ df.value=addDays(today,-6); dt.value=today; }
+    else if(p==='30d'){ df.value=addDays(today,-29); dt.value=today; }
+    else if(p==='90d'){ df.value=addDays(today,-89); dt.value=today; }
+    else if(p==='365d'){ df.value=addDays(today,-364); dt.value=today; }
+    loadData();
+  }
+
+  function onDateChange() {
+    document.querySelectorAll('.period-btn').forEach(b => b.classList.remove('active'));
+    loadData();
+  }
+
+  function onAccountChange() {
+    currentAccountId = document.getElementById('account-select').value;
+    loadData();
+  }
+
+  function getParams() {
+    const df = document.getElementById('date-from')?.value;
+    const dt = document.getElementById('date-to')?.value;
+    const p = new URLSearchParams();
+    if(df) p.set('date_from', df);
+    if(dt) p.set('date_to', dt);
+    return p;
+  }
+
+  async function loadData() {
+    if(!currentAccountId) return;
+    const seq = ++loadSeq;
+    document.getElementById('error-box').style.display = 'none';
+    const params = getParams();
+    const baseUrl = currentAccountId === 'all' ? '/api/orders-all' : `/api/orders/${currentAccountId}`;
+    try {
+      const r = await fetch(`${baseUrl}?${params}&cache_only=1`);
+      if(!r.ok) throw new Error('Error al obtener ventas.');
+      let data = await r.json();
+      if(data.cache_empty) {
+        const r2 = await fetch(`${baseUrl}?${params}&refresh=1`);
+        if(!r2.ok) throw new Error('Error al obtener ventas.');
+        data = await r2.json();
+      } else {
+        // Reconciliamos contra ML en segundo plano (no bloquea el render).
+        fetch(`${baseUrl}?${params}&refresh=1`).then(r2 => r2.ok ? r2.json() : null).then(d2 => {
+          if(seq !== loadSeq || !d2) return;
+          renderAll(d2);
+        }).catch(() => {});
+      }
+      if(seq !== loadSeq) return;
+      renderAll(data);
+    } catch(e) {
+      if(seq !== loadSeq) return;
+      document.getElementById('page-loading').style.display = 'none';
+      document.getElementById('error-box').style.display = 'block';
+      document.getElementById('error-box').textContent = 'No se pudo cargar la información de MercadoLibre.';
+    }
+  }
+
+  function computeAgg(orders) {
+    const paid = (orders || []).filter(o => o.estado === 'paid');
+    const sections = { gratis: {}, cargo: {} };
+    ENVIO_GROUPS_ORDER.forEach(g => {
+      sections.gratis[g] = { units: 0, ingreso: 0, gasto: 0 };
+      sections.cargo[g] = { units: 0, ingreso: 0, gasto: 0 };
+    });
+    const cardUnits = {}; ENVIO_GROUPS_ORDER.forEach(g => cardUnits[g] = 0);
+    let totalUnits = 0;
+    const skuAgg = {};
+
+    paid.forEach(o => {
+      const items = o.items || [];
+      const units = items.reduce((s, i) => s + (Number(i.cantidad) || 1), 0) || 1;
+      const ingresoEnvio = Number(o.ingreso_envio) || 0;
+      const ingreso = ingresoEnvio + (Number(o.bonificacion) || 0);
+      const gasto = Number(o.envio) || 0;
+      const balance = ingreso - gasto;
+      const grp = envioGroup(o.logistic_type);
+      const isGratis = ingresoEnvio <= 0.01;
+      const sec = isGratis ? sections.gratis : sections.cargo;
+      sec[grp].units += units;
+      sec[grp].ingreso += ingreso;
+      sec[grp].gasto += gasto;
+      cardUnits[grp] += units;
+      totalUnits += units;
+
+      if(items.length) {
+        items.forEach(it => {
+          const sku = (it.sku || '').trim() || '(sin SKU)';
+          const qty = Number(it.cantidad) || 1;
+          const share = balance * (qty / units);
+          if(!skuAgg[sku]) skuAgg[sku] = { units: 0, balance: 0 };
+          skuAgg[sku].units += qty;
+          skuAgg[sku].balance += share;
+        });
+      }
+    });
+
+    return { sections, cardUnits, totalUnits, skuAgg };
+  }
+
+  function renderAll(data) {
+    lastAgg = computeAgg(data.orders || []);
+    document.getElementById('page-loading').style.display = 'none';
+    document.getElementById('content').style.display = 'block';
+    renderCards();
+    renderSectionTable('gratis', 'tbl-gratis');
+    renderSectionTable('cargo', 'tbl-cargo');
+    renderSkuTable();
+    if(data.ultima_actualizacion) {
+      const ts = new Date(data.ultima_actualizacion + 'Z').toLocaleString('es-AR', {dateStyle:'short', timeStyle:'short'});
+      document.getElementById('last-update').textContent = (data.cache_only ? 'Datos guardados: ' : 'Actualizado: ') + ts;
+    }
+  }
+
+  function renderCards() {
+    const grid = document.getElementById('cards-grid');
+    const { cardUnits, totalUnits } = lastAgg;
+    grid.innerHTML = ENVIO_GROUPS_ORDER.map(g => {
+      const pct = totalUnits > 0 ? (cardUnits[g] / totalUnits * 100) : 0;
+      return `<div class="metric-card">
+        <div class="label">${ENVIO_GROUP_LABELS[g]}</div>
+        <div class="value">${fmtPct(pct)}</div>
+        <div class="sub">${fmtInt(cardUnits[g])} unidades</div>
+      </div>`;
+    }).join('');
+  }
+
+  function renderSectionTable(sectionKey, tbodyId) {
+    const section = lastAgg.sections[sectionKey];
+    const totalUnits = ENVIO_GROUPS_ORDER.reduce((s, g) => s + section[g].units, 0);
+    let tot = { units: 0, ingreso: 0, gasto: 0, balance: 0 };
+    const rows = ENVIO_GROUPS_ORDER.map(g => {
+      const row = section[g];
+      const balance = row.ingreso - row.gasto;
+      const costo = row.units > 0 ? balance / row.units : 0;
+      const participacion = totalUnits > 0 ? (row.units / totalUnits * 100) : 0;
+      tot.units += row.units; tot.ingreso += row.ingreso; tot.gasto += row.gasto; tot.balance += balance;
+      if(row.units === 0) return '';
+      return `<tr>
+        <td>${ENVIO_GROUP_LABELS[g]}</td>
+        <td class="num">${fmtInt(row.units)}</td>
+        <td class="num">${fmt(row.ingreso)}</td>
+        <td class="num">${fmt(-row.gasto)}</td>
+        <td class="num ${balance < 0 ? 'neg' : 'pos'}">${fmt(balance)}</td>
+        <td class="num ${costo < 0 ? 'neg' : 'pos'}">${fmt(costo)}</td>
+        <td class="num">${fmtPct(participacion)}</td>
+      </tr>`;
+    }).join('');
+    const totCosto = tot.units > 0 ? tot.balance / tot.units : 0;
+    const totalRow = `<tr class="total-row">
+      <td>TOTAL</td>
+      <td class="num">${fmtInt(tot.units)}</td>
+      <td class="num">${fmt(tot.ingreso)}</td>
+      <td class="num">${fmt(-tot.gasto)}</td>
+      <td class="num ${tot.balance < 0 ? 'neg' : 'pos'}">${fmt(tot.balance)}</td>
+      <td class="num ${totCosto < 0 ? 'neg' : 'pos'}">${fmt(totCosto)}</td>
+      <td class="num">100,0%</td>
+    </tr>`;
+    document.getElementById(tbodyId).innerHTML = (rows || `<tr><td colspan="7" class="empty">Sin ventas en este período</td></tr>`) + (tot.units > 0 ? totalRow : '');
+  }
+
+  function renderSkuTable() {
+    if(!lastAgg) return;
+    const q = (document.getElementById('sku-search')?.value || '').trim().toUpperCase();
+    let rows = Object.entries(lastAgg.skuAgg).map(([sku, v]) => ({
+      sku, units: v.units, balance: v.balance, costo: v.units > 0 ? v.balance / v.units : 0,
+    }));
+    if(q) rows = rows.filter(r => r.sku.toUpperCase().includes(q));
+    rows.sort((a, b) => a.balance - b.balance);
+    const tbody = document.getElementById('tbl-sku');
+    if(!rows.length) {
+      tbody.innerHTML = `<tr><td colspan="4" class="empty">Sin resultados</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = rows.map(r => `<tr>
+      <td>${r.sku}</td>
+      <td class="num">${fmtInt(r.units)}</td>
+      <td class="num ${r.costo < 0 ? 'neg' : 'pos'}">${fmt(r.costo)}</td>
+      <td class="num ${r.balance < 0 ? 'neg' : 'pos'}">${fmt(r.balance)}</td>
+    </tr>`).join('');
+  }
+
+  {% if accounts %}
+  setPeriod('30d', document.querySelector('.period-btn.active'));
+  {% endif %}
+</script>
+</body>
+</html>

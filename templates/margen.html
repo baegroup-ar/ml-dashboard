@@ -103,6 +103,7 @@
     {% if 'stock' in perms %}<a href="/stock" class="btn-nav">Stock valorizado</a>{% endif %}
     {% if 'compras' in perms or 'costos' in perms %}<a href="/compras" class="btn-nav">Compras</a>{% endif %}
     <span style="color:#005CFF;font-weight:500;">Margen</span>
+    {% if 'ponderado_envios' in perms %}<a href="/ponderado-envios" class="btn-nav">Ponderado Envíos</a>{% endif %}
     <span style="color:#888;">{{ user.name }}</span>
     {% if user.is_admin %}<a href="/admin" style="font-size:12px;color:#005CFF;text-decoration:none;">Admin</a>{% endif %}
     <a href="/logout" class="btn-nav">Salir</a>
