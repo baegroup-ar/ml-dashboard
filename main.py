@@ -264,6 +264,16 @@ def init_db():
         conn.execute(text("ALTER TABLE shipment_cost_cache ADD COLUMN IF NOT EXISTS logistic_type VARCHAR(50) DEFAULT NULL"))
         conn.execute(text("ALTER TABLE shipment_cost_cache ADD COLUMN IF NOT EXISTS bonificacion NUMERIC(10,2) DEFAULT NULL"))
         conn.execute(text("ALTER TABLE shipment_cost_cache ADD COLUMN IF NOT EXISTS list_cost NUMERIC(10,2) DEFAULT NULL"))
+        # Caché de impuestos/retenciones por venta (order_id REAL de ML, no pack).
+        # Se llena en segundo plano desde /billing (limitado a 5 req/min). Es el
+        # monto exacto que ML retiene en cada venta (SIRTAC, débitos/créditos, etc).
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS order_tax_cache (
+                order_id TEXT PRIMARY KEY,
+                impuestos NUMERIC(12,2) NOT NULL DEFAULT 0,
+                cached_at TIMESTAMP DEFAULT NOW()
+            )
+        """))
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS app_meta (
                 key TEXT PRIMARY KEY,
@@ -547,6 +557,15 @@ CACHE_WARMER_ENABLED = os.environ.get("CACHE_WARMER_ENABLED", "1") == "1"
 CACHE_WARMER_INTERVAL_SECONDS = int(os.environ.get("CACHE_WARMER_INTERVAL_SECONDS", "1200"))  # 20 min
 CACHE_WARMER_DAYS = int(os.environ.get("CACHE_WARMER_DAYS", "7"))
 
+# ── Calentador de IMPUESTOS (retenciones por venta) ──────────────────────────
+# El endpoint /billing está limitado a 5 req/min, así que esto corre aparte del
+# dashboard, en segundo plano y lento, cacheando el impuesto exacto por order_id.
+TAXES_WARMER_ENABLED = os.environ.get("TAXES_WARMER_ENABLED", "1") == "1"
+TAXES_WARMER_INTERVAL_SECONDS = int(os.environ.get("TAXES_WARMER_INTERVAL_SECONDS", "900"))  # 15 min
+TAXES_WARMER_DAYS = int(os.environ.get("TAXES_WARMER_DAYS", "30"))
+TAXES_WARMER_BATCH = 100                 # order_ids por request de billing
+TAXES_WARMER_SLEEP_SECONDS = float(os.environ.get("TAXES_WARMER_SLEEP_SECONDS", "13"))  # 5/min => 12s; 13 de margen
+
 
 async def _warm_account_orders(acc: dict, days: int) -> int:
     """Refresca el caché de los últimos `days` días para una cuenta. Devuelve la
@@ -586,20 +605,138 @@ async def _orders_cache_warmer():
         await asyncio.sleep(CACHE_WARMER_INTERVAL_SECONDS)
 
 
+async def _fetch_taxes_for_orders(client, headers, seller_id, order_ids: list) -> dict:
+    """{order_id_str: impuestos} desde /billing. Suma tax_details (original-refunded)
+    por pago, deduplicando payment_id. Si ML devuelve 429 (rate limit) corta y
+    devuelve lo que consiguió; el resto se reintenta en el próximo ciclo. NUNCA
+    lanza excepción."""
+    per_order: dict = {}   # oid -> {payment_id: tax}
+    unique = list(dict.fromkeys(str(o) for o in order_ids if o))
+    for i in range(0, len(unique), TAXES_WARMER_BATCH):
+        batch = unique[i:i+TAXES_WARMER_BATCH]
+        try:
+            r = await client.get(
+                f"{ML_API_URL}/billing/integration/group/ML/order/details",
+                headers=headers,
+                params={"order_ids": ",".join(batch), "seller_id": seller_id, "limit": 150},
+            )
+        except Exception:
+            continue
+        if r.status_code == 429:
+            break  # rate limit: cortamos, seguimos en el próximo ciclo
+        if r.status_code not in (200, 206):
+            continue
+        try:
+            results = r.json().get("results") or []
+        except Exception:
+            continue
+        for row in results:
+            oid = str(row.get("order_id") or "")
+            if not oid:
+                continue
+            seen = per_order.setdefault(oid, {})
+            for p in (row.get("payment_info") or []):
+                pid = p.get("payment_id")
+                if pid in seen:
+                    continue
+                tot = 0.0
+                for t in (p.get("tax_details") or []):
+                    tot += abs(float(t.get("original_amount") or 0)) - abs(float(t.get("refunded_amount") or 0))
+                seen[pid] = tot
+        if i + TAXES_WARMER_BATCH < len(unique):
+            await asyncio.sleep(TAXES_WARMER_SLEEP_SECONDS)  # respetar 5/min
+    return {oid: round(sum(d.values()), 2) for oid, d in per_order.items()}
+
+
+def _snapshot_order_ids(payload: dict) -> list:
+    """order_ids REALES de una orden/pack guardada. Usa el campo `order_ids`
+    (nuevo, presente en snapshots recién construidos). Para snapshots viejos sin
+    ese campo: si es orden suelta el id ES el order_id real; si es pack, se
+    omite (el pack_id no sirve para /billing) hasta que se reconstruya."""
+    ids = payload.get("order_ids")
+    if isinstance(ids, list) and ids:
+        return [str(x) for x in ids if x]
+    if payload.get("is_pack"):
+        return []
+    single = payload.get("venta_id") or payload.get("id")
+    return [str(single)] if single else []
+
+
+async def _warm_account_taxes(acc: dict) -> int:
+    """Cachea impuestos de las ventas recientes de una cuenta que aún no estén
+    cacheadas. Devuelve cuántos order_ids nuevos guardó (-1 si falló)."""
+    try:
+        token = await refresh_ml_token(acc["id"])
+        if not token:
+            return -1
+        today = datetime.utcnow().date()
+        df = str(today - timedelta(days=max(TAXES_WARMER_DAYS - 1, 0)))
+        dt = str(today)
+        snaps = db_fetch_order_snapshots(acc["id"], df, dt)
+        order_ids: list = []
+        for payload in snaps:
+            order_ids.extend(_snapshot_order_ids(payload))
+        order_ids = list(dict.fromkeys(order_ids))
+        if not order_ids:
+            return 0
+        cached = db_get_cached_taxes(order_ids)
+        todo = [oid for oid in order_ids if oid not in cached]
+        if not todo:
+            return 0
+        headers = {"Authorization": f"Bearer {token}"}
+        async with httpx.AsyncClient(timeout=30) as client:
+            taxes = await _fetch_taxes_for_orders(client, headers, acc["ml_user_id"], todo)
+        # Guardamos también los pendientes que resolvieron en 0 (ventas sin
+        # retención) para no reintentarlos indefinidamente.
+        to_save = {oid: taxes.get(oid, 0.0) for oid in todo if oid in taxes}
+        db_save_taxes(to_save)
+        return len(to_save)
+    except Exception as e:
+        print(f"[taxes-warmer] cuenta {acc.get('id')} error: {str(e)[:160]}", flush=True)
+        return -1
+
+
+async def _taxes_cache_warmer():
+    """Loop infinito y lento (respeta 5 req/min de /billing) que cachea el
+    impuesto exacto por venta. Aislado del dashboard: si falla no afecta nada."""
+    await asyncio.sleep(90)  # arrancar después del calentador de órdenes
+    while True:
+        try:
+            accs = db_fetchall(
+                "SELECT * FROM ml_accounts WHERE COALESCE(access_token,'') <> '' ORDER BY id"
+            )
+            for acc in accs:
+                n = await _warm_account_taxes(acc)
+                if n > 0:
+                    print(f"[taxes-warmer] cuenta {acc['id']} ({acc.get('nickname')}): "
+                          f"{n} ventas con impuesto cacheado", flush=True)
+                await asyncio.sleep(2)
+        except Exception as e:
+            print(f"[taxes-warmer] ciclo error: {str(e)[:160]}", flush=True)
+        await asyncio.sleep(TAXES_WARMER_INTERVAL_SECONDS)
+
+
 @asynccontextmanager
 async def lifespan(app):
     init_db()
     _load_promo_floor_from_db()
     warmer_task = None
+    taxes_task = None
     if CACHE_WARMER_ENABLED:
         warmer_task = asyncio.create_task(_orders_cache_warmer())
         print(f"[cache-warmer] activado: cada {CACHE_WARMER_INTERVAL_SECONDS}s, "
               f"últimos {CACHE_WARMER_DAYS} días", flush=True)
+    if TAXES_WARMER_ENABLED:
+        taxes_task = asyncio.create_task(_taxes_cache_warmer())
+        print(f"[taxes-warmer] activado: cada {TAXES_WARMER_INTERVAL_SECONDS}s, "
+              f"últimos {TAXES_WARMER_DAYS} días", flush=True)
     try:
         yield
     finally:
         if warmer_task:
             warmer_task.cancel()
+        if taxes_task:
+            taxes_task.cancel()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -847,6 +984,41 @@ def db_save_shipping_costs(costs: dict):
             " cost = EXCLUDED.cost, buyer_cost = EXCLUDED.buyer_cost,"
             " bonificacion = EXCLUDED.bonificacion, list_cost = EXCLUDED.list_cost,"
             " logistic_type = EXCLUDED.logistic_type"
+        ), params_list)
+        conn.commit()
+
+
+def db_get_cached_taxes(order_ids: list) -> dict:
+    """{order_id_str: impuestos_float} desde order_tax_cache para los ids dados."""
+    if not order_ids:
+        return {}
+    ids = [str(o) for o in order_ids if o is not None]
+    result = {}
+    chunk = 500
+    for i in range(0, len(ids), chunk):
+        batch = ids[i:i+chunk]
+        placeholders = ",".join(f":id{j}" for j in range(len(batch)))
+        params = {f"id{j}": oid for j, oid in enumerate(batch)}
+        rows = db_fetchall(
+            f"SELECT order_id, impuestos FROM order_tax_cache WHERE order_id IN ({placeholders})",
+            params,
+        )
+        for row in rows:
+            result[str(row["order_id"])] = float(row["impuestos"] or 0)
+    return result
+
+
+def db_save_taxes(taxes: dict):
+    """Upsert de {order_id_str: impuestos}."""
+    if not taxes:
+        return
+    params_list = [{"oid": str(oid), "imp": round(float(v or 0), 2)} for oid, v in taxes.items()]
+    with engine.connect() as conn:
+        conn.execute(text(
+            "INSERT INTO order_tax_cache (order_id, impuestos, cached_at)"
+            " VALUES (:oid, :imp, NOW())"
+            " ON CONFLICT (order_id) DO UPDATE SET"
+            " impuestos = EXCLUDED.impuestos, cached_at = NOW()"
         ), params_list)
         conn.commit()
 
@@ -10784,6 +10956,11 @@ async def _api_orders_impl(request: Request, account_id: int,
     # envío de las ventas flex con lo que el vendedor le paga a su mensajería).
     flex_tariffs = db_get_flex_tariffs(cost_aid)
 
+    # Impuestos/retenciones por venta (order_id REAL) desde la caché que llena
+    # el calentador de impuestos en segundo plano. Es una lectura de DB barata;
+    # si un order_id todavía no está cacheado, queda en 0 (se completa luego).
+    tax_map = db_get_cached_taxes([o.get("id") for o in all_results])
+
     # ── Paso 1: construir lista raw por orden individual ──────────
     raw_list = []
     for o, sid in zip(all_results, all_sids):
@@ -10881,6 +11058,7 @@ async def _api_orders_impl(request: Request, account_id: int,
             "coupon_amt": round(float((o.get("coupon") or {}).get("amount", 0)), 2),
             "refund_amount": refund_amount,
             "cmv": round(order_cmv, 2),
+            "impuestos": round(float(tax_map.get(order_id, 0.0) or 0.0), 2),
             "logistic_type": ship_info.get("logistic_type", "") if isinstance(ship_info, dict) else "",
             "estado": estado,
             "items": items,
@@ -10904,6 +11082,8 @@ async def _api_orders_impl(request: Request, account_id: int,
                     "refund_amount": 0.0,
                     "order_count": 0,
                     "cmv": 0.0,
+                    "impuestos": 0.0,
+                    "order_ids": [],
                     "logistic_type": raw.get("logistic_type", ""),
                     "estado": raw["estado"],
                     "is_pack": True, "items": [],
@@ -10915,6 +11095,10 @@ async def _api_orders_impl(request: Request, account_id: int,
             p["refund_amount"] = round(p["refund_amount"] + raw.get("refund_amount", 0), 2)
             p["order_count"] += raw.get("order_count", 1)
             p["cmv"] = round(p["cmv"] + raw["cmv"], 2)
+            # Impuestos: se suman los de cada order_id real del pack.
+            p["impuestos"] = round(p["impuestos"] + raw.get("impuestos", 0.0), 2)
+            if raw.get("id") is not None:
+                p["order_ids"].append(str(raw["id"]))
             p["items"].extend(raw["items"])
         else:
             # Ing. Envío = sólo lo que paga el comprador por envío.
@@ -10938,6 +11122,8 @@ async def _api_orders_impl(request: Request, account_id: int,
                 "envio": raw["envio"],
                 "refund_amount": raw.get("refund_amount", 0),
                 "cmv": raw["cmv"],
+                "impuestos": raw.get("impuestos", 0.0),
+                "order_ids": [str(raw["id"])] if raw.get("id") is not None else [],
                 "ganancia": ganancia,
                 "logistic_type": raw.get("logistic_type", ""),
                 "estado": raw["estado"],
@@ -11202,7 +11388,7 @@ async def api_orders_export(
     headers = [
         "Cuenta", "Fecha", "Hora", "N° Venta", "Estado", "Producto", "SKU", "Envío",
         "Unidades", "Monto", "Comisión", "Ingreso Envío", "Bonificación",
-        "Costo Envío", "Cobro", "CMV", "Ganancia neta", "Margen %",
+        "Costo Envío", "Impuestos", "Cobro", "CMV", "Ganancia neta", "Margen %",
     ]
     ws.append(headers)
     header_fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
@@ -11222,7 +11408,10 @@ async def api_orders_export(
         monto = float(o.get("monto") or 0)
         ganancia = float(o.get("ganancia") or 0)
         cmv = float(o.get("cmv") or 0)
-        cobro = ganancia + cmv   # ganancia = cobro - cmv (ver build_dashboard_payload)
+        impuestos = float(o.get("impuestos") or 0)
+        # ganancia = cobro_viejo - cmv (sin impuestos); el cobro real le resta
+        # además los impuestos (= Total del Detalle de cobro de ML).
+        cobro = ganancia + cmv - impuestos
         margen = (ganancia / monto * 100) if monto > 0 else 0
         ws.append([
             o.get("_cuenta") or "",
@@ -11239,20 +11428,21 @@ async def api_orders_export(
             float(o.get("ingreso_envio") or 0),
             float(o.get("bonificacion") or 0),
             float(o.get("envio") or 0),
+            impuestos,
             cobro,
             cmv,
             ganancia,
             round(margen, 2),
         ])
 
-    # Ancho de columnas + formato moneda básico (col 10-17 = $, col 18 = %)
-    widths = [16, 12, 8, 16, 10, 40, 22, 12, 8, 14, 14, 14, 14, 14, 14, 14, 14, 10]
+    # Ancho de columnas + formato moneda básico (col 10-18 = $, col 19 = %)
+    widths = [16, 12, 8, 16, 10, 40, 22, 12, 8, 14, 14, 14, 14, 14, 14, 14, 14, 14, 10]
     for i, w in enumerate(widths, start=1):
         ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = w
-    for row in ws.iter_rows(min_row=2, min_col=10, max_col=17):
+    for row in ws.iter_rows(min_row=2, min_col=10, max_col=18):
         for cell in row:
             cell.number_format = '"$"#,##0.00'
-    for row in ws.iter_rows(min_row=2, min_col=18, max_col=18):
+    for row in ws.iter_rows(min_row=2, min_col=19, max_col=19):
         for cell in row:
             cell.number_format = '0.00"%"'
 

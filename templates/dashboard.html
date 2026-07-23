@@ -248,7 +248,7 @@
       </div>
       <div style="overflow:auto;max-height:65vh;">
         <table>
-          <thead><tr><th>Fecha</th><th>Hora</th><th>N° Venta</th><th>Producto</th>{% if user.is_admin %}<th>Envío</th>{% endif %}<th>Unid.</th><th>Monto</th><th>Comisión</th><th>Ing. Envío</th><th>Bonif.</th><th>Costo Envío</th><th>Cobro</th><th>CMV</th><th>Ganancia neta</th><th>Margen</th></tr></thead>
+          <thead><tr><th>Fecha</th><th>Hora</th><th>N° Venta</th><th>Producto</th>{% if user.is_admin %}<th>Envío</th>{% endif %}<th>Unid.</th><th>Monto</th><th>Comisión</th><th>Ing. Envío</th><th>Bonif.</th><th>Costo Envío</th><th>Impuestos</th><th>Cobro</th><th>CMV</th><th>Ganancia neta</th><th>Margen</th></tr></thead>
           <tbody id="orders-tbody"></tbody>
         </table>
       </div>
@@ -666,6 +666,7 @@
     const comisiones = paidOrders.reduce((s, o) => s + (o.comision || 0), 0);
     const envios = paidOrders.reduce((s, o) => s + (o.envio || 0), 0);
     const cmv_total = paidOrders.reduce((s, o) => s + (o.cmv || 0), 0);
+    const impuestos_total = paidOrders.reduce((s, o) => s + (Number(o.impuestos) || 0), 0);
     const ingresos_total = ingresos + ingresos_envio + bonificaciones;
     const neta = ingresos_total - comisiones - envios - cmv_total;
     const unidades = paidOrders.reduce((s, o) => s + (o.items||[]).reduce((si, i) => si + (i.cantidad||1), 0), 0);
@@ -684,12 +685,10 @@
     const pctEnv = ingresos > 0 ? (envios/ingresos*100).toFixed(1) : '0.0';
     const pctCmv = ingresos > 0 ? (cmv_total/ingresos*100).toFixed(1) : '0.0';
     const pctNet = ingresos > 0 ? (neta/ingresos*100).toFixed(1) : '0.0';
-    // Cobro = lo que efectivamente se cobra antes de restar el CMV (misma
-    // definición que la columna Cobro de la tabla, sumada). Como
-    // ingresos_total = ingresos + ingresos_envio + bonificaciones y
-    // neta = ingresos_total - comisiones - envios - cmv_total, esto es
-    // equivalente a neta + cmv_total.
-    const cobro_total = ingresos_total - comisiones - envios;
+    // Cobro = lo que efectivamente deposita ML (Total del Detalle de cobro),
+    // antes de restar el CMV: ingresos_total - comisiones - envios - impuestos.
+    // Misma definición que la columna Cobro de la tabla, sumada.
+    const cobro_total = ingresos_total - comisiones - envios - impuestos_total;
     const pctCobro = ingresos > 0 ? (cobro_total/ingresos*100).toFixed(1) : '0.0';
     if(!loadingDetails) {
       document.getElementById('m-comisiones').innerHTML = `${fmt0(comisiones)}<span style="display:block;font-size:11px;font-weight:400;color:#999;margin-top:2px;">(${pctCom}%)</span>`;
@@ -733,7 +732,7 @@
 
   function renderOrders(orders) {
     const tbody = document.getElementById('orders-tbody');
-    const totalCols = IS_ADMIN ? 15 : 14;
+    const totalCols = IS_ADMIN ? 16 : 15;
     if(!orders.length){
       let msg = 'Sin ventas en este período.';
       if(skuFilter && envioFilter) msg = `Sin ventas que coincidan con "${skuFilter}" y envío "${envioFilter}".`;
@@ -752,11 +751,13 @@
       const rowStyle = isCancel ? 'background:#fdecec;color:#a0524d;' : '';
       const units = (o.items||[]).reduce((s,i)=>s+(i.cantidad||1), 0);
       const g = o.ganancia || 0;
-      // Cobro = lo que efectivamente se cobra antes de restar el CMV:
-      // monto - comision + ing_envio + bonif - costo_envio. Como
-      // ganancia (g) = eso mismo - cmv (ver build de "orders" en el backend),
-      // reusamos g + cmv en vez de recalcular para evitar drift de redondeo.
-      const cobro = g + (o.cmv || 0);
+      const imp = Number(o.impuestos) || 0;   // retenciones ML (0 si aún no cacheado)
+      // Cobro = lo que efectivamente deposita ML (Total del Detalle de cobro):
+      // monto - comision + ing_envio + bonif - costo_envio - impuestos. Como
+      // ganancia (g) = monto - comision + ing_envio + bonif - costo_envio - cmv
+      // (ver build de "orders" en el backend, SIN impuestos), reusamos g + cmv
+      // y le restamos los impuestos aparte.
+      const cobro = g + (o.cmv || 0) - imp;
       const gc = isCancel ? '#a0524d' : (g >= 0 ? '#1a8a5a' : '#c0392b');
       // Margen = ganancia / monto
       const pct = o.monto > 0 ? ((g/o.monto)*100).toFixed(1) : '0.0';
@@ -776,6 +777,7 @@
         <td style="color:${isCancel?'#a0524d':'#1a8a5a'};">${fmt(o.ingreso_envio || 0)}</td>
         <td style="color:${isCancel?'#a0524d':'#1a8a5a'};">${fmt(o.bonificacion || 0)}</td>
         <td style="color:${isCancel?'#a0524d':'#c47a1e'};">${fmt(o.envio)}</td>
+        <td style="color:${isCancel?'#a0524d':(imp>0?'#c0392b':'#aaa')};">${imp>0?fmt(-imp):'—'}</td>
         <td style="color:${isCancel?'#a0524d':(cobro>=0?'#333':'#c0392b')};font-weight:500;">${fmt(cobro)}</td>
         <td style="color:${isCancel?'#a0524d':((o.cmv||0)>0?'#c0392b':'#aaa')};">${fmt(o.cmv || 0)}</td>
         <td style="color:${gc};font-weight:500;">${fmt(g)}</td>
@@ -803,7 +805,7 @@
             <td style="font-size:12px;text-align:center;">${item.cantidad||1}</td>
             <td style="font-size:12px;">${fmt(item.monto)}</td>
             <td style="font-size:12px;color:#c0392b;">${fmt(item.comision)}</td>
-            <td colspan="4"></td>
+            <td colspan="5"></td>
             <td style="font-size:12px;color:${(item.cmv||0)>0?'#c0392b':'#aaa'};">${fmt(item.cmv || 0)}</td>
             <td colspan="2"></td>
           </tr>`);
