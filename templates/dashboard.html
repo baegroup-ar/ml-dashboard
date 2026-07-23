@@ -46,7 +46,7 @@
        sola fila sin importar el ancho de pantalla; si el espacio aprieta, el
        texto de adentro pasa a una 2da línea en vez de mandar la tarjeta
        siguiente a otra fila. */
-    .cards-grid { display: grid; grid-template-columns: repeat(9, minmax(0, 1fr)); gap: 8px; margin-bottom: 1.5rem; }
+    .cards-grid { display: grid; grid-template-columns: repeat(10, minmax(0, 1fr)); gap: 8px; margin-bottom: 1.5rem; }
     .metric-card { background: #fff; border: 1px solid #e5e5e3; border-radius: 12px; padding: 0.85rem 0.7rem; position: relative; min-width: 0; }
     .metric-card .label { font-size: 11px; color: #888; margin-bottom: 6px; overflow-wrap: break-word; }
     .metric-card .value { font-size: 16px; font-weight: 600; overflow-wrap: break-word; }
@@ -204,6 +204,10 @@
         <div class="label">Costo de envíos</div>
         <div class="value orange" id="m-envios">—</div>
         <div class="loading-bar" id="lb-envios"></div>
+      </div>
+      <div class="metric-card" id="card-cobro">
+        <div class="label">Cobro</div>
+        <div class="value" id="m-cobro">—</div>
       </div>
       <div class="metric-card" id="card-cmv">
         <div class="label">Costo mercadería (CMV)</div>
@@ -680,11 +684,20 @@
     const pctEnv = ingresos > 0 ? (envios/ingresos*100).toFixed(1) : '0.0';
     const pctCmv = ingresos > 0 ? (cmv_total/ingresos*100).toFixed(1) : '0.0';
     const pctNet = ingresos > 0 ? (neta/ingresos*100).toFixed(1) : '0.0';
+    // Cobro = lo que efectivamente se cobra antes de restar el CMV (misma
+    // definición que la columna Cobro de la tabla, sumada). Como
+    // ingresos_total = ingresos + ingresos_envio + bonificaciones y
+    // neta = ingresos_total - comisiones - envios - cmv_total, esto es
+    // equivalente a neta + cmv_total.
+    const cobro_total = ingresos_total - comisiones - envios;
+    const pctCobro = ingresos > 0 ? (cobro_total/ingresos*100).toFixed(1) : '0.0';
     if(!loadingDetails) {
       document.getElementById('m-comisiones').innerHTML = `${fmt0(comisiones)}<span style="display:block;font-size:11px;font-weight:400;color:#999;margin-top:2px;">(${pctCom}%)</span>`;
       document.getElementById('m-comisiones').className = 'value red';
       document.getElementById('m-envios').innerHTML = `${fmt0(envios)}<span style="display:block;font-size:11px;font-weight:400;color:#999;margin-top:2px;">(${pctEnv}%)</span>`;
       document.getElementById('m-envios').className = 'value orange';
+      document.getElementById('m-cobro').innerHTML = `${fmt0(cobro_total)}<span style="display:block;font-size:11px;font-weight:400;color:#999;margin-top:2px;">(${pctCobro}%)</span>`;
+      document.getElementById('m-cobro').className = 'value ' + (cobro_total >= 0 ? '' : 'red');
       document.getElementById('m-cmv').innerHTML = `${fmt0(cmv_total)}<span style="display:block;font-size:11px;font-weight:400;color:#999;margin-top:2px;">(${pctCmv}%)</span>`;
       document.getElementById('m-cmv').className = 'value red';
       document.getElementById('m-neta').innerHTML = `${fmt0(neta)}<span style="display:block;font-size:11px;font-weight:400;color:#999;margin-top:2px;">(${pctNet}%)</span>`;
