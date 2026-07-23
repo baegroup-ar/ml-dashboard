@@ -244,7 +244,7 @@
       </div>
       <div style="overflow:auto;max-height:65vh;">
         <table>
-          <thead><tr><th>Fecha</th><th>Hora</th><th>N° Venta</th><th>Producto</th>{% if user.is_admin %}<th>Envío</th>{% endif %}<th>Unid.</th><th>Monto</th><th>Comisión</th><th>Ing. Envío</th><th>Bonif.</th><th>Costo Envío</th><th>CMV</th><th>Ganancia neta</th><th>Margen</th></tr></thead>
+          <thead><tr><th>Fecha</th><th>Hora</th><th>N° Venta</th><th>Producto</th>{% if user.is_admin %}<th>Envío</th>{% endif %}<th>Unid.</th><th>Monto</th><th>Comisión</th><th>Ing. Envío</th><th>Bonif.</th><th>Costo Envío</th><th>Cobro</th><th>CMV</th><th>Ganancia neta</th><th>Margen</th></tr></thead>
           <tbody id="orders-tbody"></tbody>
         </table>
       </div>
@@ -264,6 +264,8 @@
 
 <script>
   const fmt = n => n == null ? '...' : '$' + Number(n).toLocaleString('es-AR', {minimumFractionDigits:2, maximumFractionDigits:2});
+  // Sin centavos, solo para las tarjetas-resumen de arriba.
+  const fmt0 = n => n == null ? '...' : '$' + Math.round(Number(n)).toLocaleString('es-AR');
   const IS_ADMIN = {{ 'true' if user and user.is_admin else 'false' }};
   // Mapeo de logistic_type de ML a etiquetas legibles
   const LOGISTIC_LABELS = {
@@ -668,9 +670,9 @@
     const paidCount = paidOrders.reduce((s, o) => s + countOrders(o), 0);
     document.getElementById('m-ventas').textContent = paidCount;
     document.getElementById('m-unidades').textContent = unidades;
-    document.getElementById('m-bruto').textContent = fmt(ingresos);
-    document.getElementById('m-ing-envio').textContent = fmt(ingresos_envio);
-    document.getElementById('m-bonif').textContent = fmt(bonificaciones);
+    document.getElementById('m-bruto').textContent = fmt0(ingresos);
+    document.getElementById('m-ing-envio').textContent = fmt0(ingresos_envio);
+    document.getElementById('m-bonif').textContent = fmt0(bonificaciones);
 
     // Porcentajes calculados sobre el monto (ingreso bruto), alineado con
     // el criterio de la columna Margen de la tabla (ganancia / monto).
@@ -679,13 +681,13 @@
     const pctCmv = ingresos > 0 ? (cmv_total/ingresos*100).toFixed(1) : '0.0';
     const pctNet = ingresos > 0 ? (neta/ingresos*100).toFixed(1) : '0.0';
     if(!loadingDetails) {
-      document.getElementById('m-comisiones').innerHTML = `${fmt(comisiones)}<span style="display:block;font-size:11px;font-weight:400;color:#999;margin-top:2px;">(${pctCom}%)</span>`;
+      document.getElementById('m-comisiones').innerHTML = `${fmt0(comisiones)}<span style="display:block;font-size:11px;font-weight:400;color:#999;margin-top:2px;">(${pctCom}%)</span>`;
       document.getElementById('m-comisiones').className = 'value red';
-      document.getElementById('m-envios').innerHTML = `${fmt(envios)}<span style="display:block;font-size:11px;font-weight:400;color:#999;margin-top:2px;">(${pctEnv}%)</span>`;
+      document.getElementById('m-envios').innerHTML = `${fmt0(envios)}<span style="display:block;font-size:11px;font-weight:400;color:#999;margin-top:2px;">(${pctEnv}%)</span>`;
       document.getElementById('m-envios').className = 'value orange';
-      document.getElementById('m-cmv').innerHTML = `${fmt(cmv_total)}<span style="display:block;font-size:11px;font-weight:400;color:#999;margin-top:2px;">(${pctCmv}%)</span>`;
+      document.getElementById('m-cmv').innerHTML = `${fmt0(cmv_total)}<span style="display:block;font-size:11px;font-weight:400;color:#999;margin-top:2px;">(${pctCmv}%)</span>`;
       document.getElementById('m-cmv').className = 'value red';
-      document.getElementById('m-neta').innerHTML = `${fmt(neta)}<span style="display:block;font-size:11px;font-weight:400;color:#999;margin-top:2px;">(${pctNet}%)</span>`;
+      document.getElementById('m-neta').innerHTML = `${fmt0(neta)}<span style="display:block;font-size:11px;font-weight:400;color:#999;margin-top:2px;">(${pctNet}%)</span>`;
       document.getElementById('m-neta').className = 'value ' + (neta >= 0 ? 'green' : 'red');
 
       ['comisiones','envios','neta'].forEach(id => {
@@ -718,7 +720,7 @@
 
   function renderOrders(orders) {
     const tbody = document.getElementById('orders-tbody');
-    const totalCols = IS_ADMIN ? 14 : 13;
+    const totalCols = IS_ADMIN ? 15 : 14;
     if(!orders.length){
       let msg = 'Sin ventas en este período.';
       if(skuFilter && envioFilter) msg = `Sin ventas que coincidan con "${skuFilter}" y envío "${envioFilter}".`;
@@ -737,6 +739,11 @@
       const rowStyle = isCancel ? 'background:#fdecec;color:#a0524d;' : '';
       const units = (o.items||[]).reduce((s,i)=>s+(i.cantidad||1), 0);
       const g = o.ganancia || 0;
+      // Cobro = lo que efectivamente se cobra antes de restar el CMV:
+      // monto - comision + ing_envio + bonif - costo_envio. Como
+      // ganancia (g) = eso mismo - cmv (ver build de "orders" en el backend),
+      // reusamos g + cmv en vez de recalcular para evitar drift de redondeo.
+      const cobro = g + (o.cmv || 0);
       const gc = isCancel ? '#a0524d' : (g >= 0 ? '#1a8a5a' : '#c0392b');
       // Margen = ganancia / monto
       const pct = o.monto > 0 ? ((g/o.monto)*100).toFixed(1) : '0.0';
@@ -756,6 +763,7 @@
         <td style="color:${isCancel?'#a0524d':'#1a8a5a'};">${fmt(o.ingreso_envio || 0)}</td>
         <td style="color:${isCancel?'#a0524d':'#1a8a5a'};">${fmt(o.bonificacion || 0)}</td>
         <td style="color:${isCancel?'#a0524d':'#c47a1e'};">${fmt(o.envio)}</td>
+        <td style="color:${isCancel?'#a0524d':(cobro>=0?'#333':'#c0392b')};font-weight:500;">${fmt(cobro)}</td>
         <td style="color:${isCancel?'#a0524d':((o.cmv||0)>0?'#c0392b':'#aaa')};">${fmt(o.cmv || 0)}</td>
         <td style="color:${gc};font-weight:500;">${fmt(g)}</td>
         <td style="color:${gc};font-size:13px;font-weight:600;">${pct}%</td>`;
@@ -782,7 +790,7 @@
             <td style="font-size:12px;text-align:center;">${item.cantidad||1}</td>
             <td style="font-size:12px;">${fmt(item.monto)}</td>
             <td style="font-size:12px;color:#c0392b;">${fmt(item.comision)}</td>
-            <td colspan="3"></td>
+            <td colspan="4"></td>
             <td style="font-size:12px;color:${(item.cmv||0)>0?'#c0392b':'#aaa'};">${fmt(item.cmv || 0)}</td>
             <td colspan="2"></td>
           </tr>`);

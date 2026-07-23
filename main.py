@@ -11202,7 +11202,7 @@ async def api_orders_export(
     headers = [
         "Cuenta", "Fecha", "Hora", "N° Venta", "Estado", "Producto", "SKU", "Envío",
         "Unidades", "Monto", "Comisión", "Ingreso Envío", "Bonificación",
-        "Costo Envío", "CMV", "Ganancia neta", "Margen %",
+        "Costo Envío", "Cobro", "CMV", "Ganancia neta", "Margen %",
     ]
     ws.append(headers)
     header_fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
@@ -11221,6 +11221,8 @@ async def api_orders_export(
         envio_label = _ENVIO_LABELS.get(o.get("logistic_type") or "", o.get("logistic_type") or "—")
         monto = float(o.get("monto") or 0)
         ganancia = float(o.get("ganancia") or 0)
+        cmv = float(o.get("cmv") or 0)
+        cobro = ganancia + cmv   # ganancia = cobro - cmv (ver build_dashboard_payload)
         margen = (ganancia / monto * 100) if monto > 0 else 0
         ws.append([
             o.get("_cuenta") or "",
@@ -11237,19 +11239,20 @@ async def api_orders_export(
             float(o.get("ingreso_envio") or 0),
             float(o.get("bonificacion") or 0),
             float(o.get("envio") or 0),
-            float(o.get("cmv") or 0),
+            cobro,
+            cmv,
             ganancia,
             round(margen, 2),
         ])
 
-    # Ancho de columnas + formato moneda básico (col 10-16 = $, col 17 = %)
-    widths = [16, 12, 8, 16, 10, 40, 22, 12, 8, 14, 14, 14, 14, 14, 14, 14, 10]
+    # Ancho de columnas + formato moneda básico (col 10-17 = $, col 18 = %)
+    widths = [16, 12, 8, 16, 10, 40, 22, 12, 8, 14, 14, 14, 14, 14, 14, 14, 14, 10]
     for i, w in enumerate(widths, start=1):
         ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = w
-    for row in ws.iter_rows(min_row=2, min_col=10, max_col=16):
+    for row in ws.iter_rows(min_row=2, min_col=10, max_col=17):
         for cell in row:
             cell.number_format = '"$"#,##0.00'
-    for row in ws.iter_rows(min_row=2, min_col=17, max_col=17):
+    for row in ws.iter_rows(min_row=2, min_col=18, max_col=18):
         for cell in row:
             cell.number_format = '0.00"%"'
 
