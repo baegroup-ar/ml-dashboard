@@ -565,6 +565,10 @@ TAXES_WARMER_INTERVAL_SECONDS = int(os.environ.get("TAXES_WARMER_INTERVAL_SECOND
 TAXES_WARMER_DAYS = int(os.environ.get("TAXES_WARMER_DAYS", "30"))
 TAXES_WARMER_BATCH = 100                 # order_ids por request de billing
 TAXES_WARMER_SLEEP_SECONDS = float(os.environ.get("TAXES_WARMER_SLEEP_SECONDS", "13"))  # 5/min => 12s; 13 de margen
+# Ventana en la que una venta cacheada en $0 se SIGUE reconsultando: ML publica la
+# retención en /billing recién al liquidar el pago (minutos/horas después de la
+# venta), así que sin esto la venta consultada "temprano" quedaría congelada en 0.
+TAXES_REFRESH_DAYS = int(os.environ.get("TAXES_REFRESH_DAYS", "7"))
 
 
 async def _warm_account_orders(acc: dict, days: int) -> int:
@@ -660,12 +664,23 @@ def _snapshot_order_ids(payload: dict) -> list:
 
 
 async def _build_taxes_queue(accs: list) -> list:
-    """Arma la cola de trabajo por cuenta: los order_ids pendientes (no
-    cacheados) de los últimos `TAXES_WARMER_DAYS` días, MÁS NUEVOS PRIMERO
-    (los snapshots vienen ordenados por fecha desc), partidos en batches de 100."""
+    """Arma la cola de trabajo por cuenta: los order_ids PENDIENTES de los últimos
+    `TAXES_WARMER_DAYS` días, MÁS NUEVOS PRIMERO (los snapshots vienen ordenados por
+    fecha desc), partidos en batches de 100.
+
+    Un order_id se considera pendiente si:
+      • todavía no está cacheado, O
+      • está cacheado en $0 y la venta es de los últimos `TAXES_REFRESH_DAYS` días.
+    Lo segundo es la clave del fix: ML puebla la retención en /billing recién cuando
+    liquida el pago, así que una venta consultada apenas ocurre vuelve con impuesto 0.
+    Sin este re-chequeo esa venta quedaría CONGELADA en 0 para siempre (el bug que se
+    veía: hoy todo en '—' aunque ML ya mostraba el impuesto). Reintentando las ventas
+    recientes cacheadas en 0, la retención se recoge apenas ML la publica. Las ventas
+    viejas (> refresh) con 0 se dan por definitivas (sin retención) y no se reconsultan."""
     today = datetime.utcnow().date()
     df = str(today - timedelta(days=max(TAXES_WARMER_DAYS - 1, 0)))
     dt = str(today)
+    refresh_from = str(today - timedelta(days=max(TAXES_REFRESH_DAYS - 1, 0)))
     queues = []
     for acc in accs:
         try:
@@ -674,11 +689,19 @@ async def _build_taxes_queue(accs: list) -> list:
                 continue
             snaps = db_fetch_order_snapshots(acc["id"], df, dt)   # newest-first
             oids = []
+            recent = set()          # order_ids de ventas dentro de la ventana de refresh
             for payload in snaps:
-                oids.extend(_snapshot_order_ids(payload))
+                pids = _snapshot_order_ids(payload)
+                oids.extend(pids)
+                if str(payload.get("fecha") or "") >= refresh_from:
+                    recent.update(pids)
             oids = list(dict.fromkeys(oids))          # preserva orden (recientes primero)
             cached = db_get_cached_taxes(oids)
-            todo = [o for o in oids if o not in cached]
+            todo = [
+                o for o in oids
+                if o not in cached                                    # nunca consultado
+                or (o in recent and float(cached[o] or 0) <= 0)       # reciente y aún sin retención
+            ]
             if not todo:
                 continue
             batches = [todo[i:i+TAXES_WARMER_BATCH] for i in range(0, len(todo), TAXES_WARMER_BATCH)]
@@ -725,7 +748,10 @@ async def _taxes_cache_warmer():
                                 continue
                             if taxes:
                                 db_save_taxes(taxes)
-                                q["saved"] += len(taxes)
+                                # Contar solo las que traen retención real (>0). Las
+                                # que vuelven en 0 se guardan igual pero no se cuentan
+                                # (así el log no miente sobre "ventas con impuesto").
+                                q["saved"] += sum(1 for v in taxes.values() if v)
                             q["batches"].pop(0)
                             await asyncio.sleep(TAXES_WARMER_SLEEP_SECONDS)  # 5/min
                 for q in queues:
