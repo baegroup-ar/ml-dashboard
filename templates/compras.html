@@ -88,6 +88,14 @@
     .tree-label-2 { padding-left: 20px; }
     .tree-label-3 { padding-left: 40px; color: #444; }
     .tree-label-4 { padding-left: 60px; color: #666; font-size: 12px; }
+    .drag-handle { width: 26px; text-align: center; color: #bbb; cursor: grab; user-select: none; }
+    .drag-handle:hover { color: #666; }
+    .drag-handle:active { cursor: grabbing; }
+    #items-tbody tr.dragging { opacity: 0.4; }
+    #items-tbody tr.drop-before td { box-shadow: inset 0 2px 0 0 #005CFF; }
+    #items-tbody tr.drop-after td { box-shadow: inset 0 -2px 0 0 #005CFF; }
+    tr.subtotal-row td { background: #f2f7ff; color: #005CFF; font-weight: 600; border-top: 1px solid #d8e4ff; border-bottom: 1px solid #d8e4ff; }
+    tr.subtotal-row td:last-child { border-bottom: 1px solid #d8e4ff; }
   </style>
 </head>
 <body>
@@ -306,14 +314,16 @@
       <div style="overflow:auto;max-height:65vh;">
         <table>
           <thead><tr>
+            <th style="width:26px;"></th>
             <th style="width:30px;"><input type="checkbox" id="chk-all" onchange="toggleAll(this.checked)" /></th>
             <th>Proveedor</th><th>SKU</th><th>Cantidad</th><th>Costo s/IVA</th><th>Cond. IVA</th><th>Valorizado</th><th class="actions">Acciones</th>
           </tr></thead>
           <tbody id="items-tbody">
-            <tr><td colspan="8" class="empty">Cargando...</td></tr>
+            <tr><td colspan="9" class="empty">Cargando...</td></tr>
           </tbody>
           <tfoot id="items-tfoot" style="display:none;">
             <tr>
+              <td></td>
               <td></td>
               <td></td>
               <td>Total</td>
@@ -372,7 +382,7 @@
     if(!ACCOUNT_ID) return;
     pendientesLoaded = true;
     const tbody = document.getElementById('items-tbody');
-    tbody.innerHTML = '<tr><td colspan="8" class="empty">Cargando...</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9" class="empty">Cargando...</td></tr>';
     try {
       const r = await fetch(`/api/compras/${ACCOUNT_ID}`);
       if(!r.ok) throw new Error('Error al cargar');
@@ -380,7 +390,7 @@
       allItems = data.items || [];
       renderPendientesTable();
     } catch(e) {
-      tbody.innerHTML = `<tr><td colspan="8" class="empty">Error: ${e.message}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="9" class="empty">Error: ${e.message}</td></tr>`;
     }
   }
 
@@ -388,47 +398,212 @@
   // Mismo criterio que cost_with_iva() en el backend.
   function costWithIva(cost, rate) { return cost * (1 + (rate || 0) / 100); }
 
+  // Normaliza el nombre del proveedor para agrupar (case/space-insensitive).
+  const normProv = p => String(p == null ? '' : p).trim().toLowerCase();
+
+  function rowHtml(it) {
+    const checked = SEL.has(it.id) ? 'checked' : '';
+    const rate = Number(it.iva_rate || 0);
+    return `
+      <tr data-id="${it.id}">
+        <td class="drag-handle" title="Arrastrar para reordenar">
+          <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path stroke="currentColor" stroke-width="1.5" stroke-linecap="round" d="M2 3.5h8M2 6h8M2 8.5h8"/></svg>
+        </td>
+        <td><input type="checkbox" class="chk-row" ${checked} onchange="chkRow(${it.id}, this.checked)" /></td>
+        <td><input type="text" class="cell-input prov-inp" value="${escAttr(it.proveedor || '')}"
+                   oninput="scheduleSaveRow(${it.id})" onchange="onProvChange(${it.id}, this.value)" placeholder="—" /></td>
+        <td><input type="text" class="cell-input sku-inp" style="text-transform:uppercase;" value="${escAttr(it.sku)}"
+                   oninput="scheduleSaveRow(${it.id})" /></td>
+        <td><input type="number" class="cell-input qty-inp" value="${it.qty}" step="1" min="0"
+                   style="width:70px;" oninput="recalcRow(${it.id}); scheduleSaveRow(${it.id})" /></td>
+        <td><input type="number" class="cell-input cost-inp" value="${it.cost}" step="0.01" min="0"
+                   style="width:100px;" oninput="recalcRow(${it.id}); scheduleSaveRow(${it.id})" /></td>
+        <td><select class="cell-input iva-inp" onchange="recalcRow(${it.id}); scheduleSaveRow(${it.id})">
+              <option value="21" ${rate===21?'selected':''}>21%</option>
+              <option value="10.5" ${rate===10.5?'selected':''}>10.5%</option>
+              <option value="0" ${rate===0?'selected':''}>Exento (0%)</option>
+            </select></td>
+        <td class="val-cell" style="color:#1a8a5a;"></td>
+        <td class="actions">
+          <button class="btn-ingreso" onclick="ingresoOne(${it.id})">Ingreso</button>
+          <button class="btn-delete" onclick="deleteItem(${it.id})">Eliminar</button>
+        </td>
+      </tr>`;
+  }
+
+  // Fila de subtotal (solo visual, sin data-id): se inserta después del último
+  // renglón de cada proveedor que tenga 2+ filas contiguas.
+  function subtotalHtml(provName) {
+    return `
+      <tr class="subtotal-row" data-subtotal="1">
+        <td></td>
+        <td></td>
+        <td colspan="2" style="text-align:right;">Subtotal ${escAttr(provName)}</td>
+        <td class="sub-qty"></td>
+        <td></td>
+        <td></td>
+        <td class="sub-val"></td>
+        <td></td>
+      </tr>`;
+  }
+
   function renderPendientesTable() {
     const tbody = document.getElementById('items-tbody');
     const tfoot = document.getElementById('items-tfoot');
     document.getElementById('pendientes-count-label').textContent =
       `${allItems.length} renglón${allItems.length===1?'':'es'} pendiente${allItems.length===1?'':'s'}`;
     if(!allItems.length) {
-      tbody.innerHTML = '<tr><td colspan="8" class="empty">No hay renglones pendientes. Agregá uno arriba.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="9" class="empty">No hay renglones pendientes. Agregá uno arriba.</td></tr>';
       tfoot.style.display = 'none';
       updateBulkBar();
       return;
     }
     tfoot.style.display = '';
-    tbody.innerHTML = allItems.map(it => {
-      const checked = SEL.has(it.id) ? 'checked' : '';
-      const rate = Number(it.iva_rate || 0);
-      return `
-        <tr data-id="${it.id}">
-          <td><input type="checkbox" class="chk-row" ${checked} onchange="chkRow(${it.id}, this.checked)" /></td>
-          <td><input type="text" class="cell-input prov-inp" value="${escAttr(it.proveedor || '')}"
-                     oninput="scheduleSaveRow(${it.id})" placeholder="—" /></td>
-          <td><input type="text" class="cell-input sku-inp" style="text-transform:uppercase;" value="${escAttr(it.sku)}"
-                     oninput="scheduleSaveRow(${it.id})" /></td>
-          <td><input type="number" class="cell-input qty-inp" value="${it.qty}" step="1" min="0"
-                     style="width:70px;" oninput="recalcRow(${it.id}); scheduleSaveRow(${it.id})" /></td>
-          <td><input type="number" class="cell-input cost-inp" value="${it.cost}" step="0.01" min="0"
-                     style="width:100px;" oninput="recalcRow(${it.id}); scheduleSaveRow(${it.id})" /></td>
-          <td><select class="cell-input iva-inp" onchange="recalcRow(${it.id}); scheduleSaveRow(${it.id})">
-                <option value="21" ${rate===21?'selected':''}>21%</option>
-                <option value="10.5" ${rate===10.5?'selected':''}>10.5%</option>
-                <option value="0" ${rate===0?'selected':''}>Exento (0%)</option>
-              </select></td>
-          <td class="val-cell" style="color:#1a8a5a;"></td>
-          <td class="actions">
-            <button class="btn-ingreso" onclick="ingresoOne(${it.id})">Ingreso</button>
-            <button class="btn-delete" onclick="deleteItem(${it.id})">Eliminar</button>
-          </td>
-        </tr>
-      `;
-    }).join('');
-    allItems.forEach(it => recalcRow(it.id));
+    // Recorre agrupando por corridas CONTIGUAS de mismo proveedor. Como las
+    // filas se ordenan a mano (drag & drop), el usuario junta las de un mismo
+    // proveedor y ve el subtotal justo debajo del bloque. Grupo de 1 fila (o
+    // sin proveedor) no lleva subtotal.
+    let html = '';
+    let i = 0;
+    while (i < allItems.length) {
+      const prov = normProv(allItems[i].proveedor);
+      let j = i;
+      while (j < allItems.length && normProv(allItems[j].proveedor) === prov) j++;
+      for (let k = i; k < j; k++) html += rowHtml(allItems[k]);
+      if (j - i >= 2 && prov !== '') html += subtotalHtml((allItems[i].proveedor || '').trim());
+      i = j;
+    }
+    tbody.innerHTML = html;
+    allItems.forEach(it => recalcRow(it.id));   // llena valorizado por fila + total
+    updateSubtotals();
+    wireDnd();
     updateBulkBar();
+  }
+
+  // Vuelca los valores actuales del DOM a allItems (antes de un re-render
+  // estructural: drag&drop o cambio de proveedor) para no perder ediciones
+  // que todavía no se guardaron (el save tiene debounce).
+  function syncDomToItems() {
+    document.querySelectorAll('#items-tbody tr[data-id]').forEach(tr => {
+      const it = allItems.find(x => x.id === Number(tr.dataset.id));
+      if (!it) return;
+      it.proveedor = tr.querySelector('.prov-inp').value.trim();
+      it.sku = tr.querySelector('.sku-inp').value.trim().toUpperCase();
+      const q = parseFloat(tr.querySelector('.qty-inp').value); if(!isNaN(q)) it.qty = q;
+      const c = parseFloat(tr.querySelector('.cost-inp').value); if(!isNaN(c)) it.cost = c;
+      it.iva_rate = parseFloat(tr.querySelector('.iva-inp').value);
+    });
+  }
+
+  // Al terminar de editar el proveedor (blur), reagrupa: los subtotales
+  // dependen de qué filas comparten proveedor, así que hay que re-render.
+  function onProvChange(id, val) {
+    syncDomToItems();
+    const it = allItems.find(x => x.id === id);
+    if (it) it.proveedor = (val || '').trim();
+    renderPendientesTable();
+  }
+
+  // Recalcula los subtotales por proveedor recorriendo el DOM: acumula las
+  // filas de datos y, al llegar a la fila de subtotal, la completa y resetea.
+  // Resetea también si cambia el proveedor entre filas (grupo de 1 sin subtotal).
+  function updateSubtotals() {
+    let qty = 0, val = 0, lastProv = null;
+    document.querySelectorAll('#items-tbody tr').forEach(tr => {
+      if (tr.dataset.id) {
+        const prov = normProv(tr.querySelector('.prov-inp').value);
+        if (lastProv !== null && prov !== lastProv) { qty = 0; val = 0; }
+        const q = parseFloat(tr.querySelector('.qty-inp').value) || 0;
+        const c = parseFloat(tr.querySelector('.cost-inp').value) || 0;
+        const r = parseFloat(tr.querySelector('.iva-inp').value) || 0;
+        qty += q; val += q * costWithIva(c, r);
+        lastProv = prov;
+      } else if (tr.dataset.subtotal) {
+        const sq = tr.querySelector('.sub-qty'), sv = tr.querySelector('.sub-val');
+        if (sq) sq.textContent = qty.toLocaleString('es-AR');
+        if (sv) sv.textContent = fmt(val);
+        qty = 0; val = 0; lastProv = null;
+      }
+    });
+  }
+
+  // ─── Drag & drop de renglones (handle ≡ a la izquierda) ───
+  let dragId = null;
+  let dndGlobalWired = false;
+
+  function wireDnd() {
+    if (!dndGlobalWired) {
+      // Si se soltó el mouse sin llegar a arrastrar, desactiva draggable para
+      // que los inputs se puedan seleccionar normalmente.
+      document.addEventListener('mouseup', () => {
+        document.querySelectorAll('#items-tbody tr[draggable="true"]').forEach(tr => tr.draggable = false);
+      });
+      dndGlobalWired = true;
+    }
+    document.querySelectorAll('#items-tbody tr[data-id]').forEach(tr => {
+      const handle = tr.querySelector('.drag-handle');
+      if (handle) handle.addEventListener('mousedown', () => { tr.draggable = true; });
+      tr.addEventListener('dragstart', (e) => {
+        dragId = Number(tr.dataset.id);
+        tr.classList.add('dragging');
+        e.dataTransfer.effectAllowed = 'move';
+        try { e.dataTransfer.setData('text/plain', String(dragId)); } catch(_) {}
+      });
+      tr.addEventListener('dragend', () => {
+        tr.draggable = false;
+        tr.classList.remove('dragging');
+        clearDropMarks();
+        dragId = null;
+      });
+      tr.addEventListener('dragover', (e) => {
+        if (dragId == null) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        const rect = tr.getBoundingClientRect();
+        const after = (e.clientY - rect.top) > rect.height / 2;
+        clearDropMarks();
+        tr.classList.add(after ? 'drop-after' : 'drop-before');
+      });
+      tr.addEventListener('dragleave', () => tr.classList.remove('drop-before','drop-after'));
+      tr.addEventListener('drop', (e) => {
+        e.preventDefault();
+        const targetId = Number(tr.dataset.id);
+        clearDropMarks();
+        if (dragId == null || targetId === dragId) return;
+        const rect = tr.getBoundingClientRect();
+        const after = (e.clientY - rect.top) > rect.height / 2;
+        moveRow(dragId, targetId, after);
+      });
+    });
+  }
+
+  function clearDropMarks() {
+    document.querySelectorAll('#items-tbody tr.drop-before, #items-tbody tr.drop-after')
+      .forEach(r => r.classList.remove('drop-before','drop-after'));
+  }
+
+  function moveRow(dragId, targetId, after) {
+    syncDomToItems();
+    const from = allItems.findIndex(x => x.id === dragId);
+    if (from < 0) return;
+    const [moved] = allItems.splice(from, 1);
+    let to = allItems.findIndex(x => x.id === targetId);
+    if (to < 0) { allItems.splice(from, 0, moved); return; }
+    if (after) to += 1;
+    allItems.splice(to, 0, moved);
+    renderPendientesTable();
+    persistOrder();
+  }
+
+  async function persistOrder() {
+    if (!ACCOUNT_ID) return;
+    try {
+      await fetch(`/api/compras/${ACCOUNT_ID}/reorder`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: allItems.map(x => x.id) }),
+      });
+    } catch(e) { console.error('reorder', e); }
   }
 
   function escAttr(s) {
@@ -446,6 +621,7 @@
     const valorizado = qty * costWithIva(cost, rate);
     tr.querySelector('.val-cell').textContent = fmt(valorizado);
     updateTotals();
+    updateSubtotals();
   }
 
   function updateTotals() {

@@ -341,6 +341,9 @@ def init_db():
             )
         """))
         conn.execute(text("ALTER TABLE purchase_items ADD COLUMN IF NOT EXISTS proveedor TEXT"))
+        # Orden manual (drag & drop) de los renglones pendientes. NULL = todavía
+        # sin ordenar (renglones nuevos) → van al final por created_at.
+        conn.execute(text("ALTER TABLE purchase_items ADD COLUMN IF NOT EXISTS position INTEGER"))
         # Tabla de tarifas Flex (costo real que el vendedor paga a la
         # mensajería, por zona de entrega y con fecha de vigencia).
         conn.execute(text("""
@@ -2837,7 +2840,7 @@ async def api_compras_list(request: Request, account_id: int):
     cost_aid = _cost_account_id_for(user, account_id)
     rows = db_fetchall(
         "SELECT id, sku, qty, cost, iva_rate, proveedor, created_at FROM purchase_items"
-        " WHERE account_id=:aid ORDER BY created_at",
+        " WHERE account_id=:aid ORDER BY position ASC NULLS LAST, created_at, id",
         {"aid": cost_aid},
     )
     return {
@@ -2971,6 +2974,32 @@ async def api_compras_bulk_delete(request: Request, account_id: int):
         params,
     )
     return {"ok": True, "deleted": len(ids)}
+
+
+@app.post("/api/compras/{account_id}/reorder")
+async def api_compras_reorder(request: Request, account_id: int):
+    """Persiste el orden manual (drag & drop) de los renglones pendientes.
+    Recibe {ids: [...]} en el orden deseado y guarda position = índice. Scoped
+    por cost_aid (la bandeja de compras se comparte entre cuentas del dueño,
+    igual que Costos)."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    user = get_user(user_id)
+    cost_aid = _cost_account_id_for(user, account_id)
+    body = await request.json()
+    ids = [int(i) for i in (body.get("ids") or [])]
+    if not ids:
+        raise HTTPException(400, "Falta el orden de los renglones")
+    params_list = [{"pos": pos, "id": i, "aid": cost_aid} for pos, i in enumerate(ids)]
+    db_executemany(
+        "UPDATE purchase_items SET position=:pos WHERE id=:id AND account_id=:aid",
+        params_list,
+    )
+    return {"ok": True, "count": len(ids)}
 
 
 @app.post("/api/compras/{account_id}/ingreso")
