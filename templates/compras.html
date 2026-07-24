@@ -744,6 +744,7 @@
     try {
       const r = await fetch(`/api/compras/${ACCOUNT_ID}`, { method: 'POST', body: form });
       if(!r.ok) throw new Error('Error al guardar');
+      const data = await r.json();
       msg.innerHTML = '';
       document.getElementById('new-proveedor').value = '';
       document.getElementById('new-sku').value = '';
@@ -752,9 +753,35 @@
       document.getElementById('new-iva').value = '21';
       document.getElementById('new-sku').focus();
       await loadItems();
+      // Si ya hay renglones del mismo proveedor, ubicar el nuevo junto a ellos
+      // (al final de ese grupo) en vez de abajo de todo.
+      groupNewItem(data.id, proveedor);
     } catch(e) {
       msg.innerHTML = `<div class="msg err">${e.message}</div>`;
     }
+  }
+
+  // Reubica el renglón recién agregado (que loadItems trae al final) justo
+  // después del último renglón del mismo proveedor, y persiste el orden. Si no
+  // hay ninguna otra fila con ese proveedor (o el proveedor está vacío), lo
+  // deja donde está (al final).
+  function groupNewItem(newId, proveedor) {
+    if (newId == null) return;
+    const prov = normProv(proveedor);
+    if (!prov) return;
+    const newIdx = allItems.findIndex(x => x.id === newId);
+    if (newIdx < 0) return;
+    let lastSameIdx = -1;
+    allItems.forEach((it, idx) => {
+      if (idx !== newIdx && normProv(it.proveedor) === prov) lastSameIdx = idx;
+    });
+    if (lastSameIdx < 0) return;            // no hay otras del mismo proveedor
+    const [moved] = allItems.splice(newIdx, 1);
+    let insertAt = lastSameIdx + 1;
+    if (newIdx < lastSameIdx) insertAt -= 1;   // el splice corrió los índices
+    allItems.splice(insertAt, 0, moved);
+    renderPendientesTable();
+    persistOrder();
   }
 
   async function deleteItem(id) {

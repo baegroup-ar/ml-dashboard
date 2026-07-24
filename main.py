@@ -2883,13 +2883,18 @@ async def api_compras_add(
         rate_val = float(iva_rate) if iva_rate is not None and iva_rate != "" else 21.0
     except ValueError:
         rate_val = 21.0
-    db_execute(
-        "INSERT INTO purchase_items (account_id, sku, qty, cost, iva_rate, proveedor)"
-        " VALUES (:aid, :sku, :qty, :cost, :iva_rate, :proveedor)",
-        {"aid": cost_aid, "sku": sku, "qty": qty, "cost": cost, "iva_rate": rate_val,
-         "proveedor": (proveedor or "").strip()},
-    )
-    return {"ok": True}
+    # engine.begin() (no db_fetchone) para que el INSERT commitee y podamos
+    # devolver el id del renglón nuevo (lo usa el front para agruparlo junto a
+    # las filas del mismo proveedor en vez de mandarlo al final).
+    with engine.begin() as conn:
+        res = conn.execute(
+            text("INSERT INTO purchase_items (account_id, sku, qty, cost, iva_rate, proveedor)"
+                 " VALUES (:aid, :sku, :qty, :cost, :iva_rate, :proveedor) RETURNING id"),
+            {"aid": cost_aid, "sku": sku, "qty": qty, "cost": cost, "iva_rate": rate_val,
+             "proveedor": (proveedor or "").strip()},
+        )
+        new_id = res.fetchone()[0]
+    return {"ok": True, "id": new_id}
 
 
 @app.put("/api/compras/{account_id}/{item_id}")
