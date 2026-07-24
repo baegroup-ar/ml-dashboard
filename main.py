@@ -12138,6 +12138,74 @@ async def debug_taxes_status(request: Request):
     }
 
 
+@app.get("/api/debug/taxes-probe/{order_id}")
+async def debug_taxes_probe(request: Request, order_id: str):
+    """Corre el path EXACTO del warmer para un order_id: single (batch de 1) y
+    batch de 100 con order_ids reales de la cuenta dueña. Reporta la respuesta
+    cruda de billing (total/limit/#results) para detectar truncado por `limit`,
+    más lo que ya está cacheado. Diagnóstico de por qué una cuenta no cachea."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    order_id = str(order_id)
+    accs = db_fetchall("SELECT * FROM ml_accounts WHERE user_id=:uid ORDER BY id", {"uid": user_id})
+    out = {"order_id": order_id, "cached_now": db_get_cached_taxes([order_id])}
+    today = datetime.utcnow().date()
+    df = str(today - timedelta(days=max(TAXES_WARMER_DAYS - 1, 0)))
+    dt = str(today)
+    async with httpx.AsyncClient(timeout=40) as client:
+        for acc in accs:
+            token = await refresh_ml_token(acc["id"])
+            if not token:
+                continue
+            headers = {"Authorization": f"Bearer {token}"}
+            seller = acc["ml_user_id"]
+            # ¿Esta cuenta es dueña del order? (200 en /orders/{id})
+            r = await client.get(f"{ML_API_URL}/orders/{order_id}", headers=headers)
+            if r.status_code != 200:
+                continue
+            entry = {"account": acc["nickname"], "account_id": acc["id"], "seller_id": seller}
+            # Armar un batch de 100 order_ids reales de la cuenta (recientes), con el target incluido.
+            snaps = db_fetch_order_snapshots(acc["id"], df, dt)
+            oids = []
+            for p in snaps:
+                oids.extend(_snapshot_order_ids(p))
+            oids = list(dict.fromkeys(oids))
+            entry["snapshot_oids_total"] = len(oids)
+            entry["target_in_snapshot_oids"] = order_id in oids
+            batch100 = ([order_id] + [o for o in oids if o != order_id])[:100]
+            # Respuesta cruda de billing para el batch (para ver total/limit/#results).
+            raw = await client.get(
+                f"{ML_API_URL}/billing/integration/group/ML/order/details",
+                headers=headers,
+                params={"order_ids": ",".join(batch100), "seller_id": seller, "limit": 150},
+            )
+            entry["batch_http"] = raw.status_code
+            try:
+                jb = raw.json()
+                results = jb.get("results") or []
+                entry["billing_total"] = jb.get("total")
+                entry["billing_limit"] = jb.get("limit")
+                entry["billing_results_len"] = len(results)
+                entry["billing_distinct_order_ids"] = len({str(x.get("order_id")) for x in results if x.get("order_id") is not None})
+                entry["target_order_id_in_results"] = any(str(x.get("order_id")) == order_id for x in results)
+                entry["target_in_sales_info"] = any(
+                    order_id in order_ids_from_sales_info(x) for x in results
+                )
+            except Exception as e:
+                entry["batch_parse_error"] = str(e)[:200]
+            ok1, tax_single = await _fetch_taxes_one_batch(client, headers, seller, [order_id])
+            entry["fetch_single"] = {"ok": ok1, "value": tax_single.get(order_id), "keys": len(tax_single)}
+            ok2, tax_batch = await _fetch_taxes_one_batch(client, headers, seller, batch100)
+            entry["fetch_batch100"] = {
+                "ok": ok2, "value_for_target": tax_batch.get(order_id),
+                "keys": len(tax_batch), "nonzero": sum(1 for v in tax_batch.values() if v),
+            }
+            out["owner"] = entry
+            break
+    return out
+
+
 @app.get("/api/debug/order/{order_id}")
 async def debug_order(request: Request, order_id: str):
     """Devuelve TODA la data cruda que devuelve ML para una orden puntual.
