@@ -735,12 +735,42 @@ async def _build_taxes_queue(accs: list) -> list:
     return queues
 
 
+async def _drain_taxes_queue(client, q: dict):
+    """Drena la cola de UNA cuenta a su propio ritmo (13s entre requests), sin
+    compartir cadencia con las otras cuentas. `/billing` limita 5 req/min POR
+    CUENTA (cada una tiene su propio access_token), así que cada cuenta corre
+    en su propio carril independiente — la cuenta grande (TIENDA BAE) no se ve
+    frenada por esperar su turno detrás de las chicas, y viceversa."""
+    while q["batches"]:
+        batch = q["batches"][0]
+        ok, taxes = await _fetch_taxes_one_batch(client, q["headers"], q["seller"], batch)
+        if not ok:
+            # 429: esperamos un poco más y reintentamos el MISMO batch (no lo sacamos).
+            await asyncio.sleep(TAXES_WARMER_SLEEP_SECONDS * 2)
+            continue
+        if taxes:
+            db_save_taxes(taxes)
+            # Contar solo las que traen retención real (>0). Las que vuelven en 0
+            # se guardan igual pero no se cuentan (el log no miente sobre "N ventas
+            # con impuesto").
+            q["saved"] += sum(1 for v in taxes.values() if v)
+        q["batches"].pop(0)
+        await asyncio.sleep(TAXES_WARMER_SLEEP_SECONDS)  # 5/min (de ESTA cuenta)
+    if q["saved"]:
+        print(f"[taxes-warmer] cuenta {q['acc']['id']} ({q['acc'].get('nickname')}): "
+              f"{q['saved']} ventas con impuesto cacheado", flush=True)
+
+
 async def _taxes_cache_warmer():
-    """Loop infinito y lento (respeta 5 req/min de /billing) que cachea el
-    impuesto exacto por venta. Procesa ROUND-ROBIN: primero el batch más nuevo
-    de CADA cuenta, después el siguiente, etc. Así las ventas recientes de todas
-    las cuentas aparecen en los primeros ~30s, y recién después va hacia atrás
-    en el tiempo. Aislado del dashboard: si falla no afecta nada."""
+    """Loop infinito y lento que cachea el impuesto exacto por venta. Cada
+    cuenta drena su propia cola EN PARALELO con las demás (ver
+    `_drain_taxes_queue`), cada una respetando 5 req/min de `/billing` con SU
+    PROPIO token — antes las 3 cuentas compartían un único cupo de 5/min
+    (todas encoladas detrás del mismo `sleep`), lo que dejaba a TIENDA BAE (la
+    cuenta con más volumen, ~10x las otras dos) esperando su turno sin
+    necesidad. En paralelo, cada cuenta corre a su propio ritmo sin bloquear a
+    las demás. Dentro de cada cuenta se sigue yendo newest-first. Aislado del
+    dashboard: si falla no afecta nada."""
     await asyncio.sleep(15)   # arranque rápido
     while True:
         try:
@@ -750,33 +780,7 @@ async def _taxes_cache_warmer():
             queues = await _build_taxes_queue(accs)
             if queues:
                 async with httpx.AsyncClient(timeout=30) as client:
-                    # Mientras alguna cuenta tenga batches pendientes, tomamos el
-                    # PRIMER batch (el más nuevo) de cada una por vuelta.
-                    while any(q["batches"] for q in queues):
-                        for q in queues:
-                            if not q["batches"]:
-                                continue
-                            batch = q["batches"][0]
-                            ok, taxes = await _fetch_taxes_one_batch(
-                                client, q["headers"], q["seller"], batch)
-                            if not ok:
-                                # 429: esperamos un poco más y reintentamos el
-                                # MISMO batch en la próxima vuelta (no lo sacamos).
-                                await asyncio.sleep(TAXES_WARMER_SLEEP_SECONDS * 2)
-                                continue
-                            if taxes:
-                                db_save_taxes(taxes)
-                                # Contar solo las que traen retención real (>0). Las
-                                # que vuelven en 0 se guardan igual pero no se cuentan
-                                # (así el log no miente sobre "ventas con impuesto").
-                                q["saved"] += sum(1 for v in taxes.values() if v)
-                            q["batches"].pop(0)
-                            await asyncio.sleep(TAXES_WARMER_SLEEP_SECONDS)  # 5/min
-                for q in queues:
-                    if q["saved"]:
-                        print(f"[taxes-warmer] cuenta {q['acc']['id']} "
-                              f"({q['acc'].get('nickname')}): {q['saved']} ventas "
-                              f"con impuesto cacheado", flush=True)
+                    await asyncio.gather(*[_drain_taxes_queue(client, q) for q in queues])
         except Exception as e:
             print(f"[taxes-warmer] ciclo error: {str(e)[:160]}", flush=True)
         await asyncio.sleep(TAXES_WARMER_INTERVAL_SECONDS)
