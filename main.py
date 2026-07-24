@@ -906,9 +906,31 @@ def db_replace_order_snapshots_for_range(account_id: int, date_from: str, date_t
         conn.commit()
 
 
+def _refresh_impuestos(orders: list):
+    """Pisa el campo `impuestos` de cada orden/pack con el valor MÁS RECIENTE de
+    `order_tax_cache`. El calentador de impuestos llena esa tabla en 2do plano,
+    DESPUÉS de que la orden ya quedó guardada en `order_snapshot_cache` con el
+    impuesto que tenía en ese momento (típicamente 0, ML todavía no liquidó el
+    pago). Sin este refresh, una orden servida desde caché (cualquier día que
+    no sea "hoy", que el calentador de órdenes no re-baja) quedaría con el
+    impuesto CONGELADO en 0 para siempre, aunque `order_tax_cache` ya tenga el
+    dato real. Es una lectura de DB barata (misma tabla indexada por order_id),
+    sin pegarle a ML, así que se puede hacer en cada request sin costo relevante."""
+    id_lists = [_snapshot_order_ids(o) for o in orders]
+    all_ids = {i for ids in id_lists for i in ids}
+    if not all_ids:
+        return
+    tax_map = db_get_cached_taxes(list(all_ids))
+    if not tax_map:
+        return
+    for order, ids in zip(orders, id_lists):
+        if ids:
+            order["impuestos"] = round(sum(tax_map.get(i, 0.0) for i in ids), 2)
+
+
 def build_dashboard_payload(orders: list, details_complete: bool):
     orders = sorted(orders, key=lambda x: (x.get("fecha") or "", x.get("hora") or ""), reverse=True)
-
+    _refresh_impuestos(orders)
 
     daily: dict = {}
     products: dict = {}
