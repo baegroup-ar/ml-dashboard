@@ -645,9 +645,16 @@ async def _fetch_taxes_one_batch(client, headers, seller_id, batch: list):
             pid = p.get("payment_id")
             if pid in seen:
                 continue
+            # Bruto (original_amount), SIN restar refunded_amount: en una venta
+            # cancelada/devuelta ML reembolsa el impuesto retenido junto con todo
+            # lo demás, así que original-refunded da 0 y la fila muestra "—" —
+            # pero Monto/Comisión/Envío de esa MISMA fila NO se netean por la
+            # devolución (quedan en su valor original, la cancelación se refleja
+            # aparte vía `estado`/`refund_amount`, no achicando cada columna).
+            # Impuestos tiene que seguir esa misma convención para ser consistente.
             tot = 0.0
             for t in (p.get("tax_details") or []):
-                tot += abs(float(t.get("original_amount") or 0)) - abs(float(t.get("refunded_amount") or 0))
+                tot += abs(float(t.get("original_amount") or 0))
             seen[pid] = tot
     return True, {oid: round(sum(d.values()), 2) for oid, d in per_order.items()}
 
@@ -673,13 +680,19 @@ async def _build_taxes_queue(accs: list) -> list:
 
     Un order_id se considera pendiente si:
       • todavía no está cacheado, O
-      • está cacheado en $0 y la venta es de los últimos `TAXES_REFRESH_DAYS` días.
-    Lo segundo es la clave del fix: ML puebla la retención en /billing recién cuando
-    liquida el pago, así que una venta consultada apenas ocurre vuelve con impuesto 0.
-    Sin este re-chequeo esa venta quedaría CONGELADA en 0 para siempre (el bug que se
-    veía: hoy todo en '—' aunque ML ya mostraba el impuesto). Reintentando las ventas
-    recientes cacheadas en 0, la retención se recoge apenas ML la publica. Las ventas
-    viejas (> refresh) con 0 se dan por definitivas (sin retención) y no se reconsultan."""
+      • está cacheado en $0 y (la venta es de los últimos `TAXES_REFRESH_DAYS` días,
+        O la venta tiene `refund_amount` > 0 — cancelada/devuelta, sin importar
+        cuán vieja sea dentro de la ventana de `TAXES_WARMER_DAYS`).
+    Lo primero es la clave del fix de "congelado": ML puebla la retención en
+    /billing recién cuando liquida el pago, así que una venta consultada apenas
+    ocurre vuelve con impuesto 0 y sin re-chequeo quedaría así para siempre.
+    Lo segundo cubre otro caso de 0 espurio: en una venta cancelada/devuelta, ML
+    reembolsa el impuesto retenido (`tax_details[].refunded_amount` == original)
+    → el cálculo bruto (ver `_fetch_taxes_one_batch`) puede haber quedado
+    cacheado en 0 de una corrida vieja previa al fix; como esas ventas no caen
+    en la ventana de días recientes, sin esto quedarían congeladas para
+    siempre. Las ventas viejas SIN reembolso y con 0 se dan por definitivas
+    (sin retención) y no se reconsultan."""
     today = datetime.utcnow().date()
     df = str(today - timedelta(days=max(TAXES_WARMER_DAYS - 1, 0)))
     dt = str(today)
@@ -692,11 +705,13 @@ async def _build_taxes_queue(accs: list) -> list:
                 continue
             snaps = db_fetch_order_snapshots(acc["id"], df, dt)   # newest-first
             oids = []
-            recent = set()          # order_ids de ventas dentro de la ventana de refresh
+            recent = set()          # order_ids a re-chequear si están en 0
             for payload in snaps:
                 pids = _snapshot_order_ids(payload)
                 oids.extend(pids)
-                if str(payload.get("fecha") or "") >= refresh_from:
+                is_recent = str(payload.get("fecha") or "") >= refresh_from
+                has_refund = float(payload.get("refund_amount") or 0) > 0
+                if is_recent or has_refund:
                     recent.update(pids)
             oids = list(dict.fromkeys(oids))          # preserva orden (recientes primero)
             cached = db_get_cached_taxes(oids)
