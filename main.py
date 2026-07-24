@@ -563,7 +563,10 @@ CACHE_WARMER_DAYS = int(os.environ.get("CACHE_WARMER_DAYS", "7"))
 TAXES_WARMER_ENABLED = os.environ.get("TAXES_WARMER_ENABLED", "1") == "1"
 TAXES_WARMER_INTERVAL_SECONDS = int(os.environ.get("TAXES_WARMER_INTERVAL_SECONDS", "600"))  # 10 min
 TAXES_WARMER_DAYS = int(os.environ.get("TAXES_WARMER_DAYS", "30"))
-TAXES_WARMER_BATCH = 100                 # order_ids por request de billing
+# ML rechaza con HTTP 400 los requests de /billing con demasiados order_ids: 100
+# tira 400, 50 anda OK (verificado con la cuenta grande TIENDA BAE). Por eso las
+# cuentas chicas (batches < tope) cacheaban bien y la grande no cacheaba NADA.
+TAXES_WARMER_BATCH = int(os.environ.get("TAXES_WARMER_BATCH", "50"))  # order_ids por request de billing (tope ML)
 TAXES_WARMER_SLEEP_SECONDS = float(os.environ.get("TAXES_WARMER_SLEEP_SECONDS", "13"))  # 5/min => 12s; 13 de margen
 # Ventana en la que una venta cacheada en $0 se SIGUE reconsultando: ML publica la
 # retención en /billing recién al liquidar el pago (minutos/horas después de la
@@ -12174,34 +12177,16 @@ async def debug_taxes_probe(request: Request, order_id: str):
             entry["snapshot_oids_total"] = len(oids)
             entry["target_in_snapshot_oids"] = order_id in oids
             others = [o for o in oids if o != order_id]
-            # Probar distintos tamaños de batch para encontrar el máximo que ML acepta
-            # (single anda, 100 tira 400 → el endpoint tiene tope de order_ids por request).
-            entry["size_probe"] = {}
-            # Espaciado de 13s para respetar el límite de 5 req/min de /billing.
-            for idx, size in enumerate((50, 40, 30, 20, 10)):
-                if idx > 0:
-                    await asyncio.sleep(13)
-                batch = ([order_id] + others)[:size]
-                raw = await client.get(
-                    f"{ML_API_URL}/billing/integration/group/ML/order/details",
-                    headers=headers,
-                    params={"order_ids": ",".join(batch), "seller_id": seller, "limit": 1000},
-                )
-                info = {"http": raw.status_code}
-                if raw.status_code in (200, 206):
-                    try:
-                        jb = raw.json()
-                        res = jb.get("results") or []
-                        info["total"] = jb.get("total")
-                        info["results_len"] = len(res)
-                        info["target_found"] = any(str(x.get("order_id")) == order_id for x in res)
-                    except Exception as e:
-                        info["parse_error"] = str(e)[:120]
-                else:
-                    info["body"] = raw.text[:120]
-                entry["size_probe"][size] = info
-                if raw.status_code in (200, 206):
-                    break  # primer tamaño que anda = el máximo útil
+            batch = ([order_id] + others)[:TAXES_WARMER_BATCH]
+            entry["batch_size"] = len(batch)
+            ok1, tax_single = await _fetch_taxes_one_batch(client, headers, seller, [order_id])
+            entry["fetch_single"] = {"ok": ok1, "value": tax_single.get(order_id), "keys": len(tax_single)}
+            await asyncio.sleep(13)  # respetar 5 req/min de /billing
+            ok2, tax_batch = await _fetch_taxes_one_batch(client, headers, seller, batch)
+            entry["fetch_batch"] = {
+                "ok": ok2, "value_for_target": tax_batch.get(order_id),
+                "keys": len(tax_batch), "nonzero": sum(1 for v in tax_batch.values() if v),
+            }
             out["owner"] = entry
             break
     return out
