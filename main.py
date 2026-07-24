@@ -12177,7 +12177,10 @@ async def debug_taxes_probe(request: Request, order_id: str):
             # Probar distintos tamaños de batch para encontrar el máximo que ML acepta
             # (single anda, 100 tira 400 → el endpoint tiene tope de order_ids por request).
             entry["size_probe"] = {}
-            for size in (100, 75, 50, 40, 30, 25, 20, 10, 5, 1):
+            # Espaciado de 13s para respetar el límite de 5 req/min de /billing.
+            for idx, size in enumerate((50, 40, 30, 20, 10)):
+                if idx > 0:
+                    await asyncio.sleep(13)
                 batch = ([order_id] + others)[:size]
                 raw = await client.get(
                     f"{ML_API_URL}/billing/integration/group/ML/order/details",
@@ -12195,8 +12198,10 @@ async def debug_taxes_probe(request: Request, order_id: str):
                     except Exception as e:
                         info["parse_error"] = str(e)[:120]
                 else:
-                    info["body"] = raw.text[:160]
+                    info["body"] = raw.text[:120]
                 entry["size_probe"][size] = info
+                if raw.status_code in (200, 206):
+                    break  # primer tamaño que anda = el máximo útil
             out["owner"] = entry
             break
     return out
