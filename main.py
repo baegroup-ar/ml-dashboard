@@ -12173,34 +12173,30 @@ async def debug_taxes_probe(request: Request, order_id: str):
             oids = list(dict.fromkeys(oids))
             entry["snapshot_oids_total"] = len(oids)
             entry["target_in_snapshot_oids"] = order_id in oids
-            batch100 = ([order_id] + [o for o in oids if o != order_id])[:100]
-            # Respuesta cruda de billing para el batch (para ver total/limit/#results).
-            raw = await client.get(
-                f"{ML_API_URL}/billing/integration/group/ML/order/details",
-                headers=headers,
-                params={"order_ids": ",".join(batch100), "seller_id": seller, "limit": 150},
-            )
-            entry["batch_http"] = raw.status_code
-            try:
-                jb = raw.json()
-                results = jb.get("results") or []
-                entry["billing_total"] = jb.get("total")
-                entry["billing_limit"] = jb.get("limit")
-                entry["billing_results_len"] = len(results)
-                entry["billing_distinct_order_ids"] = len({str(x.get("order_id")) for x in results if x.get("order_id") is not None})
-                entry["target_order_id_in_results"] = any(str(x.get("order_id")) == order_id for x in results)
-                entry["target_in_sales_info"] = any(
-                    order_id in order_ids_from_sales_info(x) for x in results
+            others = [o for o in oids if o != order_id]
+            # Probar distintos tamaños de batch para encontrar el máximo que ML acepta
+            # (single anda, 100 tira 400 → el endpoint tiene tope de order_ids por request).
+            entry["size_probe"] = {}
+            for size in (100, 75, 50, 40, 30, 25, 20, 10, 5, 1):
+                batch = ([order_id] + others)[:size]
+                raw = await client.get(
+                    f"{ML_API_URL}/billing/integration/group/ML/order/details",
+                    headers=headers,
+                    params={"order_ids": ",".join(batch), "seller_id": seller, "limit": 1000},
                 )
-            except Exception as e:
-                entry["batch_parse_error"] = str(e)[:200]
-            ok1, tax_single = await _fetch_taxes_one_batch(client, headers, seller, [order_id])
-            entry["fetch_single"] = {"ok": ok1, "value": tax_single.get(order_id), "keys": len(tax_single)}
-            ok2, tax_batch = await _fetch_taxes_one_batch(client, headers, seller, batch100)
-            entry["fetch_batch100"] = {
-                "ok": ok2, "value_for_target": tax_batch.get(order_id),
-                "keys": len(tax_batch), "nonzero": sum(1 for v in tax_batch.values() if v),
-            }
+                info = {"http": raw.status_code}
+                if raw.status_code in (200, 206):
+                    try:
+                        jb = raw.json()
+                        res = jb.get("results") or []
+                        info["total"] = jb.get("total")
+                        info["results_len"] = len(res)
+                        info["target_found"] = any(str(x.get("order_id")) == order_id for x in res)
+                    except Exception as e:
+                        info["parse_error"] = str(e)[:120]
+                else:
+                    info["body"] = raw.text[:160]
+                entry["size_probe"][size] = info
             out["owner"] = entry
             break
     return out
