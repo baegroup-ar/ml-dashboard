@@ -490,6 +490,51 @@ def init_db():
             conn.execute(text(
                 "INSERT INTO app_meta (key, value) VALUES ('margen_comvar_variant_reset','1')"
                 " ON CONFLICT (key) DO NOTHING"))
+        # Base SKU: normalizar los SKU a MAYÚSCULA. Los inputs de base_sku.html
+        # tienen text-transform:uppercase, que es SOLO visual: el value que viaja
+        # al backend conserva lo que se tipeó. Así entraron mapeos en minúscula
+        # (ej. "RTV02NEGRO-BAE-3c") que se veían iguales en pantalla pero NO
+        # cruzaban con product_sale_prices ("...-3C") — el lookup es un dict
+        # exacto. Efecto: Stock plegaba la variante bajo el original Y además le
+        # daba fila propia (duplicada). Se limpia UNA vez; el guardado ahora
+        # normaliza (db_save_variants), así que no vuelve a ensuciarse.
+        _sv_upper = conn.execute(text(
+            "SELECT 1 FROM app_meta WHERE key='sku_variants_upper_norm'")).fetchone()
+        if not _sv_upper:
+            # Se resuelve en Python (no con un UPDATE masivo) porque si el mismo
+            # mapeo quedó cargado en dos grafías, normalizar chocaría contra la PK
+            # (account_id, variant_sku, original_sku) y tumbaría el arranque.
+            # Todo el bloque va dentro de la transacción de init_db → atómico.
+            _sv_rows = conn.execute(text(
+                "SELECT account_id, variant_sku, original_sku, qty FROM sku_variants"
+                " ORDER BY updated_at ASC NULLS FIRST")).fetchall()
+            _sv_norm, _sv_dirty = {}, False
+            for _r in _sv_rows:
+                _v = str(_r[1] or "").strip().upper()
+                _o = str(_r[2] or "").strip().upper()
+                if not _v or not _o or _v == _o:
+                    _sv_dirty = True   # fila inservible (o autorreferente al normalizar)
+                    continue
+                if _v != str(_r[1] or "") or _o != str(_r[2] or ""):
+                    _sv_dirty = True
+                _sv_norm[(_r[0], _v, _o)] = _r[3]   # el más reciente pisa
+            if _sv_dirty:
+                # Se borran SOLO las filas sucias; las ya normalizadas quedan
+                # intactas y ganan ante un duplicado (ON CONFLICT DO NOTHING).
+                conn.execute(text(
+                    "DELETE FROM sku_variants"
+                    " WHERE variant_sku <> UPPER(TRIM(variant_sku))"
+                    "    OR original_sku <> UPPER(TRIM(original_sku))"
+                    "    OR UPPER(TRIM(variant_sku)) = UPPER(TRIM(original_sku))"))
+                for (_a, _v, _o), _q in _sv_norm.items():
+                    conn.execute(text(
+                        "INSERT INTO sku_variants (account_id, variant_sku, original_sku, qty, updated_at)"
+                        " VALUES (:a, :v, :o, :q, NOW())"
+                        " ON CONFLICT (account_id, variant_sku, original_sku) DO NOTHING"),
+                        {"a": _a, "v": _v, "o": _o, "q": _q})
+            conn.execute(text(
+                "INSERT INTO app_meta (key, value) VALUES ('sku_variants_upper_norm','1')"
+                " ON CONFLICT (key) DO NOTHING"))
         # Base de clientes (módulo facturación/ERP). Compartida por DUEÑO
         # (owner_user_id): un cliente es el mismo para todas las cuentas ML del
         # dueño. Único por CUIT dentro del dueño. condicion_iva_id = código ARCA
@@ -3400,10 +3445,16 @@ def _get_variant_map(account_id) -> dict:
             {"a": account_id})
     except Exception:
         return {}
+    # Claves y originales normalizados a MAYÚSCULA/sin espacios: todos los
+    # consumidores (Stock, Ranking, Margen, Compras) cruzan con lookup exacto
+    # contra SKU que vienen en mayúscula (ML / product_sale_prices).
     out: dict = {}
     for r in rows:
-        out.setdefault(r["variant_sku"], []).append(
-            (r["original_sku"], _coerce_qty(r.get("qty"))))
+        v = str(r["variant_sku"] or "").strip().upper()
+        o = str(r["original_sku"] or "").strip().upper()
+        if not v or not o:
+            continue
+        out.setdefault(v, []).append((o, _coerce_qty(r.get("qty"))))
     return out
 
 
@@ -3434,10 +3485,15 @@ def _parse_variants(content: bytes, filename: str) -> list:
 
 
 def db_save_variants(account_id, items) -> int:
+    """Único punto de escritura de sku_variants (alta manual, edición y upload).
+    Normaliza a MAYÚSCULA: el cruce contra product_sale_prices / ventas / stock es
+    un lookup exacto de dict, y los SKU de ML vienen en mayúscula. Sin esto, un
+    mapeo tipeado en minúscula se ve idéntico en la UI (los inputs tienen
+    text-transform:uppercase, que no toca el value) pero no matchea nunca."""
     saved = 0
     for it in items:
-        v = str(it.get("variant") or "").strip()
-        o = str(it.get("original") or "").strip()
+        v = str(it.get("variant") or "").strip().upper()
+        o = str(it.get("original") or "").strip().upper()
         if not v or not o or v == o:
             continue
         q = _coerce_qty(it.get("qty"))
@@ -3526,8 +3582,10 @@ async def api_base_sku_add(request: Request, account_id: int):
     if not _account_for_user(account_id, user_id):
         raise HTTPException(404)
     body = await request.json()
-    variant = str(body.get("variant") or "").strip()
-    original = str(body.get("original") or "").strip()
+    # Upper acá también (no solo en db_save_variants) para que la validación de
+    # "componente == original" no deje pasar un X-3c contra un X-3C.
+    variant = str(body.get("variant") or "").strip().upper()
+    original = str(body.get("original") or "").strip().upper()
     if not variant or not original:
         raise HTTPException(400, "SKU componente y SKU original son obligatorios.")
     if variant == original:
@@ -3547,10 +3605,12 @@ async def api_base_sku_edit(request: Request, account_id: int):
     if not _account_for_user(account_id, user_id):
         raise HTTPException(404)
     body = await request.json()
+    # old_* NO se normaliza: identifica la fila tal cual está guardada (para poder
+    # borrarla aunque venga de un dato viejo sin normalizar).
     old_variant = str(body.get("old_variant") or "").strip()
     old_original = str(body.get("old_original") or "").strip()
-    variant = str(body.get("variant") or "").strip()
-    original = str(body.get("original") or "").strip()
+    variant = str(body.get("variant") or "").strip().upper()
+    original = str(body.get("original") or "").strip().upper()
     if not old_variant or not old_original:
         raise HTTPException(400, "Faltan datos de la fila original.")
     if not variant or not original:
@@ -3589,12 +3649,16 @@ async def api_base_sku_delete(request: Request, account_id: int, variant: str, o
     if not _account_for_user(account_id, user_id):
         raise HTTPException(404)
     aid = _cost_account_id_for(get_user(user_id), account_id)
+    # Case-insensitive: si quedara alguna fila vieja sin normalizar, el borrado
+    # tiene que alcanzarla igual (si no, sería una fila imposible de eliminar).
+    v = variant.strip().upper()
     if original:
-        db_execute("DELETE FROM sku_variants WHERE account_id=:a AND variant_sku=:v AND original_sku=:o",
-                   {"a": aid, "v": variant, "o": original})
+        db_execute("DELETE FROM sku_variants WHERE account_id=:a"
+                   " AND UPPER(TRIM(variant_sku))=:v AND UPPER(TRIM(original_sku))=:o",
+                   {"a": aid, "v": v, "o": original.strip().upper()})
     else:
-        db_execute("DELETE FROM sku_variants WHERE account_id=:a AND variant_sku=:v",
-                   {"a": aid, "v": variant})
+        db_execute("DELETE FROM sku_variants WHERE account_id=:a AND UPPER(TRIM(variant_sku))=:v",
+                   {"a": aid, "v": v})
     return {"ok": True}
 
 
@@ -3615,15 +3679,16 @@ async def api_base_sku_delete_bulk(request: Request, account_id: int):
     pairs = body.get("pairs") or []
     deleted = 0
     for p in pairs:
-        v = str((p or {}).get("variant") or "").strip()
-        o = str((p or {}).get("original") or "").strip()
+        v = str((p or {}).get("variant") or "").strip().upper()
+        o = str((p or {}).get("original") or "").strip().upper()
         if not v:
             continue
         if o:
-            db_execute("DELETE FROM sku_variants WHERE account_id=:a AND variant_sku=:v AND original_sku=:o",
+            db_execute("DELETE FROM sku_variants WHERE account_id=:a"
+                       " AND UPPER(TRIM(variant_sku))=:v AND UPPER(TRIM(original_sku))=:o",
                        {"a": aid, "v": v, "o": o})
         else:
-            db_execute("DELETE FROM sku_variants WHERE account_id=:a AND variant_sku=:v",
+            db_execute("DELETE FROM sku_variants WHERE account_id=:a AND UPPER(TRIM(variant_sku))=:v",
                        {"a": aid, "v": v})
         deleted += 1
     # Compat: también acepta una lista simple de componentes.
