@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Precios Mayoristas · Panel BAE</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Cantarell:ital,wght@0,400;0,700;1,400&amp;display=swap" rel="stylesheet"><link rel="icon" type="image/png" href="/static/bae-favicon.png">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Cantarell', 'Inter', system-ui, sans-serif; background: #fff; color: #111; }
+    nav { background: #fff; border-bottom: 1px solid #e5e5e3; padding: 0 1.5rem; height: 56px; display: flex; align-items: center; justify-content: space-between; }
+    .nav-brand { font-weight: 600; font-size: 15px; display: flex; align-items: center; gap: 8px; }
+    .nav-right { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+    .btn-nav { padding: 6px 14px; border: 1px solid #ddd; border-radius: 8px; background: #fff; font-size: 13px; cursor: pointer; text-decoration: none; color: #111; }
+    .nav-dropdown { position: relative; display: inline-block; }
+    .nav-dropdown .dropdown-trigger.active { color: #005CFF; font-weight: 500; border-color: #005CFF; }
+    .nav-dropdown .dropdown-menu { display: none; position: absolute; top: calc(100% + 4px); left: 0; background: #fff; border: 1px solid #ddd; border-radius: 8px; min-width: 170px; z-index: 100; box-shadow: 0 6px 16px rgba(0,0,0,0.10); padding: 6px; flex-direction: column; }
+    .nav-dropdown:hover .dropdown-menu { display: flex; }
+    .dropdown-menu a.dropdown-item, .dropdown-menu span.dropdown-item { display: block; padding: 8px 10px; font-size: 13px; color: #111; text-decoration: none; border-radius: 6px; white-space: nowrap; cursor: pointer; }
+    .dropdown-menu a.dropdown-item:hover { background: #f5f5f3; }
+    .dropdown-menu span.dropdown-item.active { color: #005CFF; font-weight: 500; background: #EAF1FF; cursor: default; }
+    main { max-width: 1850px; margin: 0 auto; padding: 1.5rem 0.75rem; }
+    h1 { font-size: 20px; font-weight: 600; margin-bottom: 6px; }
+    p.lead { font-size: 13px; color: #888; margin-bottom: 1.25rem; }
+    .card { background: #fff; border: 1px solid #e5e5e3; border-radius: 12px; padding: 1.25rem; margin-bottom: 1.25rem; }
+    .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .row label { font-size: 13px; color: #666; }
+    .row select, .row input { padding: 7px 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 13px; font-family: 'Inter', sans-serif; }
+    .row select { min-width: 220px; }
+    button.primary { padding: 8px 16px; border: none; border-radius: 8px; background: #005CFF; color: #fff; font-size: 13px; cursor: pointer; }
+    button.green { padding: 8px 16px; border: none; border-radius: 8px; background: #1a8a5a; color: #fff; font-size: 13px; cursor: pointer; }
+    button:disabled { background: #ccc !important; cursor: not-allowed; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 12px; }
+    th { padding: 7px 8px; text-align: left; color: #888; font-weight: 500; border-bottom: 1px solid #eee; font-size: 11px; background: #fff; position: sticky; top: 0; z-index: 2; white-space: nowrap; }
+    th.num, td.num { text-align: right; }
+    td { padding: 6px 8px; border-bottom: 1px solid #f0f0ee; color: #333; }
+    tbody tr:hover { background: #fafaf8; }
+    .empty { padding: 2rem; text-align: center; color: #aaa; font-size: 13px; }
+    .no-accounts { text-align: center; padding: 4rem; color: #888; font-size: 14px; }
+    .muted { color: #bbb; }
+    .badge { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 99px; font-weight: 500; white-space: nowrap; }
+    .badge.warn { background: #fef0e6; color: #c47a1e; }
+    .badge.ok { background: #e6f5ee; color: #1a8a5a; }
+    .badge.gray { background: #f0f0ee; color: #666; }
+    .tier-target { font-weight: 600; }
+    .tier-target.pos { color: #1a8a5a; }
+    .tier-target.mid { color: #c47a1e; }
+    .tier-ml { font-size: 10px; color: #999; }
+    .bulk-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 12px; margin-bottom: 12px; background: #f7f9fc; border: 1px solid #e6ecf5; border-radius: 10px; font-size: 13px; }
+    .bulk-bar .bulk-count { color: #005CFF; font-size: 12px; }
+    .bulk-bar .sep { color: #ccc; }
+    .bulk-bar .bulk-msg { font-size: 12px; }
+    .param-section { margin-top: 4px; }
+    table.tiers-tbl { width: auto; min-width: 360px; }
+    table.tiers-tbl .p-in { width: 90px; text-align: right; padding: 6px 8px; border: 1px solid #ddd; border-radius: 6px; font-size: 13px; }
+    .param-hint { font-size: 11px; color: #999; margin-top: 8px; }
+    details.params summary { cursor: pointer; font-size: 14px; font-weight: 600; color: #444; }
+  </style>
+</head>
+<body>
+<nav>
+  <div class="nav-brand">
+    <img src="/static/bae-icon.png" alt="Tienda Bae" style="height:32px;width:auto;display:block;" />
+    Tienda Bae App
+  </div>
+  <div class="nav-right">
+    {% if 'dashboard' in perms or 'reputacion' in perms or 'descuentos' in perms or 'ranking' in perms or 'etiquetas' in perms or 'publicaciones' in perms or 'fotos' in perms or 'precios_mayoristas' in perms %}
+    <div class="nav-dropdown">
+      <span class="btn-nav dropdown-trigger active">Mercadolibre ▾</span>
+      <div class="dropdown-menu">
+        {% if 'dashboard' in perms %}<a href="/dashboard" class="dropdown-item">Dashboard</a>{% endif %}
+        {% if 'reputacion' in perms %}<a href="/reputacion" class="dropdown-item">Reputación</a>{% endif %}
+        {% if 'descuentos' in perms %}<a href="/descuentos" class="dropdown-item">Descuentos</a>{% endif %}
+        {% if 'ranking' in perms %}<a href="/ranking" class="dropdown-item">Ranking</a>{% endif %}
+        {% if 'etiquetas' in perms %}<a href="/etiquetas" class="dropdown-item">Etiquetas</a>{% endif %}
+        {% if 'publicaciones' in perms %}<a href="/publicaciones" class="dropdown-item">Publicaciones</a>{% endif %}
+        {% if 'fotos' in perms %}<a href="/fotos" class="dropdown-item">Fotos</a>{% endif %}
+        <span class="dropdown-item active">Precios Mayoristas</span>
+      </div>
+    </div>
+    {% endif %}
+    {% if 'pvp' in perms or 'clientes' in perms or 'base_sku' in perms or 'envios_flex' in perms %}
+    <div class="nav-dropdown">
+      <span class="btn-nav dropdown-trigger">Base de Datos ▾</span>
+      <div class="dropdown-menu">
+        {% if 'pvp' in perms %}<a href="/pvp" class="dropdown-item">PVP</a>{% endif %}
+        {% if 'clientes' in perms %}<a href="/clientes" class="dropdown-item">Clientes</a>{% endif %}
+        {% if 'base_sku' in perms %}<a href="/base-sku" class="dropdown-item">SKUs</a>{% endif %}
+        {% if 'envios_flex' in perms %}<a href="/costos/envios-flex" class="dropdown-item">Envíos Flex</a>{% endif %}
+      </div>
+    </div>
+    {% endif %}
+    {% if 'stock' in perms %}<a href="/stock" class="btn-nav">Stock valorizado</a>{% endif %}
+    {% if 'compras' in perms or 'costos' in perms %}<a href="/compras" class="btn-nav">Compras</a>{% endif %}
+    {% if 'margen' in perms %}<a href="/margen" class="btn-nav">Margen</a>{% endif %}
+    {% if 'ponderado_envios' in perms %}<a href="/ponderado-envios" class="btn-nav">Ponderado Envíos</a>{% endif %}
+    <span style="color:#888;">{{ user.name }}</span>
+    {% if user.is_admin %}<a href="/admin" style="font-size:12px;color:#005CFF;text-decoration:none;">Admin</a>{% endif %}
+    <a href="/logout" class="btn-nav">Salir</a>
+  </div>
+</nav>
+
+<main>
+  <h1>Precios Mayoristas</h1>
+  <p class="lead">
+    Sincroniza la escala de "Precio por Cantidad" (Precios mayoristas, sección Negocios de cada publicación) en Mercado Libre.
+    Los tramos se calculan sobre el <b>PVP MELI</b> (el mismo de Margen: PVP Lista − Desc. MELI), no sobre el PVP de lista.
+  </p>
+
+  {% if accounts %}
+  <div class="card">
+    <div class="row">
+      <label>Cuenta ML:</label>
+      <select id="account-select" onchange="onAccountChange()">
+        {% set default_nick = 'TIENDA BAE' %}
+        {% set has_default = accounts | selectattr('nickname', 'equalto', default_nick) | list | length > 0 %}
+        {% for acc in accounts %}
+        <option value="{{ acc.id }}" {% if acc.nickname == default_nick or (not has_default and loop.first) %}selected{% endif %}>{{ acc.nickname }}</option>
+        {% endfor %}
+      </select>
+      <input type="text" id="search" placeholder="Buscar SKU..." oninput="renderTable()" style="width:260px;" />
+      <button class="btn-nav" onclick="loadAll(true)">↻ Recargar de ML</button>
+      <span id="count-label" style="font-size:12px;color:#888;"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <details class="params">
+      <summary>⚙ Escala de tramos (cantidad mínima + % adicional sobre PVP MELI)</summary>
+      <div class="param-section">
+        <table class="tiers-tbl">
+          <thead><tr><th class="num">Cantidad mínima</th><th class="num">Desc. adicional %</th><th></th></tr></thead>
+          <tbody id="tiers-tbody"></tbody>
+        </table>
+        <div class="row" style="margin-top:10px;">
+          <button class="btn-nav" onclick="addTierRow()" id="btn-add-tier">+ Agregar tramo</button>
+          <button class="primary" onclick="saveTiersConfig()">Guardar parámetros</button>
+          <span id="cfg-msg" style="font-size:12px;color:#1a8a5a;"></span>
+        </div>
+        <div class="param-hint">Máximo 5 tramos (límite de Mercado Libre). Al aplicar, esta escala reemplaza COMPLETA cualquier tramo cargado en ML para la publicación (incluso los cargados a mano ahí) — no se preservan tramos que no estén en esta lista.</div>
+      </div>
+    </details>
+  </div>
+
+  <div class="card">
+    <div class="bulk-bar">
+      <span id="sel-count" class="bulk-count">0 seleccionados</span>
+      <button class="btn-nav" onclick="selectOutOfSync()">Seleccionar desactualizados</button>
+      <span class="sep">|</span>
+      <button class="primary" onclick="applySelected()">Aplicar a seleccionados (Mercado Libre)</button>
+      <span id="apply-msg" class="bulk-msg"></span>
+    </div>
+    <div style="overflow:auto;max-height:65vh;">
+      <table>
+        <thead id="thead-row"></thead>
+        <tbody id="tbody-items"></tbody>
+      </table>
+    </div>
+  </div>
+
+  {% else %}
+  <div class="card"><div class="no-accounts">No tenés cuentas de Mercado Libre conectadas.</div></div>
+  {% endif %}
+</main>
+
+<script>
+let ITEMS = [];
+let TIERS = [];
+const SEL = new Set();
+let currentAccountId = document.getElementById('account-select')?.value;
+
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+const fmt = n => (n == null || isNaN(n)) ? '<span class="muted">—</span>' : '$' + Number(n).toLocaleString('es-AR', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+
+function onAccountChange() {
+  currentAccountId = document.getElementById('account-select').value;
+  SEL.clear();
+  loadAll(false);
+}
+
+async function loadAll(refresh) {
+  if (!currentAccountId) return;
+  const msg = document.getElementById('apply-msg');
+  if (refresh && msg) msg.textContent = 'Recargando de Mercado Libre...';
+  try {
+    const r = await fetch(`/api/precios-mayoristas/${currentAccountId}/data${refresh ? '?refresh=1' : ''}`);
+    const j = await r.json();
+    ITEMS = j.items || [];
+    TIERS = (j.config && j.config.tiers) || [];
+  } catch (e) { ITEMS = []; TIERS = []; }
+  if (msg) msg.textContent = '';
+  SEL.clear();
+  renderTiersConfig();
+  renderThead();
+  renderTable();
+}
+
+// ── Parámetros: escala de tramos ──
+function renderTiersConfig() {
+  const tb = document.getElementById('tiers-tbody');
+  tb.innerHTML = TIERS.map((t, i) => `<tr>
+    <td class="num"><input type="number" class="p-in" min="2" step="1" value="${t.qty}" onchange="onTierEdit(${i}, 'qty', this.value)"></td>
+    <td class="num"><input type="number" class="p-in" min="0" step="0.1" value="${(t.pct * 100).toFixed(2)}" onchange="onTierEdit(${i}, 'pct', this.value)"></td>
+    <td><button class="btn-nav" onclick="removeTierRow(${i})" title="Quitar tramo">🗑</button></td>
+  </tr>`).join('');
+  document.getElementById('btn-add-tier').disabled = TIERS.length >= 5;
+}
+function onTierEdit(i, field, value) {
+  const v = parseFloat(value);
+  if (isNaN(v)) return;
+  TIERS[i][field] = field === 'pct' ? v / 100 : Math.round(v);
+}
+function addTierRow() {
+  if (TIERS.length >= 5) return;
+  TIERS.push({ qty: 2, pct: 0 });
+  renderTiersConfig();
+}
+function removeTierRow(i) {
+  TIERS.splice(i, 1);
+  renderTiersConfig();
+}
+async function saveTiersConfig() {
+  const msg = document.getElementById('cfg-msg');
+  try {
+    const r = await fetch(`/api/precios-mayoristas/${currentAccountId}/config`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tiers: TIERS }) });
+    const j = await r.json();
+    TIERS = j.tiers || TIERS;
+    renderTiersConfig();
+    msg.textContent = 'Parámetros guardados.';
+    setTimeout(() => { msg.textContent = ''; }, 2000);
+    await loadAll(false);
+  } catch (e) { msg.textContent = 'Error al guardar.'; msg.style.color = '#c0392b'; }
+}
+
+// ── Tabla principal ──
+function renderThead() {
+  const cols = TIERS.map(t => `<th class="num">${t.qty}+ un. (${(t.pct * 100).toFixed(1)}%)</th>`).join('');
+  document.getElementById('thead-row').innerHTML = `<tr>
+    <th style="width:30px;"><input type="checkbox" onchange="toggleAll(this)"></th>
+    <th>SKU</th>
+    <th class="num">PVP MELI</th>
+    ${cols}
+    <th>Estado</th>
+  </tr>`;
+}
+function filtered() {
+  const q = (document.getElementById('search')?.value || '').trim().toLowerCase();
+  return q ? ITEMS.filter(it => (it.sku || '').toLowerCase().includes(q)) : ITEMS;
+}
+function tierCell(it, t) {
+  const row = (it.tiers || []).find(r => r.qty === t.qty);
+  if (!row) return `<td class="num muted">—</td>`;
+  const inSync = row.current_amount != null && Math.abs(row.current_amount - row.target_amount) <= 1;
+  const cls = row.current_amount == null ? '' : (inSync ? 'pos' : 'mid');
+  return `<td class="num">
+    <div class="tier-target ${cls}">${fmt(row.target_amount)}</div>
+    <div class="tier-ml">ML: ${row.current_amount != null ? fmt(row.current_amount) : '—'}</div>
+  </td>`;
+}
+function statusBadge(it) {
+  if (it.in_sync) return `<span class="badge ok">Sincronizado</span>`;
+  const anyLoaded = (it.tiers || []).some(t => t.current_amount != null);
+  return anyLoaded ? `<span class="badge warn">Desactualizado</span>` : `<span class="badge gray">Sin cargar en ML</span>`;
+}
+function renderTable() {
+  const rows = filtered();
+  const n = rows.length;
+  const el = document.getElementById('count-label');
+  if (el) el.textContent = n === ITEMS.length ? `${ITEMS.length} SKU` : `${n} de ${ITEMS.length} SKU`;
+  const tb = document.getElementById('tbody-items');
+  tb.innerHTML = rows.length ? rows.map(it => `<tr>
+    <td><input type="checkbox" class="row-check" ${SEL.has(it.item_id) ? 'checked' : ''} onchange="onCheck('${esc(it.item_id)}', this.checked)"></td>
+    <td><b>${esc(it.sku)}</b></td>
+    <td class="num">${fmt(it.pvp_meli)}</td>
+    ${TIERS.map(t => tierCell(it, t)).join('')}
+    <td>${statusBadge(it)}</td>
+  </tr>`).join('') : `<tr><td colspan="${3 + TIERS.length + 1}" class="empty">${ITEMS.length ? 'Ningún SKU cumple el filtro.' : 'No hay SKU con PVP MELI y publicación activa correspondiente.'}</td></tr>`;
+  updateSelCount();
+}
+
+// ── Selección ──
+function onCheck(itemId, checked) {
+  if (checked) SEL.add(itemId); else SEL.delete(itemId);
+  updateSelCount();
+}
+function toggleAll(cb) {
+  for (const it of filtered()) { if (cb.checked) SEL.add(it.item_id); else SEL.delete(it.item_id); }
+  renderTable();
+}
+function selectOutOfSync() {
+  SEL.clear();
+  for (const it of filtered()) { if (!it.in_sync) SEL.add(it.item_id); }
+  renderTable();
+}
+function updateSelCount() {
+  const el = document.getElementById('sel-count');
+  if (el) el.textContent = `${SEL.size} seleccionados`;
+}
+
+// ── Aplicar a ML ──
+async function applySelected() {
+  const itemIds = [...SEL];
+  const msg = document.getElementById('apply-msg');
+  if (!itemIds.length) { msg.textContent = 'No hay publicaciones seleccionadas.'; return; }
+  if (!confirm(`¿Aplicar la escala de ${TIERS.length} tramo(s) a ${itemIds.length} publicación(es) en Mercado Libre? Esto pisa cualquier tramo cargado a mano en ML para esas publicaciones.`)) return;
+  msg.textContent = 'Aplicando en Mercado Libre...';
+  try {
+    const r = await fetch(`/api/precios-mayoristas/${currentAccountId}/apply`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ item_ids: itemIds }) });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.detail || 'error');
+    const fails = (j.results || []).filter(x => !x.ok);
+    msg.textContent = `Listo: ${j.updated} aplicado(s)${fails.length ? `, ${fails.length} con error (${fails.slice(0,3).map(f => f.sku + ': ' + f.error).join(' · ')})` : ''}.`;
+    await loadAll(false);
+  } catch (e) { msg.textContent = 'Error: ' + e.message; }
+}
+
+if (currentAccountId) loadAll(false);
+</script>
+</body>
+</html>

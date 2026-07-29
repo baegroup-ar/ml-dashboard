@@ -52,6 +52,10 @@ PROMO_LIST_CACHE: dict[int, dict] = {}
 # datos cambian poco; el botón "Cargar publicaciones" fuerza refresh.
 PUBLICACIONES_CACHE_TTL_SECONDS = 600
 PUBLICACIONES_CACHE: dict[int, dict] = {}
+# Precios Mayoristas (PxQ): GET /items/{id}/prices es 1 request por ítem (sin
+# multiget), así que se cachea por cuenta igual que el catálogo de arriba.
+WHOLESALE_PRICES_CACHE_TTL_SECONDS = 600
+WHOLESALE_PRICES_CACHE: dict[int, dict] = {}
 # Mínimo de descuento MÁS BAJO que ML reportó alguna vez por (promo, item).
 # La API de ML para campañas FLEXIBLE_PERCENTAGE es eventualmente consistente:
 # devuelve un `max_discounted_price` distinto entre llamadas (a veces 10%, a
@@ -446,6 +450,16 @@ def init_db():
         # comisión fija y envío promedio). Se guardan como JSON para flexibilidad.
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS margen_config (
+                account_id INTEGER NOT NULL REFERENCES ml_accounts(id) ON DELETE CASCADE,
+                params TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT NOW(),
+                PRIMARY KEY (account_id)
+            )
+        """))
+        # Escala de Precios Mayoristas (Precio por Cantidad / PxQ de ML) por
+        # cuenta: lista de tramos {qty, pct} aplicados sobre el PVP MELI.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS wholesale_config (
                 account_id INTEGER NOT NULL REFERENCES ml_accounts(id) ON DELETE CASCADE,
                 params TEXT NOT NULL,
                 updated_at TIMESTAMP DEFAULT NOW(),
@@ -1610,6 +1624,7 @@ PAGE_ROUTES = {
     "publicaciones": "/publicaciones",
     "fotos": "/fotos",
     "ponderado_envios": "/ponderado-envios",
+    "precios_mayoristas": "/precios-mayoristas",
 }
 
 
@@ -4753,6 +4768,59 @@ def margen_save_config(account_id: int, params: dict) -> dict:
         " DO UPDATE SET params=EXCLUDED.params, updated_at=NOW()",
         {"a": account_id, "p": json.dumps(merged)})
     return merged
+
+
+# ── Precios Mayoristas (Precio por Cantidad / PxQ de Mercado Libre) ───────
+# Escala de tramos {qty, pct} aplicada sobre el PVP MELI (price*(1-desc_meli),
+# el mismo de Margen). Máx. 5 tramos (límite de ML).
+WHOLESALE_DEFAULT_TIERS = [
+    {"qty": 2, "pct": 0.01},
+    {"qty": 3, "pct": 0.02},
+    {"qty": 5, "pct": 0.03},
+    {"qty": 10, "pct": 0.04},
+    {"qty": 15, "pct": 0.05},
+]
+WHOLESALE_MAX_TIERS = 5
+
+
+def wholesale_get_config(account_id: int) -> list:
+    rows = db_fetchall("SELECT params FROM wholesale_config WHERE account_id=:a",
+                       {"a": account_id})
+    if rows:
+        try:
+            tiers = json.loads(rows[0]["params"]).get("tiers")
+            if tiers:
+                return tiers
+        except Exception:
+            pass
+    return list(WHOLESALE_DEFAULT_TIERS)
+
+
+def wholesale_save_config(account_id: int, tiers: list) -> list:
+    """Valida y guarda la escala completa (reemplaza, no mergea por clave:
+    es una escala, no parámetros independientes)."""
+    clean = []
+    seen_qty = set()
+    for t in tiers or []:
+        try:
+            qty = int(t.get("qty"))
+            pct = float(t.get("pct"))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if qty <= 1 or qty in seen_qty:
+            continue
+        seen_qty.add(qty)
+        clean.append({"qty": qty, "pct": pct})
+    clean.sort(key=lambda t: t["qty"])
+    clean = clean[:WHOLESALE_MAX_TIERS]
+    if not clean:
+        clean = list(WHOLESALE_DEFAULT_TIERS)
+    db_execute(
+        "INSERT INTO wholesale_config (account_id, params, updated_at)"
+        " VALUES (:a, :p, NOW()) ON CONFLICT (account_id)"
+        " DO UPDATE SET params=EXCLUDED.params, updated_at=NOW()",
+        {"a": account_id, "p": json.dumps({"tiers": clean})})
+    return clean
 
 
 MARGEN_ENVIO_LOOKBACK_DAYS = 30
@@ -9272,6 +9340,234 @@ async def _fetch_fotos_items(client, headers, item_ids: list) -> list:
     return items
 
 
+# ── Precios Mayoristas (Precio por Cantidad / PxQ de Mercado Libre) ───────
+def _wholesale_sku_item_map(catalog_items: list) -> dict:
+    """{SKU_UPPER: item_id}, primer match gana si hay SKU duplicado entre
+    publicaciones (no debería pasar, pero no es motivo para romper)."""
+    m: dict = {}
+    for it in catalog_items:
+        sku_u = (it.get("sku") or "").strip().upper()
+        if sku_u and sku_u not in m:
+            m[sku_u] = it["item_id"]
+    return m
+
+
+def _wholesale_parse_prices(data: dict) -> dict:
+    """GET /items/{id}/prices → {"currency_id":..., "tiers": {qty: amount}}.
+    El nodo `standard` sin `min_purchase_unit` es el precio base (da la
+    moneda); cada tramo mayorista es otro nodo `standard` con
+    `conditions.min_purchase_unit` y `user_type_business` en
+    `context_restrictions`."""
+    out = {"currency_id": None, "tiers": {}}
+    for node in (data.get("prices") or []):
+        if not isinstance(node, dict) or node.get("type") != "standard":
+            continue
+        cond = node.get("conditions") or {}
+        min_unit = cond.get("min_purchase_unit")
+        if min_unit is None:
+            if out["currency_id"] is None:
+                out["currency_id"] = node.get("currency_id")
+            continue
+        if "user_type_business" in (cond.get("context_restrictions") or []):
+            try:
+                out["tiers"][int(min_unit)] = float(node.get("amount"))
+            except (TypeError, ValueError):
+                pass
+    return out
+
+
+async def _fetch_wholesale_prices_map(account_id: int, item_ids: list, force_refresh: bool = False) -> dict:
+    """{item_id: {"currency_id":..., "tiers": {qty:amount}}}, cacheado por
+    cuenta (TTL, igual patrón que PUBLICACIONES_CACHE): GET /items/{id}/prices
+    no tiene multiget, así que se pagina 1 request por ítem."""
+    cached = WHOLESALE_PRICES_CACHE.get(account_id) if not force_refresh else None
+    if cached and (datetime.utcnow() - cached["at"]).total_seconds() < WHOLESALE_PRICES_CACHE_TTL_SECONDS:
+        return cached["by_item"]
+    token = await refresh_ml_token(account_id)
+    if not token:
+        raise HTTPException(502)
+    headers = {"Authorization": f"Bearer {token}"}
+    by_item: dict = {}
+    sem = asyncio.Semaphore(15)
+    async with httpx.AsyncClient(timeout=30) as client:
+        async def fetch_one(item_id):
+            async with sem:
+                try:
+                    r = await client.get(f"{ML_API_URL}/items/{item_id}/prices", headers=headers)
+                    if r.status_code == 200:
+                        by_item[item_id] = _wholesale_parse_prices(r.json())
+                except Exception:
+                    pass
+        await asyncio.gather(*[fetch_one(iid) for iid in item_ids])
+    WHOLESALE_PRICES_CACHE[account_id] = {"at": datetime.utcnow(), "by_item": by_item}
+    return by_item
+
+
+@app.get("/precios-mayoristas", response_class=HTMLResponse)
+async def precios_mayoristas_page(request: Request):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse("/")
+    user = get_user(user_id)
+    _r = _page_redirect(user, "precios_mayoristas")
+    if _r:
+        return _r
+    accounts = get_visible_accounts(user_id, user)
+    accounts = await refresh_visible_account_nicknames(accounts)
+    return templates.TemplateResponse("precios_mayoristas.html", {
+        "request": request, "user": user, "accounts": accounts,
+        "perms": user_permissions(user),
+    })
+
+
+@app.get("/api/precios-mayoristas/{account_id:int}/data")
+async def api_precios_mayoristas_data(request: Request, account_id: int):
+    """Universo = SKU con precio en la base PVP (product_sale_prices, mismo
+    criterio que Margen/Stock) cruzado por SKU exacto contra el catálogo de
+    publicaciones activas (_get_all_publicaciones): un SKU sin publicación
+    correspondiente no tiene nada que escribir en ML y queda afuera solo.
+    PVP MELI = price*(1-desc_meli), igual fórmula que Margen."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    refresh = (request.query_params.get("refresh") in ("1", "true", "yes"))
+    tiers = wholesale_get_config(account_id)
+    rows = db_fetchall(
+        "SELECT sku, price, desc_meli FROM product_sale_prices"
+        " WHERE account_id=:a AND price IS NOT NULL ORDER BY sku", {"a": account_id})
+    catalog = await _get_all_publicaciones(account_id, acc, force_refresh=refresh)
+    sku_to_item = _wholesale_sku_item_map(catalog)
+    matched = []
+    for r in rows:
+        item_id = sku_to_item.get((r["sku"] or "").strip().upper())
+        if not item_id:
+            continue
+        pvp_meli = _margen_pvp_meli(
+            float(r["price"]) if r["price"] is not None else None,
+            float(r["desc_meli"]) if r["desc_meli"] is not None else None)
+        if not pvp_meli:
+            continue
+        matched.append((r["sku"], item_id, pvp_meli))
+    prices_map = await _fetch_wholesale_prices_map(
+        account_id, [iid for _, iid, _ in matched], force_refresh=refresh)
+    items = []
+    for sku, item_id, pvp_meli in matched:
+        pdata = prices_map.get(item_id) or {}
+        current_tiers = pdata.get("tiers") or {}
+        row_tiers = []
+        in_sync = bool(current_tiers)
+        for t in tiers:
+            target = round(pvp_meli * (1 - t["pct"]), 2)
+            current = current_tiers.get(t["qty"])
+            if current is None or abs(current - target) > 1:
+                in_sync = False
+            row_tiers.append({"qty": t["qty"], "pct": t["pct"],
+                              "current_amount": current, "target_amount": target})
+        items.append({
+            "sku": sku, "item_id": item_id, "pvp_meli": pvp_meli,
+            "currency_id": pdata.get("currency_id"), "tiers": row_tiers, "in_sync": in_sync,
+        })
+    return {"items": items, "config": {"tiers": tiers}, "defaults": {"tiers": WHOLESALE_DEFAULT_TIERS}}
+
+
+@app.post("/api/precios-mayoristas/{account_id:int}/config")
+async def api_precios_mayoristas_config_save(request: Request, account_id: int):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    if not _account_for_user(account_id, user_id):
+        raise HTTPException(404)
+    body = await request.json()
+    tiers = wholesale_save_config(account_id, body.get("tiers") or [])
+    return {"ok": True, "tiers": tiers}
+
+
+@app.post("/api/precios-mayoristas/{account_id:int}/apply")
+async def api_precios_mayoristas_apply(request: Request, account_id: int):
+    """Aplica la escala configurada a las publicaciones seleccionadas. Manda
+    SIEMPRE el set completo de tramos SIN `id` (todos nuevos): ML borra
+    cualquier tramo existente que no se referencie por id, así que esta
+    pantalla queda como fuente de verdad de la escala completa (pisa
+    cualquier tramo cargado a mano en ML que no coincida con la config)."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    body = await request.json()
+    item_ids = [str(i).strip() for i in (body.get("item_ids") or []) if str(i or "").strip()]
+    if not item_ids:
+        raise HTTPException(400, "Falta seleccionar publicaciones.")
+    tiers = wholesale_get_config(account_id)
+    token = await refresh_ml_token(account_id)
+    if not token:
+        raise HTTPException(502)
+    headers = {"Authorization": f"Bearer {token}"}
+    catalog = await _get_all_publicaciones(account_id, acc)
+    item_to_sku = {v: k for k, v in _wholesale_sku_item_map(catalog).items()}
+    rows = db_fetchall(
+        "SELECT sku, price, desc_meli FROM product_sale_prices WHERE account_id=:a", {"a": account_id})
+    row_by_sku_u = {(r["sku"] or "").strip().upper(): r for r in rows}
+    cache = WHOLESALE_PRICES_CACHE.get(account_id) or {"at": datetime.utcnow(), "by_item": {}}
+    results = []
+    sem = asyncio.Semaphore(8)
+    async with httpx.AsyncClient(timeout=30) as client:
+        async def apply_one(item_id):
+            async with sem:
+                sku_u = item_to_sku.get(item_id)
+                row = row_by_sku_u.get(sku_u) if sku_u else None
+                if not row or row["price"] is None:
+                    results.append({"item_id": item_id, "sku": sku_u, "ok": False, "error": "Sin PVP cargado."})
+                    return
+                pvp_meli = _margen_pvp_meli(
+                    float(row["price"]),
+                    float(row["desc_meli"]) if row["desc_meli"] is not None else None)
+                if not pvp_meli:
+                    results.append({"item_id": item_id, "sku": sku_u, "ok": False, "error": "PVP MELI inválido."})
+                    return
+                currency_id = (cache["by_item"].get(item_id) or {}).get("currency_id")
+                if not currency_id:
+                    try:
+                        r0 = await client.get(f"{ML_API_URL}/items/{item_id}/prices", headers=headers)
+                        if r0.status_code == 200:
+                            currency_id = _wholesale_parse_prices(r0.json()).get("currency_id")
+                    except Exception:
+                        pass
+                if not currency_id:
+                    results.append({"item_id": item_id, "sku": sku_u, "ok": False,
+                                    "error": "No se pudo determinar la moneda del ítem."})
+                    return
+                prices_body = [
+                    {"amount": round(pvp_meli * (1 - t["pct"]), 2), "currency_id": currency_id,
+                     "conditions": {"context_restrictions": ["channel_marketplace", "user_type_business"],
+                                    "min_purchase_unit": t["qty"]}}
+                    for t in tiers
+                ]
+                try:
+                    r = await client.post(
+                        f"{ML_API_URL}/items/{item_id}/prices/standard/quantity",
+                        headers=headers, json={"prices": prices_body})
+                except Exception as e:
+                    results.append({"item_id": item_id, "sku": sku_u, "ok": False, "error": str(e)[:200]})
+                    return
+                if r.status_code in (200, 201):
+                    cache["by_item"][item_id] = {
+                        "currency_id": currency_id,
+                        "tiers": {t["qty"]: p["amount"] for t, p in zip(tiers, prices_body)}}
+                    results.append({"item_id": item_id, "sku": sku_u, "ok": True, "error": None})
+                else:
+                    results.append({"item_id": item_id, "sku": sku_u, "ok": False,
+                                    "error": f"HTTP {r.status_code}: {r.text[:200]}"})
+        await asyncio.gather(*[apply_one(iid) for iid in item_ids])
+    cache["at"] = datetime.utcnow()
+    WHOLESALE_PRICES_CACHE[account_id] = cache
+    return {"ok": True, "updated": sum(1 for res in results if res["ok"]), "results": results}
+
+
 async def _get_all_fotos(account_id: int, acc: dict, force_refresh: bool = False) -> list:
     cached = FOTOS_CACHE.get(account_id) if not force_refresh else None
     if cached and (datetime.utcnow() - cached["at"]).total_seconds() < FOTOS_CACHE_TTL_SECONDS:
@@ -11788,6 +12084,7 @@ PAGES = [
     ("clientes",    "Clientes"),
     ("publicaciones", "Publicaciones"),
     ("fotos", "Fotos"),
+    ("precios_mayoristas", "Precios Mayoristas"),
 ]
 PAGE_KEYS = {k for k, _ in PAGES}
 
