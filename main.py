@@ -5141,6 +5141,10 @@ async def api_margen_data(request: Request, account_id: int):
         desc = float(r["desc_meli"]) if r["desc_meli"] is not None else None
         pvp_meli = _margen_pvp_meli(lista, desc)
         desc_tn = float(r["desc_tn"]) if r["desc_tn"] is not None else None
+        # Tienda Nube solo modela el SKU ORIGINAL: las variantes/combos (los que
+        # cuelgan de un original en Base SKU) no se publican por separado en TN,
+        # así que no calculan ni se listan en esa solapa (sí siguen en MELI).
+        is_variant = (sku or "").strip().upper() in variant_map_u
         tipo = _margen_tipo_resolve(sku, r["tipo_publicacion"])
         ccf = _margen_com_cuotas_frac(tipo, p)
         # Com var: por defecto hereda del original (base SKU); el valor propio es
@@ -5165,6 +5169,7 @@ async def api_margen_data(request: Request, account_id: int):
             "desc_meli": desc,
             "pvp_meli": pvp_meli,
             "desc_tn": desc_tn,
+            "is_variant": is_variant,
             "comision_var": float(r["comision_var"]) if r["comision_var"] is not None else None,
             "comvar_eff": comvar,
             "comvar_inherit": inherit,
@@ -5645,6 +5650,10 @@ async def api_margen_export_list(request: Request, account_id: int, view: str = 
         pvp_meli = _margen_pvp_meli(lista, desc)
         desc_tn = float(r["desc_tn"]) if r["desc_tn"] is not None else None
         pvp_tn = _margen_pvp_meli(lista, desc_tn)
+        # Tienda Nube solo modela el SKU original (ver nota en /api/margen/data).
+        is_variant = (sku or "").strip().upper() in variant_map_u
+        if view == "tn" and is_variant:
+            continue
         if view in ("resumen", "meli"):
             tipo = _margen_tipo_resolve(sku, r["tipo_publicacion"])
             ccf = _margen_com_cuotas_frac(tipo, p)
@@ -5657,11 +5666,14 @@ async def api_margen_export_list(request: Request, account_id: int, view: str = 
                 envio_auto=(envio_resolved if not envio_is_manual else None))
             renta_pct = round(comp["renta"] * 100, 2) if comp and comp["renta"] is not None else None
         if view == "resumen":
-            comp_tn = margen_compute_tn(pvp_tn, iva_rate, costo, p)
-            renta_tn_pct = round(comp_tn["renta"] * 100, 2) if comp_tn and comp_tn["renta"] is not None else None
+            if is_variant:
+                desc_tn_out, renta_tn_pct = None, None
+            else:
+                comp_tn = margen_compute_tn(pvp_tn, iva_rate, costo, p)
+                renta_tn_pct = round(comp_tn["renta"] * 100, 2) if comp_tn and comp_tn["renta"] is not None else None
+                desc_tn_out = round(desc_tn * 100, 2) if desc_tn is not None else None
             ws.append([sku, r2(lista), (round(desc * 100, 2) if desc is not None else None),
-                       r2(pvp_meli), renta_pct,
-                       (round(desc_tn * 100, 2) if desc_tn is not None else None), renta_tn_pct])
+                       r2(pvp_meli), renta_pct, desc_tn_out, renta_tn_pct])
         elif view == "meli":
             if comp:
                 # Com. var $ = monto combinado (com var % + com cuotas %).

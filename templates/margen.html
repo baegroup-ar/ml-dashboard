@@ -558,6 +558,9 @@ function recalcPvpMeli(it) {
 // (%) y envío (monto fijo con umbral) salen de Parámetros.
 function pvpTnOf(it) { return it.pvp_lista == null ? null : Math.round(it.pvp_lista * (1 - (it.desc_tn || 0)) * 100) / 100; }
 function computeRowTN(it) {
+  // Las variantes/combos (cuelgan de un original en Base SKU) no se publican
+  // por separado en Tienda Nube: no calculan renta en ese canal.
+  if (it.is_variant) return null;
   const pvp = pvpTnOf(it);
   if (!pvp || pvp <= 0) return null;
   const f = factorOf(it);
@@ -571,13 +574,20 @@ function computeRowTN(it) {
   return { pvp, pvpSin, comAmt, envioAmt, cobro, costo, resultado, renta };
 }
 
+// Filas visibles para una solapa: Tienda Nube excluye variantes/combos (solo
+// modela el SKU original, no se publican por separado en TN).
+function rowsForTab(tab) {
+  const rows = filtered();
+  return tab === 'tn' ? rows.filter(it => !it.is_variant) : rows;
+}
 function emptyMsg() {
   return ITEMS.length ? 'Ningún SKU cumple el filtro.' : 'Sin SKU en la base de precios.';
 }
 function renderActive() {
-  const n = filtered().length;
+  const rows = rowsForTab(TAB);
+  const total = TAB === 'tn' ? ITEMS.filter(it => !it.is_variant).length : ITEMS.length;
   const el = document.getElementById('count-label');
-  if (el) el.textContent = n === ITEMS.length ? `${ITEMS.length} SKU` : `${n} de ${ITEMS.length} SKU`;
+  if (el) el.textContent = rows.length === total ? `${total} SKU` : `${rows.length} de ${total} SKU`;
   if (TAB === 'resumen') renderResumen();
   else if (TAB === 'tn') renderTN();
   else renderMeli();
@@ -608,16 +618,17 @@ function renderResumen() {
           onchange="editDesc('${esc(it.sku)}', this)"> %</td>
       <td class="num">${fmt(it.pvp_meli)}</td>
       <td class="num ${rentaClass(c ? c.renta : null)}"><b>${pct(c ? c.renta : null)}</b></td>
-      <td class="num"><input type="number" class="num-input" style="width:70px" value="${it.desc_tn != null ? Math.round(it.desc_tn*10000)/100 : ''}" step="0.1" min="0" max="100"
-          onchange="editDescTn('${esc(it.sku)}', this)"> %</td>
-      <td class="num ${rentaClass(ctn ? ctn.renta : null)}"><b>${pct(ctn ? ctn.renta : null)}</b></td>
+      <td class="num">${it.is_variant ? '<span class="muted">—</span>'
+          : `<input type="number" class="num-input" style="width:70px" value="${it.desc_tn != null ? Math.round(it.desc_tn*10000)/100 : ''}" step="0.1" min="0" max="100"
+          onchange="editDescTn('${esc(it.sku)}', this)"> %`}</td>
+      <td class="num ${rentaClass(ctn ? ctn.renta : null)}"><b>${it.is_variant ? '<span class="muted">—</span>' : pct(ctn ? ctn.renta : null)}</b></td>
     </tr>`;
   }).join('') : `<tr><td colspan="8" class="empty">${emptyMsg()}</td></tr>`;
   syncHeaderCheck('resumen'); updateSelCount('resumen');
 }
 
 function renderTN() {
-  const rows = filtered();
+  const rows = rowsForTab('tn');
   const tb = document.getElementById('tbody-tn');
   tb.innerHTML = rows.length ? rows.map(it => {
     const c = computeRowTN(it);
@@ -777,7 +788,7 @@ function onCheck(tab, sku, checked) {
   syncHeaderCheck(tab); updateSelCount(tab);
 }
 function toggleAll(tab, cb) {
-  for (const it of filtered()) { if (cb.checked) SEL[tab].add(it.sku); else SEL[tab].delete(it.sku); }
+  for (const it of rowsForTab(tab)) { if (cb.checked) SEL[tab].add(it.sku); else SEL[tab].delete(it.sku); }
   renderActive();
 }
 // IDs de los elementos de la bulk-bar por solapa.
@@ -789,7 +800,7 @@ const BULK_IDS = {
 function syncHeaderCheck(tab) {
   const cb = document.getElementById(BULK_IDS[tab].all);
   if (!cb) return;
-  const rows = filtered();
+  const rows = rowsForTab(tab);
   cb.checked = rows.length > 0 && rows.every(it => SEL[tab].has(it.sku));
 }
 function updateSelCount(tab) {
