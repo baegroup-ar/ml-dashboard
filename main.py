@@ -438,6 +438,10 @@ def init_db():
         # Premium12). NULL => se autodetecta por el sufijo de cuotas del SKU
         # (-3C→Premium3, etc.), default Clasica. Editable/persistente por SKU.
         conn.execute(text("ALTER TABLE product_sale_prices ADD COLUMN IF NOT EXISTS tipo_publicacion TEXT"))
+        # Descuento propio del canal Tienda Nube (análogo a desc_meli). El PVP
+        # LISTA es el mismo entre canales; el descuento puede diferir. PVP TN se
+        # calcula en vivo (lista*(1-desc_tn)), no se persiste.
+        conn.execute(text("ALTER TABLE product_sale_prices ADD COLUMN IF NOT EXISTS desc_tn NUMERIC(6,4)"))
         # Parámetros globales del cálculo de margen MELI por cuenta (tramos de
         # comisión fija y envío promedio). Se guardan como JSON para flexibilidad.
         conn.execute(text("""
@@ -4673,6 +4677,13 @@ MARGEN_DEFAULT_PARAMS = {
     "com_premium6": 0.0,
     "com_premium9": 0.0,
     "com_premium12": 0.0,
+    # Canal Tienda Nube: comisión única (sin tramos ni por cuotas) y envío con
+    # umbral de envío gratis, igual patrón que MELI pero como monto fijo (no
+    # hay ponderado por ventas reales de TN). En 0 hasta que el usuario cargue
+    # sus valores reales en Parámetros.
+    "tn_comision_pct": 0.0,
+    "tn_envio_threshold": 33000.0,
+    "tn_envio_monto": 0.0,
 }
 
 # Tipos de publicación válidos y el % de comisión cuotas que le corresponde a
@@ -4861,6 +4872,29 @@ def margen_compute(pvp_meli, iva_rate, comision_var, costo_sin_iva, p,
         "comision_var_amt": comision_var_amt,
         "com_cuotas_frac": ccf, "com_cuotas_amt": com_cuotas_amt,
         "fija_amt": fija_amt,
+        "envio_amt": envio_amt, "cobro": cobro, "costo_sin_iva": costo,
+        "resultado": resultado, "renta": renta,
+    }
+
+
+def margen_compute_tn(pvp_tn, iva_rate, costo_sin_iva, p) -> Optional[dict]:
+    """Desglose de margen para el canal Tienda Nube: sin comisión fija por
+    tramos ni comisión por cuotas (eso es exclusivo de ML). Comisión = único %
+    de parámetros (`tn_comision_pct`). Envío = monto fijo de parámetros
+    (`tn_envio_monto`), solo si `pvp_tn` llega al umbral `tn_envio_threshold`
+    (mismo patrón de umbral que MELI, pero sin ponderado por ventas reales)."""
+    if not pvp_tn or pvp_tn <= 0:
+        return None
+    factor = 1 + (float(iva_rate or 0) / 100.0)
+    pvp_sin_iva = pvp_tn / factor
+    comision_amt = pvp_tn * float(p.get("tn_comision_pct") or 0.0) / factor
+    envio_amt = (float(p.get("tn_envio_monto") or 0.0) / factor) if pvp_tn >= p.get("tn_envio_threshold", 0) else 0.0
+    cobro = pvp_sin_iva - comision_amt - envio_amt
+    costo = float(costo_sin_iva or 0)
+    resultado = cobro - costo
+    renta = (resultado / pvp_sin_iva) if pvp_sin_iva else None
+    return {
+        "pvp_sin_iva": pvp_sin_iva, "comision_amt": comision_amt,
         "envio_amt": envio_amt, "cobro": cobro, "costo_sin_iva": costo,
         "resultado": resultado, "renta": renta,
     }
@@ -5091,20 +5125,22 @@ async def api_margen_data(request: Request, account_id: int):
     sales_aids = [a["id"] for a in get_visible_accounts(user_id, user)] or [account_id]
     envio_auto_map = _margen_envio_ponderado_map(sales_aids, p["envio_threshold"])
     rows = db_fetchall(
-        "SELECT sku, price, desc_meli, comision_var, costo_manual, tipo_publicacion, envio_manual"
+        "SELECT sku, price, desc_meli, desc_tn, comision_var, costo_manual, tipo_publicacion, envio_manual"
         " FROM product_sale_prices WHERE account_id=:a ORDER BY sku", {"a": account_id})
     manual_map_u, variant_map_u, comvar_map_u, envio_manual_map_u = _margen_maps(rows, variant_map)
     items = []
     for r in rows:
         sku = r["sku"]
         # Costo efectivo: manual propio → CMV → cruce base SKU (propaga el manual
-        # del original a variantes/combos).
+        # del original a variantes/combos). Es del producto, no del canal: el
+        # mismo costo alimenta MELI y Tienda Nube.
         costo, iva_rate = _margen_resolve_cost(sku, manual_map_u, versioned, today_iso, variant_map_u)
-        # PVP LISTA = precio de la base PVP; PVP MELI = lista * (1 - desc),
-        # calculado en vivo para que siga a cualquier cambio de precio en PVP.
+        # PVP LISTA = precio de la base PVP; PVP MELI/TN = lista * (1 - desc del
+        # canal), calculado en vivo para que siga a cualquier cambio de precio.
         lista = float(r["price"]) if r["price"] is not None else None
         desc = float(r["desc_meli"]) if r["desc_meli"] is not None else None
         pvp_meli = _margen_pvp_meli(lista, desc)
+        desc_tn = float(r["desc_tn"]) if r["desc_tn"] is not None else None
         tipo = _margen_tipo_resolve(sku, r["tipo_publicacion"])
         ccf = _margen_com_cuotas_frac(tipo, p)
         # Com var: por defecto hereda del original (base SKU); el valor propio es
@@ -5128,6 +5164,7 @@ async def api_margen_data(request: Request, account_id: int):
             "pvp_lista": lista,
             "desc_meli": desc,
             "pvp_meli": pvp_meli,
+            "desc_tn": desc_tn,
             "comision_var": float(r["comision_var"]) if r["comision_var"] is not None else None,
             "comvar_eff": comvar,
             "comvar_inherit": inherit,
@@ -5155,8 +5192,9 @@ def _margen_pvp_meli(lista, desc):
 
 @app.post("/api/margen/{account_id:int}/row")
 async def api_margen_row_save(request: Request, account_id: int):
-    """Guarda desc_meli / comision_var de un SKU. PVP LISTA vive en la base PVP
-    (product_sale_prices.price); acá solo se recalcula pvp_meli = price*(1-desc)."""
+    """Guarda desc_meli / comision_var / desc_tn de un SKU. PVP LISTA vive en la
+    base PVP (product_sale_prices.price); acá solo se recalcula
+    pvp_meli = price*(1-desc_meli) (PVP TN se calcula en vivo, no se persiste)."""
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
@@ -5170,6 +5208,10 @@ async def api_margen_row_save(request: Request, account_id: int):
     desc = float(desc) if desc not in (None, "") else None
     if desc is not None and desc > 1:  # aceptar 25 como 0.25
         desc = desc / 100.0
+    desc_tn = body.get("desc_tn")
+    desc_tn = float(desc_tn) if desc_tn not in (None, "") else None
+    if desc_tn is not None and desc_tn > 1:
+        desc_tn = desc_tn / 100.0
     cv = body.get("comision_var")
     cv = float(cv) if cv not in (None, "") else None
     if cv is not None and cv > 1:
@@ -5183,8 +5225,9 @@ async def api_margen_row_save(request: Request, account_id: int):
     pvp_meli = _margen_pvp_meli(lista, desc)
     db_execute(
         "UPDATE product_sale_prices SET desc_meli=:desc, comision_var=:cv,"
-        " pvp_meli=:meli, updated_at=NOW() WHERE account_id=:a AND sku=:s",
-        {"a": account_id, "s": sku, "desc": desc, "cv": cv, "meli": pvp_meli})
+        " desc_tn=:desc_tn, pvp_meli=:meli, updated_at=NOW()"
+        " WHERE account_id=:a AND sku=:s",
+        {"a": account_id, "s": sku, "desc": desc, "cv": cv, "desc_tn": desc_tn, "meli": pvp_meli})
     return {"ok": True, "pvp_meli": pvp_meli}
 
 
@@ -5321,8 +5364,19 @@ def _margen_norm_pct(v):
 
 
 def _margen_apply_bulk(account_id: int, field: str, pairs: list) -> int:
-    """Aplica en masa desc_meli, comision_var o tipo_publicacion.
-    pairs = [(sku, valor)] (fracción para desc/comision; string para tipo)."""
+    """Aplica en masa desc_meli, comision_var, desc_tn o tipo_publicacion.
+    pairs = [(sku, valor)] (fracción para desc/comision/desc_tn; string para tipo)."""
+    if field == "desc_tn":
+        n = 0
+        for sku, val in pairs:
+            if not sku:
+                continue
+            db_execute(
+                "UPDATE product_sale_prices SET desc_tn=:v, updated_at=NOW()"
+                " WHERE account_id=:a AND sku=:s",
+                {"a": account_id, "s": sku, "v": val})
+            n += 1
+        return n
     if field == "tipo":
         n = 0
         for sku, val in pairs:
@@ -5366,7 +5420,7 @@ def _margen_apply_bulk(account_id: int, field: str, pairs: list) -> int:
 
 @app.post("/api/margen/{account_id:int}/bulk")
 async def api_margen_bulk(request: Request, account_id: int):
-    """Carga masiva por selección: {field:'desc'|'comision', items:[{sku,value}]}."""
+    """Carga masiva por selección: {field:'desc'|'comision'|'desc_tn'|'tipo', items:[{sku,value}]}."""
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
@@ -5374,8 +5428,8 @@ async def api_margen_bulk(request: Request, account_id: int):
         raise HTTPException(404)
     body = await request.json()
     field = str(body.get("field") or "")
-    if field not in ("desc", "comision", "tipo"):
-        raise HTTPException(400, "field inválido (desc|comision|tipo).")
+    if field not in ("desc", "comision", "desc_tn", "tipo"):
+        raise HTTPException(400, "field inválido (desc|comision|desc_tn|tipo).")
     items = body.get("items") or []
     if field == "tipo":
         pairs = [(str(it.get("sku") or "").strip(), str(it.get("value") or "").strip())
@@ -5411,14 +5465,14 @@ def _parse_margen_upload(content: bytes, filename: str) -> list:
 
 @app.post("/api/margen/{account_id:int}/upload")
 async def api_margen_upload(request: Request, account_id: int, field: str = "desc"):
-    """Carga masiva desde Excel/CSV (SKU + valor) de desc o comisión variable."""
+    """Carga masiva desde Excel/CSV (SKU + valor) de desc, desc_tn o comisión variable."""
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
     if not _account_for_user(account_id, user_id):
         raise HTTPException(404)
-    if field not in ("desc", "comision", "tipo"):
-        raise HTTPException(400, "field inválido (desc|comision|tipo).")
+    if field not in ("desc", "comision", "desc_tn", "tipo"):
+        raise HTTPException(400, "field inválido (desc|comision|desc_tn|tipo).")
     form = await request.form()
     up = form.get("file")
     if up is None:
@@ -5445,8 +5499,8 @@ async def api_margen_template(request: Request, account_id: int, field: str = "d
     from openpyxl.styles import Font, PatternFill, Alignment
     from fastapi.responses import StreamingResponse
     col2 = {"desc": "Descuento %", "comision": "Comisión variable %",
-            "tipo": "Tipo Publicación"}.get(field, "Valor")
-    example = {"desc": 15, "comision": 16, "tipo": "Premium3"}.get(field, "")
+            "desc_tn": "Descuento TN %", "tipo": "Tipo Publicación"}.get(field, "Valor")
+    example = {"desc": 15, "comision": 16, "desc_tn": 15, "tipo": "Premium3"}.get(field, "")
     wb = Workbook()
     ws = wb.active
     ws.title = "Plantilla"
@@ -5471,6 +5525,7 @@ async def api_margen_template(request: Request, account_id: int, field: str = "d
     wb.save(buf)
     buf.seek(0)
     fname = {"desc": "plantilla_descuentos.xlsx", "comision": "plantilla_comisiones.xlsx",
+             "desc_tn": "plantilla_descuento_tn.xlsx",
              "tipo": "plantilla_tipo_publicacion.xlsx"}.get(field, "plantilla.xlsx")
     return StreamingResponse(
         buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -5479,17 +5534,18 @@ async def api_margen_template(request: Request, account_id: int, field: str = "d
 
 @app.get("/api/margen/{account_id:int}/export")
 async def api_margen_export(request: Request, account_id: int, field: str = "desc"):
-    """Descarga Excel con los valores cargados: SKU + Desc % (Resumen) o
-    SKU + Comisión variable % (MELI). Trae todos los SKU (vacío si no cargado)."""
+    """Descarga Excel con los valores cargados: SKU + Desc % (Resumen), SKU +
+    Comisión variable % (MELI) o SKU + Desc TN % (Tienda Nube). Trae todos los
+    SKU (vacío si no cargado)."""
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
     acc = _account_for_user(account_id, user_id)
     if not acc:
         raise HTTPException(404)
-    if field not in ("desc", "comision"):
-        raise HTTPException(400, "field inválido (desc|comision).")
-    col = "desc_meli" if field == "desc" else "comision_var"
+    if field not in ("desc", "comision", "desc_tn"):
+        raise HTTPException(400, "field inválido (desc|comision|desc_tn).")
+    col = {"desc": "desc_meli", "comision": "comision_var", "desc_tn": "desc_tn"}[field]
     rows = db_fetchall(
         f"SELECT sku, {col} AS v FROM product_sale_prices"
         " WHERE account_id=:a ORDER BY sku", {"a": account_id})
@@ -5497,7 +5553,8 @@ async def api_margen_export(request: Request, account_id: int, field: str = "des
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment
     from fastapi.responses import StreamingResponse
-    header2 = "Descuento %" if field == "desc" else "Comisión variable %"
+    header2 = {"desc": "Descuento %", "comision": "Comisión variable %",
+               "desc_tn": "Descuento TN %"}[field]
     wb = Workbook()
     ws = wb.active
     ws.title = "Cargados"
@@ -5517,7 +5574,8 @@ async def api_margen_export(request: Request, account_id: int, field: str = "des
     wb.save(buf)
     buf.seek(0)
     nick = (acc.get("nickname") or acc.get("ml_user_id") or "cuenta").replace(" ", "_")
-    base = "descuentos_meli" if field == "desc" else "comisiones_meli"
+    base = {"desc": "descuentos_meli", "comision": "comisiones_meli",
+            "desc_tn": "descuentos_tn"}[field]
     return StreamingResponse(
         buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{base}_{nick}.xlsx"'})
@@ -5526,7 +5584,8 @@ async def api_margen_export(request: Request, account_id: int, field: str = "des
 @app.get("/api/margen/{account_id:int}/export-list")
 async def api_margen_export_list(request: Request, account_id: int, view: str = "resumen"):
     """Descarga la tabla completa tal cual se muestra: Resumen (SKU, PVP Lista,
-    Desc, PVP MELI, % MELI) o MELI (desglose full hasta Renta Bruta)."""
+    Desc MELI, PVP MELI, % MELI, Desc TN, % TN), MELI (desglose full hasta
+    Renta Bruta) o TN (desglose del canal Tienda Nube)."""
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
@@ -5534,8 +5593,8 @@ async def api_margen_export_list(request: Request, account_id: int, view: str = 
     acc = _account_for_user(account_id, user_id)
     if not acc:
         raise HTTPException(404)
-    if view not in ("resumen", "meli"):
-        raise HTTPException(400, "view inválido (resumen|meli).")
+    if view not in ("resumen", "meli", "tn"):
+        raise HTTPException(400, "view inválido (resumen|meli|tn).")
     p = margen_get_config(account_id)
     cost_aid = _cost_account_id_for(user, account_id)
     versioned = db_get_product_costs(cost_aid)
@@ -5544,7 +5603,8 @@ async def api_margen_export_list(request: Request, account_id: int, view: str = 
     sales_aids = [a["id"] for a in get_visible_accounts(user_id, user)] or [account_id]
     envio_auto_map = _margen_envio_ponderado_map(sales_aids, p["envio_threshold"])
     rows = db_fetchall(
-        "SELECT sku, price, desc_meli, comision_var, costo_manual, tipo_publicacion, envio_manual"
+        "SELECT sku, price, desc_meli, desc_tn, comision_var, costo_manual,"
+        " tipo_publicacion, envio_manual"
         " FROM product_sale_prices WHERE account_id=:a ORDER BY sku", {"a": account_id})
     manual_map_u, variant_map_u, comvar_map_u, envio_manual_map_u = _margen_maps(rows, variant_map)
 
@@ -5556,11 +5616,15 @@ async def api_margen_export_list(request: Request, account_id: int, view: str = 
     ws = wb.active
     if view == "resumen":
         ws.title = "Resumen"
-        header = ["SKU", "PVP LISTA", "DESC MELI %", "PVP MELI", "% MELI"]
-    else:
+        header = ["SKU", "PVP LISTA", "DESC MELI %", "PVP MELI", "% MELI", "DESC TN %", "% TN"]
+    elif view == "meli":
         ws.title = "MELI"
         header = ["SKU", "Tipo Pub.", "PVP MELI", "PVP s/IVA", "Com. var %",
                   "Com. cuotas %", "Com. var $", "Com. fija $", "Envío $", "Cobro",
+                  "Costo s/IVA", "Renta %"]
+    else:
+        ws.title = "Tienda Nube"
+        header = ["SKU", "PVP TN", "PVP s/IVA", "Comisión $", "Envío $", "Cobro",
                   "Costo s/IVA", "Renta %"]
     ws.append(header)
     fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
@@ -5579,20 +5643,26 @@ async def api_margen_export_list(request: Request, account_id: int, view: str = 
         lista = float(r["price"]) if r["price"] is not None else None
         desc = float(r["desc_meli"]) if r["desc_meli"] is not None else None
         pvp_meli = _margen_pvp_meli(lista, desc)
-        tipo = _margen_tipo_resolve(sku, r["tipo_publicacion"])
-        ccf = _margen_com_cuotas_frac(tipo, p)
-        comvar = _margen_resolve_comvar(sku, comvar_map_u, variant_map_u)
-        envio_resolved, envio_is_manual = _margen_resolve_envio(
-            sku, envio_manual_map_u, envio_auto_map, variant_map_u)
-        comp = margen_compute(
-            pvp_meli, iva_rate, comvar, costo, p, ccf,
-            envio_manual=(envio_resolved if envio_is_manual else None),
-            envio_auto=(envio_resolved if not envio_is_manual else None))
-        renta_pct = round(comp["renta"] * 100, 2) if comp and comp["renta"] is not None else None
+        desc_tn = float(r["desc_tn"]) if r["desc_tn"] is not None else None
+        pvp_tn = _margen_pvp_meli(lista, desc_tn)
+        if view in ("resumen", "meli"):
+            tipo = _margen_tipo_resolve(sku, r["tipo_publicacion"])
+            ccf = _margen_com_cuotas_frac(tipo, p)
+            comvar = _margen_resolve_comvar(sku, comvar_map_u, variant_map_u)
+            envio_resolved, envio_is_manual = _margen_resolve_envio(
+                sku, envio_manual_map_u, envio_auto_map, variant_map_u)
+            comp = margen_compute(
+                pvp_meli, iva_rate, comvar, costo, p, ccf,
+                envio_manual=(envio_resolved if envio_is_manual else None),
+                envio_auto=(envio_resolved if not envio_is_manual else None))
+            renta_pct = round(comp["renta"] * 100, 2) if comp and comp["renta"] is not None else None
         if view == "resumen":
+            comp_tn = margen_compute_tn(pvp_tn, iva_rate, costo, p)
+            renta_tn_pct = round(comp_tn["renta"] * 100, 2) if comp_tn and comp_tn["renta"] is not None else None
             ws.append([sku, r2(lista), (round(desc * 100, 2) if desc is not None else None),
-                       r2(pvp_meli), renta_pct])
-        else:
+                       r2(pvp_meli), renta_pct,
+                       (round(desc_tn * 100, 2) if desc_tn is not None else None), renta_tn_pct])
+        elif view == "meli":
             if comp:
                 # Com. var $ = monto combinado (com var % + com cuotas %).
                 com_comb = r2(comp["comision_var_amt"] + comp["com_cuotas_amt"])
@@ -5604,6 +5674,15 @@ async def api_margen_export_list(request: Request, account_id: int, view: str = 
             else:
                 ws.append([sku, tipo, None, None, None, None, None, None, None, None,
                            r2(costo), None])
+        else:
+            comp_tn = margen_compute_tn(pvp_tn, iva_rate, costo, p)
+            if comp_tn:
+                renta_tn_pct = round(comp_tn["renta"] * 100, 2) if comp_tn["renta"] is not None else None
+                ws.append([sku, r2(pvp_tn), r2(comp_tn["pvp_sin_iva"]), r2(comp_tn["comision_amt"]),
+                           r2(comp_tn["envio_amt"]), r2(comp_tn["cobro"]),
+                           r2(comp_tn["costo_sin_iva"]), renta_tn_pct])
+            else:
+                ws.append([sku, None, None, None, None, None, r2(costo), None])
     for col in range(1, len(header) + 1):
         ws.column_dimensions[chr(64 + col)].width = 16
     ws.column_dimensions["A"].width = 22
