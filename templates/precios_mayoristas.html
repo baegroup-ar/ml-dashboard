@@ -56,6 +56,12 @@
     table.tiers-tbl .p-in { width: 90px; text-align: right; padding: 6px 8px; border: 1px solid #ddd; border-radius: 6px; font-size: 13px; }
     .param-hint { font-size: 11px; color: #999; margin-top: 8px; }
     details.params summary { cursor: pointer; font-size: 14px; font-weight: 600; color: #444; }
+    .tabs { display: flex; gap: 6px; margin-bottom: 14px; }
+    .tab-btn { padding: 8px 18px; border: 1px solid #ddd; border-radius: 8px; background: #fff; font-size: 13px; cursor: pointer; color: #444; }
+    .tab-btn.active { background: #005CFF; color: #fff; border-color: #005CFF; font-weight: 500; }
+    .btn-small { padding: 3px 10px; border: 1px solid #005CFF; border-radius: 6px; background: #fff; color: #005CFF; font-size: 11px; cursor: pointer; }
+    a.mla-link { color: #666; text-decoration: none; font-size: 11px; }
+    a.mla-link:hover { text-decoration: underline; }
   </style>
 </head>
 <body>
@@ -143,6 +149,11 @@
     </details>
   </div>
 
+  <div class="tabs">
+    <button class="tab-btn active" id="tab-sincargar" onclick="setTab('sincargar')">Sin cargar</button>
+    <button class="tab-btn" id="tab-cargado" onclick="setTab('cargado')">Cargado</button>
+  </div>
+
   <div class="card">
     <div class="bulk-bar">
       <span id="sel-count" class="bulk-count">0 seleccionados</span>
@@ -167,8 +178,17 @@
 <script>
 let ITEMS = [];
 let TIERS = [];
+let TAB = 'sincargar';
 const SEL = new Set();
 let currentAccountId = document.getElementById('account-select')?.value;
+
+function setTab(t) {
+  TAB = t;
+  document.getElementById('tab-sincargar').classList.toggle('active', t === 'sincargar');
+  document.getElementById('tab-cargado').classList.toggle('active', t === 'cargado');
+  renderThead();
+  renderTable();
+}
 
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 const fmt = n => (n == null || isNaN(n)) ? '<span class="muted">—</span>' : '$' + Number(n).toLocaleString('es-AR', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
@@ -241,14 +261,21 @@ function renderThead() {
   document.getElementById('thead-row').innerHTML = `<tr>
     <th style="width:30px;"><input type="checkbox" onchange="toggleAll(this)"></th>
     <th>SKU</th>
+    <th>MLA</th>
     <th class="num">PVP MELI</th>
     ${cols}
     <th>Estado</th>
+    ${TAB === 'cargado' ? '<th></th>' : ''}
   </tr>`;
 }
+// Sin cargar / Cargado: separa por si ML ya tiene ALGÚN tramo mayorista
+// cargado para esa publicación (has_wholesale), sin importar si coincide con
+// la config actual (eso lo indica el badge de Estado).
 function filtered() {
   const q = (document.getElementById('search')?.value || '').trim().toLowerCase();
-  return q ? ITEMS.filter(it => (it.sku || '').toLowerCase().includes(q)) : ITEMS;
+  let rows = ITEMS.filter(it => TAB === 'cargado' ? it.has_wholesale : !it.has_wholesale);
+  if (q) rows = rows.filter(it => (it.sku || '').toLowerCase().includes(q));
+  return rows;
 }
 function tierCell(it, t) {
   const row = (it.tiers || []).find(r => r.qty === t.qty);
@@ -269,15 +296,19 @@ function renderTable() {
   const rows = filtered();
   const n = rows.length;
   const el = document.getElementById('count-label');
-  if (el) el.textContent = n === ITEMS.length ? `${ITEMS.length} SKU` : `${n} de ${ITEMS.length} SKU`;
+  const total = ITEMS.length;
+  if (el) el.textContent = `${n} de ${total} publicación(es) (${TAB === 'cargado' ? 'cargado' : 'sin cargar'})`;
   const tb = document.getElementById('tbody-items');
+  const extraCol = TAB === 'cargado' ? 1 : 0;
   tb.innerHTML = rows.length ? rows.map(it => `<tr>
     <td><input type="checkbox" class="row-check" ${SEL.has(it.item_id) ? 'checked' : ''} onchange="onCheck('${esc(it.item_id)}', this.checked)"></td>
     <td><b>${esc(it.sku)}</b></td>
+    <td>${it.permalink ? `<a class="mla-link" href="${esc(it.permalink)}" target="_blank" rel="noopener">${esc(it.item_id)}</a>` : esc(it.item_id)}</td>
     <td class="num">${fmt(it.pvp_meli)}</td>
     ${TIERS.map(t => tierCell(it, t)).join('')}
     <td>${statusBadge(it)}</td>
-  </tr>`).join('') : `<tr><td colspan="${3 + TIERS.length + 1}" class="empty">${ITEMS.length ? 'Ningún SKU cumple el filtro.' : 'No hay SKU con PVP MELI y publicación activa correspondiente.'}</td></tr>`;
+    ${TAB === 'cargado' ? `<td><button class="btn-small" onclick="applyOne('${esc(it.item_id)}')">Actualizar</button></td>` : ''}
+  </tr>`).join('') : `<tr><td colspan="${4 + TIERS.length + 1 + extraCol}" class="empty">${total ? 'Ninguna publicación cumple el filtro.' : 'No hay SKU con PVP MELI y publicación activa correspondiente.'}</td></tr>`;
   updateSelCount();
 }
 
@@ -301,11 +332,10 @@ function updateSelCount() {
 }
 
 // ── Aplicar a ML ──
-async function applySelected() {
-  const itemIds = [...SEL];
+async function applyItemIds(itemIds, confirmMsg) {
   const msg = document.getElementById('apply-msg');
   if (!itemIds.length) { msg.textContent = 'No hay publicaciones seleccionadas.'; return; }
-  if (!confirm(`¿Aplicar la escala de ${TIERS.length} tramo(s) a ${itemIds.length} publicación(es) en Mercado Libre? Esto pisa cualquier tramo cargado a mano en ML para esas publicaciones.`)) return;
+  if (!confirm(confirmMsg)) return;
   msg.textContent = 'Aplicando en Mercado Libre...';
   try {
     const r = await fetch(`/api/precios-mayoristas/${currentAccountId}/apply`, {
@@ -317,6 +347,16 @@ async function applySelected() {
     msg.textContent = `Listo: ${j.updated} aplicado(s)${fails.length ? `, ${fails.length} con error (${fails.slice(0,3).map(f => f.sku + ': ' + f.error).join(' · ')})` : ''}.`;
     await loadAll(false);
   } catch (e) { msg.textContent = 'Error: ' + e.message; }
+}
+function applySelected() {
+  const itemIds = [...SEL];
+  applyItemIds(itemIds, `¿Aplicar la escala de ${TIERS.length} tramo(s) a ${itemIds.length} publicación(es) en Mercado Libre? Esto pisa cualquier tramo cargado a mano en ML para esas publicaciones.`);
+}
+// Actualización rápida de 1 publicación desde la solapa Cargado (por si
+// cambió el PVP MELI y hay que refrescar el precio mayorista ya cargado).
+function applyOne(itemId) {
+  const it = ITEMS.find(i => i.item_id === itemId);
+  applyItemIds([itemId], `¿Actualizar los tramos mayoristas de ${it ? it.sku : itemId} en Mercado Libre con el PVP MELI actual?`);
 }
 
 if (currentAccountId) loadAll(false);

@@ -9341,15 +9341,18 @@ async def _fetch_fotos_items(client, headers, item_ids: list) -> list:
 
 
 # ── Precios Mayoristas (Precio por Cantidad / PxQ de Mercado Libre) ───────
-def _wholesale_sku_item_map(catalog_items: list) -> dict:
-    """{SKU_UPPER: item_id}, primer match gana si hay SKU duplicado entre
-    publicaciones (no debería pasar, pero no es motivo para romper)."""
-    m: dict = {}
+def _wholesale_matches(catalog_items: list, price_by_sku_u: dict) -> list:
+    """Cruza el catálogo COMPLETO (todas las publicaciones activas) contra los
+    SKU con PVP cargado. Un mismo SKU puede tener varias publicaciones (MLA)
+    — NO se dedupea: cada MLA es su propia fila (el usuario carga el precio
+    mayorista publicación por publicación, no por SKU)."""
+    out = []
     for it in catalog_items:
         sku_u = (it.get("sku") or "").strip().upper()
-        if sku_u and sku_u not in m:
-            m[sku_u] = it["item_id"]
-    return m
+        if sku_u in price_by_sku_u:
+            out.append({"sku": it.get("sku") or "", "item_id": it["item_id"],
+                       "permalink": it.get("permalink") or ""})
+    return out
 
 
 def _wholesale_parse_prices(data: dict) -> dict:
@@ -9422,11 +9425,11 @@ async def precios_mayoristas_page(request: Request):
 
 @app.get("/api/precios-mayoristas/{account_id:int}/data")
 async def api_precios_mayoristas_data(request: Request, account_id: int):
-    """Universo = SKU con precio en la base PVP (product_sale_prices, mismo
-    criterio que Margen/Stock) cruzado por SKU exacto contra el catálogo de
-    publicaciones activas (_get_all_publicaciones): un SKU sin publicación
-    correspondiente no tiene nada que escribir en ML y queda afuera solo.
-    PVP MELI = price*(1-desc_meli), igual fórmula que Margen."""
+    """Universo = catálogo COMPLETO de publicaciones activas (_get_all_publicaciones)
+    cruzado por SKU exacto contra la base PVP (product_sale_prices, mismo
+    criterio que Margen/Stock). Cada publicación (MLA) es su propia fila —
+    un SKU con varias publicaciones aparece varias veces (no se dedupea). PVP
+    MELI = price*(1-desc_meli), igual fórmula que Margen."""
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
@@ -9437,39 +9440,41 @@ async def api_precios_mayoristas_data(request: Request, account_id: int):
     tiers = wholesale_get_config(account_id)
     rows = db_fetchall(
         "SELECT sku, price, desc_meli FROM product_sale_prices"
-        " WHERE account_id=:a AND price IS NOT NULL ORDER BY sku", {"a": account_id})
+        " WHERE account_id=:a AND price IS NOT NULL", {"a": account_id})
+    price_by_sku_u = {(r["sku"] or "").strip().upper(): r for r in rows}
     catalog = await _get_all_publicaciones(account_id, acc, force_refresh=refresh)
-    sku_to_item = _wholesale_sku_item_map(catalog)
+    raw_matches = _wholesale_matches(catalog, price_by_sku_u)
     matched = []
-    for r in rows:
-        item_id = sku_to_item.get((r["sku"] or "").strip().upper())
-        if not item_id:
-            continue
+    for m in raw_matches:
+        r = price_by_sku_u[(m["sku"] or "").strip().upper()]
         pvp_meli = _margen_pvp_meli(
             float(r["price"]) if r["price"] is not None else None,
             float(r["desc_meli"]) if r["desc_meli"] is not None else None)
         if not pvp_meli:
             continue
-        matched.append((r["sku"], item_id, pvp_meli))
+        matched.append({**m, "pvp_meli": pvp_meli})
     prices_map = await _fetch_wholesale_prices_map(
-        account_id, [iid for _, iid, _ in matched], force_refresh=refresh)
+        account_id, [m["item_id"] for m in matched], force_refresh=refresh)
     items = []
-    for sku, item_id, pvp_meli in matched:
-        pdata = prices_map.get(item_id) or {}
+    for m in matched:
+        pdata = prices_map.get(m["item_id"]) or {}
         current_tiers = pdata.get("tiers") or {}
+        has_wholesale = bool(current_tiers)
         row_tiers = []
-        in_sync = bool(current_tiers)
+        in_sync = has_wholesale
         for t in tiers:
-            target = round(pvp_meli * (1 - t["pct"]), 2)
+            target = round(m["pvp_meli"] * (1 - t["pct"]), 2)
             current = current_tiers.get(t["qty"])
             if current is None or abs(current - target) > 1:
                 in_sync = False
             row_tiers.append({"qty": t["qty"], "pct": t["pct"],
                               "current_amount": current, "target_amount": target})
         items.append({
-            "sku": sku, "item_id": item_id, "pvp_meli": pvp_meli,
-            "currency_id": pdata.get("currency_id"), "tiers": row_tiers, "in_sync": in_sync,
+            "sku": m["sku"], "item_id": m["item_id"], "permalink": m["permalink"],
+            "pvp_meli": m["pvp_meli"], "currency_id": pdata.get("currency_id"),
+            "tiers": row_tiers, "in_sync": in_sync, "has_wholesale": has_wholesale,
         })
+    items.sort(key=lambda it: (it["sku"] or "", it["item_id"]))
     return {"items": items, "config": {"tiers": tiers}, "defaults": {"tiers": WHOLESALE_DEFAULT_TIERS}}
 
 
@@ -9508,7 +9513,10 @@ async def api_precios_mayoristas_apply(request: Request, account_id: int):
         raise HTTPException(502)
     headers = {"Authorization": f"Bearer {token}"}
     catalog = await _get_all_publicaciones(account_id, acc)
-    item_to_sku = {v: k for k, v in _wholesale_sku_item_map(catalog).items()}
+    # item_id -> SKU directo del catálogo (1 a 1, no hace falta dedupear: cada
+    # item_id ya es único de por sí, a diferencia de _wholesale_matches que
+    # cruza en la otra dirección para /data).
+    item_to_sku = {it["item_id"]: (it.get("sku") or "").strip().upper() for it in catalog}
     rows = db_fetchall(
         "SELECT sku, price, desc_meli FROM product_sale_prices WHERE account_id=:a", {"a": account_id})
     row_by_sku_u = {(r["sku"] or "").strip().upper(): r for r in rows}
