@@ -48,6 +48,11 @@
     .tier-target.mid { color: #c47a1e; }
     .pos { color: #1a8a5a; } .mid { color: #c47a1e; } .neg { color: #c0392b; }
     .tier-ml { font-size: 10px; color: #999; }
+    /* Renta al lado del precio, chica: se entiende sin rotularla. */
+    .pct-inline { font-size: 10px; margin-left: 4px; font-weight: 400; }
+    /* Segunda línea de la celda: el precio que exige ML y su renta. */
+    .tier-max { font-size: 11px; color: #666; }
+    .tier-max .cap { color: #aaa; margin-right: 2px; }
     .bulk-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 12px; margin-bottom: 12px; background: #f7f9fc; border: 1px solid #e6ecf5; border-radius: 10px; font-size: 13px; }
     .bulk-bar .bulk-count { color: #005CFF; font-size: 12px; }
     .bulk-bar .sep { color: #ccc; }
@@ -268,28 +273,37 @@ const rentaCls = r => (r == null ? '' : (r < 0 ? 'neg' : (r < 0.10 ? 'mid' : 'po
 // (ML exige trasladar el ahorro de envío). "Sin exigencia" = ML no pide nada
 // para ese tramo (envío a cargo del comprador, o no devolvió peso/costo): ahí
 // el precio mayorista es libre, no hay nada que exceder.
+// Cuánto MÁS CARO está tu precio que el techo que acepta ML (fracción).
+// Positivo = tenés que bajar eso para que ML lo acepte. null = no hay techo.
+function simGap(t) {
+  if (!t || !t.exige || !t.precio_max_acumulado || t.target_escala == null) return null;
+  return t.target_escala / t.precio_max_acumulado - 1;
+}
+// Estado de un tramo: si ML no exige nada no se dice nada (no hay techo que
+// respetar). Si exige, "OK" cuando tu precio entra, o cuánto falta bajar.
 function simEstado(t) {
   if (t.sin_dato) return { label: 'Sin dato', cls: 'mid' };
-  if (!t.exige) return { label: 'Sin exigencia', cls: 'muted' };
-  return t.cumple ? { label: 'Cumple', cls: 'pos' } : { label: 'Excede', cls: 'neg' };
+  if (!t.exige) return { label: '', cls: 'muted' };
+  const gap = simGap(t);
+  if (t.cumple || gap == null || gap <= 0) return { label: 'OK', cls: 'pos' };
+  return { label: '+' + pctPlain(gap), cls: 'neg' };
 }
 function renderSim(j) {
   const shipNote = j.shipping.applies
     ? `Envío 1 un.: <b>${fmt(j.shipping.base_cost)}</b> · Peso facturable: <b>${j.shipping.billable_weight} g</b>`
     : `<span class="badge gray">Sin exigencia de ML</span> ${esc(j.shipping.reason || '')}`;
   const m = j.margen || {};
+  // Cada precio va con su renta al lado, en chico: no hace falta rotularla.
   const rows = (j.tiers || []).map(t => `<tr>
       <td><b>${t.qty}+ un.</b></td>
       <td class="num">${fmt(t.ship_cost)}<div class="tier-ml">${fmt(t.ship_cost_unit)}/un.</div></td>
       <td class="num">${fmt(t.saving_per_unit)}</td>
-      <td class="num"><b>${fmt(t.precio_max_acumulado)}</b>
-        <div class="tier-ml ${rentaCls(t.renta_max_ml)}">renta ${pct(t.renta_max_ml)}</div></td>
+      <td class="num"><b>${t.exige ? priceRenta(t.precio_max_acumulado, t.renta_max_ml) : '<span class="muted">—</span>'}</b></td>
       <td class="num">${t.pct_necesario != null ? t.pct_necesario.toFixed(2) + '%' : '<span class="muted">—</span>'}</td>
-      <td class="num">${fmt(t.target_escala)} <span class="muted">(${(t.pct*100).toFixed(1)}%)</span>
-        <div class="tier-ml ${rentaCls(t.renta_escala)}">renta ${pct(t.renta_escala)}</div></td>
+      <td class="num">${priceRenta(t.target_escala, t.renta_escala)}
+        <div class="tier-ml">${(t.pct*100).toFixed(1)}% de desc.</div></td>
       <td class="num ${simEstado(t).cls}"><b>${simEstado(t).label}</b></td>
-      <td class="num">${fmt(t.cargado_en_ml)}
-        ${t.cargado_en_ml != null ? `<div class="tier-ml ${rentaCls(t.renta_cargado)}">renta ${pct(t.renta_cargado)}</div>` : ''}</td>
+      <td class="num">${t.cargado_en_ml != null ? priceRenta(t.cargado_en_ml, t.renta_cargado) : '<span class="muted">—</span>'}</td>
     </tr>`).join('');
   const maxPct = Math.max(...(j.tiers || []).map(t => t.pct_necesario || 0));
   const sugerencia = j.shipping.applies && isFinite(maxPct) && maxPct > 0
@@ -314,7 +328,7 @@ function renderSim(j) {
           <th class="num">Techo real (ML)</th>
           <th class="num">Desc. necesario</th>
           <th class="num">Tu escala</th>
-          <th class="num">¿Pasa?</th>
+          <th class="num" title="OK = tu precio entra en lo que ML acepta. Si no, cuánto más caro está: eso es lo que hay que bajar. Vacío = ML no exige nada en ese tramo.">Estado</th>
           <th class="num">Cargado en ML</th>
         </tr></thead>
         <tbody>${rows}</tbody>
@@ -369,16 +383,19 @@ async function runSimAll() {
   }
 }
 // Estado global de la fila: alcanza con que UN tramo exceda para que la
-// publicación no se pueda cargar tal cual está configurada.
+// publicación no se pueda cargar tal cual está configurada. Cuando excede se
+// muestra el PEOR desvío (cuánto hay que bajar para que entren todos los
+// tramos); si ML no exige nada en ninguno, no se dice nada.
 function simAllRowState(it) {
   const tiers = it.tiers || [];
   if (it.error) return { label: 'Error', cls: 'neg' };
   if (!tiers.some(t => t.exige)) {
     return tiers.some(t => t.sin_dato) ? { label: 'Sin dato', cls: 'mid' }
-                                       : { label: 'Sin exigencia', cls: 'muted' };
+                                       : { label: '', cls: 'muted' };
   }
-  const fails = tiers.filter(t => t.exige && !t.cumple).length;
-  return fails ? { label: `Excede ${fails}`, cls: 'neg' } : { label: 'Cumple', cls: 'pos' };
+  const gaps = tiers.filter(t => t.exige && !t.cumple).map(simGap).filter(g => g != null && g > 0);
+  return gaps.length ? { label: '+' + pctPlain(Math.max(...gaps)), cls: 'neg' }
+                     : { label: 'OK', cls: 'pos' };
 }
 function renderSimAll() {
   const onlyFail = document.getElementById('simall-only-fail')?.checked;
@@ -389,18 +406,23 @@ function renderSimAll() {
     <th class="num" title="Costo de envío de 1 unidad (lo que paga el vendedor)">Envío 1 un.</th>
     <th class="num" title="Renta al PVP MELI con el envío de 1 unidad — igual que Margen → MELI">Renta 1 un.</th>
     ${TIERS.map(t => `<th class="num">${t.qty}+ un. (${(t.pct * 100).toFixed(1)}%)</th>`).join('')}
-    <th class="num">Estado</th>
+    <th class="num" title="OK = todos los tramos entran en lo que ML acepta. Si no, el peor desvío: cuánto hay que bajar para que entren. Vacío = ML no exige nada en esta publicación.">Estado</th>
   </tr>` : '';
   document.getElementById('simall-tbody').innerHTML = rows.length ? rows.map(it => {
     const st = simAllRowState(it);
+    // Arriba, tu precio con su renta. Abajo (solo si ML exige algo en ese
+    // tramo) el precio máximo que acepta ML con la renta que dejaría.
     const cells = TIERS.map(cfg => {
       const t = (it.tiers || []).find(x => x.qty === cfg.qty);
       if (!t) return '<td class="num muted">—</td>';
       const e = simEstado(t);
-      return `<td class="num" title="Techo real de ML: ${t.precio_max_acumulado == null ? 'sin exigencia' : fmtPlain(t.precio_max_acumulado)}">
-        ${fmt(t.target_escala)}
-        <div class="tier-ml ${rentaCls(t.renta_escala)}">renta ${pct(t.renta_escala)}</div>
-        <div class="tier-ml ${e.cls}">${e.label}</div></td>`;
+      const linea2 = t.sin_dato
+        ? `<div class="tier-max mid">sin dato de envío</div>`
+        : (t.exige
+            ? `<div class="tier-max ${e.cls === 'neg' ? 'neg' : ''}"><span class="cap">máx ML</span>${priceRenta(t.precio_max_acumulado, t.renta_max_ml)}</div>`
+            : '');
+      return `<td class="num" title="Tu escala: ${(cfg.pct * 100).toFixed(1)}% sobre el PVP MELI">
+        <div class="tier-target">${priceRenta(t.target_escala, t.renta_escala)}</div>${linea2}</td>`;
     }).join('');
     return `<tr>
       <td>${mlaCell(it)}</td>
@@ -413,7 +435,6 @@ function renderSimAll() {
     </tr>`;
   }).join('') : (SIMALL.length ? `<tr><td colspan="${6 + TIERS.length}" class="empty">Ninguna publicación excede el techo de ML.</td></tr>` : '');
 }
-const fmtPlain = n => (n == null || isNaN(n)) ? '—' : '$' + Number(n).toLocaleString('es-AR', { maximumFractionDigits: 0 });
 function exportSimAll() {
   if (!SIMALL.length) { document.getElementById('simall-msg').textContent = 'Simulá primero.'; return; }
   const head = ['MLA', 'SKU', 'PVP MELI', 'Envio 1 un', 'Renta 1 un']
@@ -442,7 +463,12 @@ function exportSimAll() {
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 const fmt = n => (n == null || isNaN(n)) ? '<span class="muted">—</span>' : '$' + Number(n).toLocaleString('es-AR', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
 // Fracción (0.16) → "16,0%". Mismo formato que Margen.
-const pct = n => (n == null || isNaN(n)) ? '<span class="muted">—</span>' : (Number(n) * 100).toLocaleString('es-AR', { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + '%';
+const pct = n => (n == null || isNaN(n)) ? '<span class="muted">—</span>' : pctPlain(n);
+const pctPlain = n => (Number(n) * 100).toLocaleString('es-AR', { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + '%';
+// Precio con su renta al lado, chiquita. Sin rótulo: el % que sigue a un
+// precio es siempre la renta de ese precio.
+const priceRenta = (price, renta, cls) =>
+  `${fmt(price)}${renta == null ? '' : `<span class="pct-inline ${cls || rentaCls(renta)}">${pctPlain(renta)}</span>`}`;
 
 function onAccountChange() {
   currentAccountId = document.getElementById('account-select').value;
