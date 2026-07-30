@@ -12506,6 +12506,34 @@ async def debug_item_full(request: Request, account_ref: str):
         }
 
 
+@app.get("/api/debug/wholesale-probe/{account_ref}/{item_id}")
+async def debug_wholesale_probe(request: Request, account_ref: str, item_id: str):
+    """Devuelve el JSON crudo de GET /items/{id}/prices para inspeccionar por
+    qué _wholesale_parse_prices no está detectando tramos que sí existen en
+    ML (temporal, para debug de Precios Mayoristas)."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = db_fetchone(
+        "SELECT * FROM ml_accounts WHERE user_id=:uid AND (CAST(id AS TEXT)=:ref OR ml_user_id=:ref)",
+        {"uid": user_id, "ref": account_ref},
+    )
+    if not acc:
+        raise HTTPException(404)
+    token = await refresh_ml_token(acc["id"])
+    if not token:
+        raise HTTPException(502)
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get(f"{ML_API_URL}/items/{item_id}/prices", headers=headers)
+        parsed = _wholesale_parse_prices(r.json()) if r.status_code == 200 else None
+    return {
+        "item_id": item_id, "status": r.status_code,
+        "raw": r.json() if r.status_code == 200 else r.text[:2000],
+        "parsed_by_our_code": parsed,
+    }
+
+
 @app.get("/api/debug/promos/{account_ref}")
 async def debug_promos(request: Request, account_ref: str):
     """Prueba múltiples endpoints de promos y devuelve los resultados crudos.
