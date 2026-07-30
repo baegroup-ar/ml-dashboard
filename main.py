@@ -12537,8 +12537,14 @@ async def debug_wholesale_probe(request: Request, account_ref: str, item_id: str
         ri = await client.get(f"{ML_API_URL}/items/{item_id}", headers=headers,
                               params={"attributes": "id,tags,price,base_price"})
         tags = ri.json().get("tags") if ri.status_code == 200 else None
+        # Prueba: GET no documentado sobre el mismo sub-path que usa el POST de
+        # escritura, por si expone específicamente los tramos PxQ.
+        rq = await client.get(f"{ML_API_URL}/items/{item_id}/prices/standard/quantity", headers=headers)
+        quantity_endpoint = {"status": rq.status_code,
+                             "body": rq.json() if rq.status_code == 200 else rq.text[:1000]}
     return {
         "item_id": item_id, "context_sent": context or None, "status": r.status_code,
+        "quantity_endpoint_probe": quantity_endpoint,
         "raw": r.json() if r.status_code == 200 else r.text[:2000],
         "parsed_by_our_code": parsed,
         "item_tags": tags, "has_pxq_tag": ("standard_price_by_quantity" in (tags or [])),
