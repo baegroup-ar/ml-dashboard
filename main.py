@@ -9501,18 +9501,26 @@ async def api_precios_mayoristas_data(request: Request, account_id: int):
 
     "Cargado"/"in_sync" se calculan contra el estado REAL de ML: los tramos se
     leen con el header `show-all-prices: true` (sin él, ML oculta los nodos de
-    Precio por Cantidad — ver WHOLESALE_SHOW_ALL_HEADER)."""
+    Precio por Cantidad — ver WHOLESALE_SHOW_ALL_HEADER).
+
+    OJO con las cuentas: el CATÁLOGO sale de la cuenta elegida en el selector,
+    pero el PVP/desc_meli se lee SIEMPRE de la cuenta de Margen
+    (_margen_account_id) — product_sale_prices es por cuenta y toda la base de
+    Margen vive bajo TIENDA BAE, así que leerla con el account_id de esta
+    pantalla dejaba BAETECH/LAMUS en cero."""
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
+    user = get_user(user_id)
     acc = _account_for_user(account_id, user_id)
     if not acc:
         raise HTTPException(404)
     refresh = (request.query_params.get("refresh") in ("1", "true", "yes"))
     tiers = wholesale_get_config(account_id)
+    margen_aid = _margen_account_id(get_visible_accounts(user_id, user)) or account_id
     rows = db_fetchall(
         "SELECT sku, price, desc_meli FROM product_sale_prices"
-        " WHERE account_id=:a AND price IS NOT NULL", {"a": account_id})
+        " WHERE account_id=:a AND price IS NOT NULL", {"a": margen_aid})
     price_by_sku_u = {(r["sku"] or "").strip().upper(): r for r in rows}
     catalog = await _get_all_publicaciones(account_id, acc, force_refresh=refresh)
     raw_matches = _wholesale_matches(catalog, price_by_sku_u)
@@ -9573,10 +9581,14 @@ async def api_precios_mayoristas_apply(request: Request, account_id: int):
     SIEMPRE el set completo de tramos SIN `id` (todos nuevos): ML borra
     cualquier tramo existente que no se referencie por id, así que esta
     pantalla queda como fuente de verdad de la escala completa (pisa
-    cualquier tramo cargado a mano en ML que no coincida con la config)."""
+    cualquier tramo cargado a mano en ML que no coincida con la config).
+
+    Igual que /data: el catálogo sale de la cuenta elegida, pero el PVP se lee
+    de la cuenta de Margen (_margen_account_id)."""
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
+    user = get_user(user_id)
     acc = _account_for_user(account_id, user_id)
     if not acc:
         raise HTTPException(404)
@@ -9595,8 +9607,9 @@ async def api_precios_mayoristas_apply(request: Request, account_id: int):
     # _wholesale_matches que cruza en la otra dirección para /data).
     item_to_sku = {it["item_id"]: (it.get("sku") or "").strip().upper() for it in catalog}
     item_to_currency = {it["item_id"]: it.get("currency_id") for it in catalog}
+    margen_aid = _margen_account_id(get_visible_accounts(user_id, user)) or account_id
     rows = db_fetchall(
-        "SELECT sku, price, desc_meli FROM product_sale_prices WHERE account_id=:a", {"a": account_id})
+        "SELECT sku, price, desc_meli FROM product_sale_prices WHERE account_id=:a", {"a": margen_aid})
     row_by_sku_u = {(r["sku"] or "").strip().upper(): r for r in rows}
     results = []
     sem = asyncio.Semaphore(8)
