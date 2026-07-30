@@ -9464,6 +9464,83 @@ async def _fetch_wholesale_prices_map(account_id: int, item_ids: list, force_ref
     return by_item
 
 
+# Costo de envío por peso: ML lo tarifa por `billable_weight`, así que el costo
+# de un paquete de N unidades = costo(peso_unitario × N). Cachea por
+# (peso, tipo de publicación, categoría, logística) porque muchísimas
+# publicaciones comparten la misma combinación.
+_WHOLESALE_SHIP_COST_CACHE: dict = {}
+
+
+async def _wholesale_ship_cost(client, headers, seller_id, item, weight_grams):
+    """list_cost (lo que paga el vendedor) para un paquete de `weight_grams`.
+    Volumen mínimo (1x1x1) para que mande el peso real y no el volumétrico —
+    igual criterio que usa ML al consolidar unidades del mismo ítem."""
+    shp = item.get("shipping") or {}
+    key = (round(weight_grams), item.get("listing_type_id"), item.get("category_id"),
+           shp.get("logistic_type"), shp.get("mode"))
+    if key in _WHOLESALE_SHIP_COST_CACHE:
+        return _WHOLESALE_SHIP_COST_CACHE[key]
+    try:
+        r = await client.get(
+            f"{ML_API_URL}/users/{seller_id}/shipping_options/free", headers=headers,
+            params={"dimensions": f"1x1x1,{weight_grams:g}", "item_price": item.get("price"),
+                    "listing_type_id": item.get("listing_type_id"),
+                    "mode": shp.get("mode") or "me2", "condition": item.get("condition") or "new",
+                    "logistic_type": shp.get("logistic_type") or "cross_docking",
+                    "category_id": item.get("category_id"),
+                    "free_shipping": "true", "verbose": "true"})
+        if r.status_code != 200:
+            return None
+        cost = float(((r.json().get("coverage") or {}).get("all_country") or {}).get("list_cost"))
+    except (TypeError, ValueError, AttributeError, KeyError):
+        return None
+    except Exception:
+        return None
+    _WHOLESALE_SHIP_COST_CACHE[key] = cost
+    return cost
+
+
+async def wholesale_shipping_analysis(client, headers, seller_id, item, qtys: list) -> dict:
+    """Réplica de la validación de ML para Precio por Cantidad.
+
+    ML exige que el precio mayorista traslade al comprador el ahorro de envío
+    que genera despachar N unidades en un solo paquete:
+        ahorro_unitario(N) = costo_envio(1) - costo_envio(N)/N
+        precio_maximo(N)   = PVP - ahorro_unitario(N)
+    Verificado al centavo contra los avisos de la UI de ML en publicaciones
+    reales (2/3/5/10/15 unidades).
+
+    Solo aplica cuando el ENVÍO LO PAGA EL VENDEDOR (envío gratis): si lo paga
+    el comprador no hay ahorro que trasladar y ML no exige nada.
+    """
+    shp = item.get("shipping") or {}
+    if not shp.get("free_shipping"):
+        return {"applies": False, "reason": "El envío lo paga el comprador: ML no exige descuento por cantidad.",
+                "base_cost": None, "billable_weight": None, "tiers": {}}
+    r = await client.get(
+        f"{ML_API_URL}/users/{seller_id}/shipping_options/free", headers=headers,
+        params={"item_id": item.get("id"), "free_shipping": "true", "verbose": "true"})
+    if r.status_code != 200:
+        return {"applies": False, "reason": f"No se pudo consultar el envío (HTTP {r.status_code}).",
+                "base_cost": None, "billable_weight": None, "tiers": {}}
+    cov = ((r.json().get("coverage") or {}).get("all_country") or {})
+    try:
+        base_cost = float(cov.get("list_cost"))
+        weight = float(cov.get("billable_weight"))
+    except (TypeError, ValueError):
+        return {"applies": False, "reason": "ML no devolvió peso/costo para esta publicación.",
+                "base_cost": None, "billable_weight": None, "tiers": {}}
+    out = {}
+    for qty in qtys:
+        cost_n = await _wholesale_ship_cost(client, headers, seller_id, item, weight * qty)
+        if cost_n is None:
+            out[qty] = {"ship_cost": None, "saving_per_unit": None}
+            continue
+        out[qty] = {"ship_cost": cost_n, "saving_per_unit": round(base_cost - cost_n / qty, 2)}
+    return {"applies": True, "reason": None, "base_cost": base_cost,
+            "billable_weight": weight, "tiers": out}
+
+
 def wholesale_applied_upsert(account_id: int, item_id: str, sku: str, tiers: dict, currency_id: str) -> None:
     db_execute(
         "INSERT INTO wholesale_applied (account_id, item_id, sku, tiers, currency_id, applied_at)"
@@ -12657,54 +12734,38 @@ async def debug_wholesale_probe(request: Request, account_ref: str, item_id: str
             "category_id": item.get("category_id"), "package_attributes": pkg_attrs,
             "user_product_id": item.get("user_product_id"),
         }
-        # a) costo de envío del vendedor usando item_id (1 unidad, referencia)
-        rsf = await client.get(
-            f"{ML_API_URL}/users/{acc['ml_user_id']}/shipping_options/free",
-            headers=headers, params={"item_id": item_id, "verbose": "true", "free_shipping": "true"})
-        out["shipping_free_by_item"] = {"status": rsf.status_code,
-                                        "body": rsf.json() if rsf.status_code == 200 else rsf.text[:400]}
-        # b) Costo por cantidad escalando el PESO FACTURABLE. La respuesta de
-        # shipping_options/free trae `billable_weight` (el peso que ML realmente
-        # usa para tarifar, ya resuelto por él aunque el ítem no tenga
-        # dimensiones propias). Pedimos el costo para billable_weight × N con un
-        # volumen mínimo, para que mande el peso y no el volumétrico.
-        bw = None
-        if rsf.status_code == 200:
-            try:
-                bw = float((rsf.json().get("coverage") or {}).get("all_country", {}).get("billable_weight"))
-            except (TypeError, ValueError, AttributeError):
-                bw = None
-        out["billable_weight_1u"] = bw
-        by_qty = {}
-        if bw:
-            base_params = {
-                "item_price": item.get("price"), "listing_type_id": item.get("listing_type_id"),
-                "mode": shp.get("mode") or "me2", "condition": item.get("condition") or "new",
-                "logistic_type": shp.get("logistic_type") or "cross_docking",
-                "category_id": item.get("category_id"),
-                "free_shipping": "true", "verbose": "true",
-            }
-            for qty in (1, 2, 3, 5, 10, 15):
-                dim_str = f"1x1x1,{bw * qty:g}"
-                rsh = await client.get(
-                    f"{ML_API_URL}/users/{acc['ml_user_id']}/shipping_options/free",
-                    headers=headers, params={**base_params, "dimensions": dim_str})
-                by_qty[qty] = {"dimensions_sent": dim_str, "status": rsh.status_code,
-                               "body": rsh.json() if rsh.status_code == 200 else rsh.text[:300]}
-        out["shipping_cost_by_quantity"] = by_qty
-        # c) ¿shipping_options acepta `quantity`? (no documentado, pero el
-        # checkout tiene que cotizar carritos de N unidades de algún modo)
-        quantity_probe = {}
-        for qty in (1, 5):
-            rq = await client.get(
-                f"{ML_API_URL}/items/{item_id}/shipping_options", headers=headers,
-                params={"zip_code": "1425", "quantity": qty})
-            body = rq.json() if rq.status_code == 200 else rq.text[:300]
-            if isinstance(body, dict) and body.get("options"):
-                body = [{"name": o.get("name"), "cost": o.get("cost"),
-                         "list_cost": o.get("list_cost")} for o in body["options"][:3]]
-            quantity_probe[qty] = {"status": rq.status_code, "options": body}
-        out["shipping_options_quantity_probe"] = quantity_probe
+        # b) Análisis de envío con la MISMA función que va a usar la simulación
+        # real, y comparación contra los tramos que ML tiene cargados hoy.
+        qtys = [t["qty"] for t in wholesale_get_config(acc["id"])]
+        analysis = await wholesale_shipping_analysis(
+            client, headers, acc["ml_user_id"], item, qtys)
+        out["shipping_analysis"] = analysis
+        # PVP vigente = el precio de venta actual de 1 unidad (con promo si la hay)
+        pvp = None
+        try:
+            pvp = float(sale_prices[1]["body"]["amount"])
+        except (KeyError, TypeError, ValueError):
+            pass
+        ml_now = _wholesale_parse_prices(out["prices_show_all"]["body"]).get("tiers") or {}
+        comparison = {}
+        if analysis.get("applies") and pvp:
+            for qty in qtys:
+                info = (analysis.get("tiers") or {}).get(qty) or {}
+                saving = info.get("saving_per_unit")
+                if saving is None:
+                    continue
+                max_price = round(pvp - saving, 2)
+                actual = ml_now.get(qty)
+                comparison[qty] = {
+                    "costo_envio_paquete": info.get("ship_cost"),
+                    "ahorro_por_unidad": saving,
+                    "precio_maximo_ml": max_price,
+                    "precio_cargado_hoy": actual,
+                    "cumple": (actual is not None and actual <= max_price + 0.01),
+                    "desc_necesario_pct": round((1 - max_price / pvp) * 100, 2) if pvp else None,
+                }
+        out["pvp_vigente"] = pvp
+        out["comparacion_vs_ml"] = comparison
     return out
 
 
