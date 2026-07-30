@@ -52,6 +52,10 @@ PROMO_LIST_CACHE: dict[int, dict] = {}
 # datos cambian poco; el botón "Cargar publicaciones" fuerza refresh.
 PUBLICACIONES_CACHE_TTL_SECONDS = 600
 PUBLICACIONES_CACHE: dict[int, dict] = {}
+# Precios Mayoristas (PxQ): GET /items/{id}/prices es 1 request por ítem (sin
+# multiget), así que se cachea por cuenta igual que el catálogo de arriba.
+WHOLESALE_PRICES_CACHE_TTL_SECONDS = 600
+WHOLESALE_PRICES_CACHE: dict[int, dict] = {}
 # Mínimo de descuento MÁS BAJO que ML reportó alguna vez por (promo, item).
 # La API de ML para campañas FLEXIBLE_PERCENTAGE es eventualmente consistente:
 # devuelve un `max_discounted_price` distinto entre llamadas (a veces 10%, a
@@ -9376,9 +9380,9 @@ def _wholesale_matches(catalog_items: list, price_by_sku_u: dict) -> list:
 
 def wholesale_applied_get(account_id: int) -> dict:
     """{item_id: {"tiers": {qty:amount}, "currency_id":..., "applied_at":...}}
-    — lo que el panel efectivamente mandó a ML la última vez para cada
-    publicación (ver nota en init_db sobre por qué no leemos el estado real
-    de ML)."""
+    — lo que el panel mandó a ML la última vez. Se conserva como historial
+    (para mostrar "aplicado el ..."), pero el estado que manda es el REAL de
+    ML (ver _fetch_wholesale_prices_map)."""
     rows = db_fetchall(
         "SELECT item_id, tiers, currency_id, applied_at FROM wholesale_applied WHERE account_id=:a",
         {"a": account_id})
@@ -9390,6 +9394,74 @@ def wholesale_applied_get(account_id: int) -> dict:
             tiers = {}
         out[r["item_id"]] = {"tiers": tiers, "currency_id": r["currency_id"], "applied_at": r["applied_at"]}
     return out
+
+
+# Sin este header, GET /items/{id}/prices devuelve SOLO el precio base y las
+# promociones: los nodos de Precio por Cantidad (mayorista) quedan ocultos.
+# Documentado recién en la guía de "Precios netos por cantidad" y confirmado
+# contra publicaciones reales.
+WHOLESALE_SHOW_ALL_HEADER = {"show-all-prices": "true"}
+
+
+def _wholesale_parse_prices(data: dict) -> dict:
+    """GET /items/{id}/prices (con show-all-prices) → {"currency_id":...,
+    "tiers": {qty: amount}}. El nodo `standard` sin `min_purchase_unit` es el
+    precio base (da la moneda); cada tramo mayorista es otro nodo `standard`
+    con `conditions.min_purchase_unit` y `user_type_business`."""
+    out = {"currency_id": None, "tiers": {}}
+    for node in (data.get("prices") or []):
+        if not isinstance(node, dict) or node.get("type") != "standard":
+            continue
+        cond = node.get("conditions") or {}
+        min_unit = cond.get("min_purchase_unit")
+        if min_unit is None:
+            if out["currency_id"] is None:
+                out["currency_id"] = node.get("currency_id")
+            continue
+        if "user_type_business" in (cond.get("context_restrictions") or []):
+            try:
+                out["tiers"][int(min_unit)] = float(node.get("amount"))
+            except (TypeError, ValueError):
+                pass
+    return out
+
+
+async def _fetch_wholesale_prices_map(account_id: int, item_ids: list, force_refresh: bool = False) -> dict:
+    """{item_id: {"currency_id":..., "tiers": {qty:amount}}} leído de ML.
+    GET /items/{id}/prices no tiene multiget (1 request por ítem), así que se
+    cachea por cuenta con TTL, igual patrón que PUBLICACIONES_CACHE. Reintento
+    con backoff ante 429/5xx: con catálogos grandes, sin retry ML rate-limitea
+    parte de los GET y esos ítems se verían como "sin cargar"."""
+    cached = WHOLESALE_PRICES_CACHE.get(account_id) if not force_refresh else None
+    if cached and (datetime.utcnow() - cached["at"]).total_seconds() < WHOLESALE_PRICES_CACHE_TTL_SECONDS:
+        return cached["by_item"]
+    token = await refresh_ml_token(account_id)
+    if not token:
+        raise HTTPException(502)
+    headers = {"Authorization": f"Bearer {token}", **WHOLESALE_SHOW_ALL_HEADER}
+    by_item: dict = {}
+    sem = asyncio.Semaphore(20)
+    async with httpx.AsyncClient(timeout=30) as client:
+        async def fetch_one(item_id):
+            async with sem:
+                for attempt in range(3):
+                    try:
+                        r = await client.get(f"{ML_API_URL}/items/{item_id}/prices", headers=headers)
+                    except Exception:
+                        if attempt < 2:
+                            await asyncio.sleep(0.4 * (2 ** attempt))
+                            continue
+                        return
+                    if r.status_code == 200:
+                        by_item[item_id] = _wholesale_parse_prices(r.json())
+                        return
+                    if r.status_code in (429, 500, 502, 503, 504) and attempt < 2:
+                        await asyncio.sleep(0.4 * (2 ** attempt))
+                        continue
+                    return
+        await asyncio.gather(*[fetch_one(iid) for iid in item_ids])
+    WHOLESALE_PRICES_CACHE[account_id] = {"at": datetime.utcnow(), "by_item": by_item}
+    return by_item
 
 
 def wholesale_applied_upsert(account_id: int, item_id: str, sku: str, tiers: dict, currency_id: str) -> None:
@@ -9427,10 +9499,9 @@ async def api_precios_mayoristas_data(request: Request, account_id: int):
     un SKU con varias publicaciones aparece varias veces (no se dedupea). PVP
     MELI = price*(1-desc_meli), igual fórmula que Margen.
 
-    "Cargado"/"in_sync" NO se calculan contra el estado real de ML (la API
-    pública no expone los tramos de Precio por Cantidad vía GET, confirmado
-    con varios ítems reales): se comparan contra lo que este panel mandó la
-    última vez (`wholesale_applied`). Ver nota en init_db."""
+    "Cargado"/"in_sync" se calculan contra el estado REAL de ML: los tramos se
+    leen con el header `show-all-prices: true` (sin él, ML oculta los nodos de
+    Precio por Cantidad — ver WHOLESALE_SHOW_ALL_HEADER)."""
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
@@ -9445,31 +9516,40 @@ async def api_precios_mayoristas_data(request: Request, account_id: int):
     price_by_sku_u = {(r["sku"] or "").strip().upper(): r for r in rows}
     catalog = await _get_all_publicaciones(account_id, acc, force_refresh=refresh)
     raw_matches = _wholesale_matches(catalog, price_by_sku_u)
-    applied_map = wholesale_applied_get(account_id)
-    items = []
+    matched = []
     for m in raw_matches:
         r = price_by_sku_u[(m["sku"] or "").strip().upper()]
         pvp_meli = _margen_pvp_meli(
             float(r["price"]) if r["price"] is not None else None,
             float(r["desc_meli"]) if r["desc_meli"] is not None else None)
-        if not pvp_meli:
-            continue
-        applied = applied_map.get(m["item_id"])
-        applied_tiers = (applied or {}).get("tiers") or {}
-        has_wholesale = applied is not None
+        if pvp_meli:
+            matched.append({**m, "pvp_meli": pvp_meli})
+    prices_map = await _fetch_wholesale_prices_map(
+        account_id, [m["item_id"] for m in matched], force_refresh=refresh)
+    applied_map = wholesale_applied_get(account_id)
+    items = []
+    for m in matched:
+        ml_tiers = (prices_map.get(m["item_id"]) or {}).get("tiers") or {}
+        has_wholesale = bool(ml_tiers)
         row_tiers = []
         in_sync = has_wholesale
         for t in tiers:
-            target = round(pvp_meli * (1 - t["pct"]), 2)
-            current = applied_tiers.get(t["qty"])
+            target = round(m["pvp_meli"] * (1 - t["pct"]), 2)
+            current = ml_tiers.get(t["qty"])
             if current is None or abs(current - target) > 1:
                 in_sync = False
             row_tiers.append({"qty": t["qty"], "pct": t["pct"],
                               "current_amount": current, "target_amount": target})
+        # Tramos que ML tiene cargados pero que NO están en la escala configurada
+        # (ej. cargados a mano en ML con otra cantidad mínima).
+        extra_qtys = sorted(q for q in ml_tiers if q not in {t["qty"] for t in tiers})
+        applied = applied_map.get(m["item_id"])
         items.append({
             "sku": m["sku"], "item_id": m["item_id"], "permalink": m["permalink"],
-            "pvp_meli": pvp_meli, "currency_id": m.get("currency_id"),
+            "pvp_meli": m["pvp_meli"], "currency_id": m.get("currency_id"),
             "tiers": row_tiers, "in_sync": in_sync, "has_wholesale": has_wholesale,
+            "extra_tiers": [{"qty": q, "amount": ml_tiers[q]} for q in extra_qtys],
+            "applied_at": (applied or {}).get("applied_at"),
         })
     items.sort(key=lambda it: (it["sku"] or "", it["item_id"]))
     return {"items": items, "config": {"tiers": tiers}, "defaults": {"tiers": WHOLESALE_DEFAULT_TIERS}}
@@ -9566,9 +9646,20 @@ async def api_precios_mayoristas_apply(request: Request, account_id: int):
                     results.append({"item_id": item_id, "sku": sku_u, "ok": False, "error": str(e)[:200]})
                     return
                 if r.status_code in (200, 201):
-                    # Guardamos lo que efectivamente mandamos: es la fuente de
-                    # verdad de "Cargado"/"Desactualizado" (ver wholesale_applied_get).
+                    # Historial de lo aplicado desde el panel (el estado que
+                    # manda es el real de ML, que se relee abajo).
                     wholesale_applied_upsert(account_id, item_id, orig_sku, target_tiers, currency_id)
+                    # La respuesta del POST ya trae la lista de precios
+                    # resultante: la usamos para refrescar el caché sin volver
+                    # a pedir /prices ítem por ítem.
+                    try:
+                        cache_entry = _wholesale_parse_prices(r.json())
+                        if cache_entry.get("tiers"):
+                            cached = WHOLESALE_PRICES_CACHE.setdefault(
+                                account_id, {"at": datetime.utcnow(), "by_item": {}})
+                            cached["by_item"][item_id] = cache_entry
+                    except Exception:
+                        pass
                     results.append({"item_id": item_id, "sku": sku_u, "ok": True, "error": None})
                 else:
                     results.append({"item_id": item_id, "sku": sku_u, "ok": False,
