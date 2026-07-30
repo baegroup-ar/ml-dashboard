@@ -4926,7 +4926,8 @@ def _margen_fija(pvp_con_iva: float, p: dict) -> float:
 
 
 def margen_compute(pvp_meli, iva_rate, comision_var, costo_sin_iva, p,
-                   com_cuotas_frac=0.0, envio_manual=None, envio_auto=None) -> Optional[dict]:
+                   com_cuotas_frac=0.0, envio_manual=None, envio_auto=None,
+                   sin_fija=False) -> Optional[dict]:
     """Desglose de margen para un SKU. `pvp_meli` con IVA; `costo_sin_iva` neto.
     `com_cuotas_frac` = comisión por cuotas (fracción) según el tipo Premium; se
     resta como la comisión variable. Todo se netea con el factor de IVA del SKU.
@@ -4936,7 +4937,10 @@ def margen_compute(pvp_meli, iva_rate, comision_var, costo_sin_iva, p,
     ventas en franja gratis, ya neto — se le sacó el 21% de IVA fijo de envíos en
     `_margen_envio_ponderado_map`, NO el iva_rate del SKU — así que se usa DIRECTO,
     sin dividir por `factor` de nuevo). Si el SKU no tuvo ventas en franja gratis,
-    `envio_auto` es None y cae al envío promedio configurado (`envio_promedio`)."""
+    `envio_auto` es None y cae al envío promedio configurado (`envio_promedio`).
+    `sin_fija=True` saca la comisión FIJA por tramos: la usan los precios
+    mayoristas (Precio por Cantidad), donde ML no cobra el costo fijo por
+    venta."""
     if not pvp_meli or pvp_meli <= 0:
         return None
     factor = 1 + (float(iva_rate or 0) / 100.0)
@@ -4945,7 +4949,7 @@ def margen_compute(pvp_meli, iva_rate, comision_var, costo_sin_iva, p,
     comision_var_amt = pvp_meli * cv / factor
     ccf = float(com_cuotas_frac or 0.0)
     com_cuotas_amt = pvp_meli * ccf / factor
-    fija_amt = _margen_fija(pvp_meli, p) / factor
+    fija_amt = 0.0 if sin_fija else _margen_fija(pvp_meli, p) / factor
     if envio_manual is not None:
         envio_amt = float(envio_manual)
     elif pvp_meli >= p["envio_threshold"]:
@@ -9811,10 +9815,16 @@ def _wholesale_sim_one(ctx: dict, sku: str, tiers: list, analysis: dict, ml_tier
         # criterio que el envío ponderado de Margen: se usa DIRECTO).
         envio_unit = ((ship_cost / t["qty"]) / (1 + MARGEN_ENVIO_IVA_RATE / 100.0)) if ship_cost else None
 
+        # SIN comisión fija: en las ventas por Precio por Cantidad ML no cobra
+        # el costo fijo por venta que sí aplica a la venta minorista suelta
+        # (por eso el mayorista rinde mejor de lo que daría el motor de Margen
+        # tal cual). La renta de referencia a 1 unidad, más abajo, SÍ la lleva:
+        # esa es una venta minorista común y tiene que coincidir con Margen.
         def _renta(price):
             if not price:
                 return None
-            comp = margen_compute(price, iva_rate, comvar, costo, p, ccf, envio_auto=envio_unit)
+            comp = margen_compute(price, iva_rate, comvar, costo, p, ccf,
+                                  envio_auto=envio_unit, sin_fija=True)
             return comp["renta"] if comp else None
 
         rows.append({

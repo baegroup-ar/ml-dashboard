@@ -192,6 +192,8 @@
     <div class="param-hint">
       Corre la misma simulación sobre toda la lista (respeta el buscador de SKU de arriba). Tarda: cada publicación necesita su
       propia consulta de envío a ML. Se puede cortar en cualquier momento y lo ya calculado queda en pantalla.
+      Las rentas de los tramos van <b>sin comisión fija</b> (ML no la cobra en Precio por Cantidad) y con el envío prorrateado por unidad;
+      la de <b>1 un.</b> sí la incluye, para poder compararla con Margen → MELI.
     </div>
     <div style="overflow:auto;max-height:65vh;margin-top:8px;">
       <table id="simall-table">
@@ -334,7 +336,7 @@ function renderSim(j) {
         <tbody>${rows}</tbody>
       </table>
     </div>${sugerencia}
-    <div class="param-hint" style="margin-top:8px;">La <b>renta</b> usa el mismo motor que Margen → MELI (comisión variable, comisión por cuotas, comisión fija por tramos, costo de CMV e IVA del SKU), pero con el precio de cada tramo y el envío prorrateado: despachar ${(j.tiers||[]).map(t=>t.qty).join('/')} unidades juntas cuesta menos por unidad que despacharlas sueltas.</div>`;
+    <div class="param-hint" style="margin-top:8px;">La <b>renta</b> usa el mismo motor que Margen → MELI (comisión variable, comisión por cuotas, costo de CMV e IVA del SKU), con dos diferencias propias del mayorista: <b>no lleva comisión fija</b> (ML no cobra el costo fijo por venta en Precio por Cantidad) y el envío va prorrateado — despachar ${(j.tiers||[]).map(t=>t.qty).join('/')} unidades juntas cuesta menos por unidad que despacharlas sueltas. Por eso da mejor que en Margen. La <b>renta a 1 un.</b> sí incluye la fija: es una venta minorista común y tiene que coincidir con Margen → MELI.</div>`;
 }
 
 // ── Simulación de TODA la lista ──
