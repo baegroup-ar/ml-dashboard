@@ -12532,6 +12532,52 @@ async def debug_wholesale_probe(request: Request, account_ref: str, item_id: str
             sale_prices[qty] = {"status": rs.status_code,
                                 "body": rs.json() if rs.status_code == 200 else rs.text[:400]}
         out["sale_price_by_quantity"] = sale_prices
+
+        # 3) Costo de envío por cantidad. Hipótesis: ML valida el precio
+        # mayorista con `max_precio(N) = PVP - ahorro_envio_unitario(N)`, donde
+        # `ahorro(N) = costo_envio(1) - costo_envio(N)/N`. Si podemos reproducir
+        # costo_envio(N) con /shipping_options/free escalando el peso (y las
+        # dimensiones) por N, podemos calcular la sugerencia de ML nosotros.
+        ri = await client.get(f"{ML_API_URL}/items/{item_id}", headers=headers)
+        item = ri.json() if ri.status_code == 200 else {}
+        shp = item.get("shipping") or {}
+        dims = shp.get("dimensions")
+        out["item_shipping"] = {"dimensions": dims, "logistic_type": shp.get("logistic_type"),
+                                "free_shipping": shp.get("free_shipping"), "tags": shp.get("tags"),
+                                "price": item.get("price"), "listing_type_id": item.get("listing_type_id"),
+                                "category_id": item.get("category_id")}
+        ship_probe = {}
+        if dims and "," in str(dims):
+            try:
+                whl, weight = str(dims).split(",", 1)
+                a, b, c = [float(x) for x in whl.lower().split("x")]
+                weight = float(weight)
+            except Exception:
+                a = b = c = weight = None
+            if weight:
+                base_params = {
+                    "item_price": item.get("price"), "listing_type_id": item.get("listing_type_id"),
+                    "mode": shp.get("mode") or "me2", "condition": item.get("condition") or "new",
+                    "logistic_type": shp.get("logistic_type") or "drop_off",
+                    "free_shipping": "true", "verbose": "true",
+                    "category_id": item.get("category_id"),
+                }
+                for qty in (1, 2, 3, 5, 10, 15):
+                    variants = {
+                        # a) solo peso × N (el volumétrico manda si el bulto es grande)
+                        "weight_only": f"{a:g}x{b:g}x{c:g},{weight * qty:g}",
+                        # b) apilado: una dimensión × N + peso × N
+                        "stacked": f"{a:g}x{b:g}x{c * qty:g},{weight * qty:g}",
+                    }
+                    ship_probe[qty] = {}
+                    for vname, dim_str in variants.items():
+                        rsh = await client.get(
+                            f"{ML_API_URL}/users/{acc['ml_user_id']}/shipping_options/free",
+                            headers=headers, params={**base_params, "dimensions": dim_str})
+                        ship_probe[qty][vname] = {
+                            "dimensions": dim_str, "status": rsh.status_code,
+                            "body": rsh.json() if rsh.status_code == 200 else rsh.text[:300]}
+        out["shipping_cost_by_quantity_probe"] = ship_probe
     return out
 
 
