@@ -12507,10 +12507,12 @@ async def debug_item_full(request: Request, account_ref: str):
 
 
 @app.get("/api/debug/wholesale-probe/{account_ref}/{item_id}")
-async def debug_wholesale_probe(request: Request, account_ref: str, item_id: str):
+async def debug_wholesale_probe(request: Request, account_ref: str, item_id: str, context: str = ""):
     """Devuelve el JSON crudo de GET /items/{id}/prices para inspeccionar por
     qué _wholesale_parse_prices no está detectando tramos que sí existen en
-    ML (temporal, para debug de Precios Mayoristas)."""
+    ML (temporal, para debug de Precios Mayoristas). `?context=` se reenvía
+    tal cual como query param a ML (ej. context=user_type_business), para
+    probar si el default sin contexto está omitiendo los tramos PxQ."""
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
@@ -12524,11 +12526,12 @@ async def debug_wholesale_probe(request: Request, account_ref: str, item_id: str
     if not token:
         raise HTTPException(502)
     headers = {"Authorization": f"Bearer {token}"}
+    params = {"context": context} if context else {}
     async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.get(f"{ML_API_URL}/items/{item_id}/prices", headers=headers)
+        r = await client.get(f"{ML_API_URL}/items/{item_id}/prices", headers=headers, params=params)
         parsed = _wholesale_parse_prices(r.json()) if r.status_code == 200 else None
     return {
-        "item_id": item_id, "status": r.status_code,
+        "item_id": item_id, "context_sent": context or None, "status": r.status_code,
         "raw": r.json() if r.status_code == 200 else r.text[:2000],
         "parsed_by_our_code": parsed,
     }
