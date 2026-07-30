@@ -1646,6 +1646,7 @@ PAGE_ROUTES = {
     "fotos": "/fotos",
     "ponderado_envios": "/ponderado-envios",
     "precios_mayoristas": "/precios-mayoristas",
+    "conversion": "/conversion",
 }
 
 
@@ -9367,7 +9368,7 @@ async def _fetch_fotos_items(client, headers, item_ids: list) -> list:
 
 
 # ── Precios Mayoristas (Precio por Cantidad / PxQ de Mercado Libre) ───────
-def _wholesale_sku_by_mla(account_id: int) -> dict:
+def _disc_sku_by_mla(account_id: int) -> dict:
     """{MLA: SKU} de la base de Descuentos (`product_discounts`) de esa cuenta.
 
     El `seller_sku` que trae ML NO siempre es el SKU con el que trabaja la
@@ -9386,9 +9387,9 @@ def _wholesale_sku_by_mla(account_id: int) -> dict:
             for r in rows if (r["mla"] or "").strip() and (r["sku"] or "").strip()}
 
 
-def _wholesale_resolve_sku(item_id: str, sku_ml: str, sku_by_mla: dict) -> tuple:
+def _resolve_sku_mla(item_id: str, sku_ml: str, sku_by_mla: dict) -> tuple:
     """(sku_efectivo, origen) — Descuentos manda sobre el SKU de ML.
-    Ver `_wholesale_sku_by_mla`."""
+    Ver `_disc_sku_by_mla`."""
     sku_disc = (sku_by_mla or {}).get((item_id or "").strip().upper())
     if sku_disc:
         return sku_disc, "descuentos"
@@ -9401,11 +9402,11 @@ def _wholesale_matches(catalog_items: list, price_by_sku_u: dict, sku_by_mla: di
     — NO se dedupea: cada MLA es su propia fila (el usuario carga el precio
     mayorista publicación por publicación, no por SKU).
 
-    El SKU de cada publicación se resuelve con `_wholesale_resolve_sku`: primero
+    El SKU de cada publicación se resuelve con `_resolve_sku_mla`: primero
     la base de Descuentos (cruce por MLA), y recién si no está ahí el de ML."""
     out = []
     for it in catalog_items:
-        sku, origin = _wholesale_resolve_sku(it["item_id"], it.get("sku") or "", sku_by_mla)
+        sku, origin = _resolve_sku_mla(it["item_id"], it.get("sku") or "", sku_by_mla)
         sku_u = sku.strip().upper()
         if sku_u in price_by_sku_u:
             out.append({"sku": sku, "sku_ml": it.get("sku") or "", "sku_from": origin,
@@ -9697,7 +9698,7 @@ async def api_precios_mayoristas_data(request: Request, account_id: int):
         " WHERE account_id=:a AND price IS NOT NULL", {"a": margen_aid})
     price_by_sku_u = {(r["sku"] or "").strip().upper(): r for r in rows}
     catalog = await _get_all_publicaciones(account_id, acc, force_refresh=refresh)
-    raw_matches = _wholesale_matches(catalog, price_by_sku_u, _wholesale_sku_by_mla(account_id))
+    raw_matches = _wholesale_matches(catalog, price_by_sku_u, _disc_sku_by_mla(account_id))
     matched = []
     for m in raw_matches:
         r = price_by_sku_u[(m["sku"] or "").strip().upper()]
@@ -9913,8 +9914,8 @@ async def api_precios_mayoristas_simular(request: Request, account_id: int, item
 
     # SKU: manda la base de Descuentos (cruce por MLA), si no el de ML — es el
     # SKU con el que Margen tiene el PVP/costo/tipo de esta publicación.
-    sku, sku_from = _wholesale_resolve_sku(item_id, _extract_item_sku(item),
-                                           _wholesale_sku_by_mla(account_id))
+    sku, sku_from = _resolve_sku_mla(item_id, _extract_item_sku(item),
+                                     _disc_sku_by_mla(account_id))
     ctx = _wholesale_sim_context(user, user_id, account_id)
     sim = _wholesale_sim_one(ctx, sku, tiers, analysis, ml_tiers)
     return {
@@ -9969,7 +9970,7 @@ async def api_precios_mayoristas_simular_todo(request: Request, account_id: int)
         raise HTTPException(502)
     headers = {"Authorization": f"Bearer {token}"}
     ctx = _wholesale_sim_context(user, user_id, account_id)
-    sku_by_mla = _wholesale_sku_by_mla(account_id)
+    sku_by_mla = _disc_sku_by_mla(account_id)
     prices_map = await _fetch_wholesale_prices_map(account_id, item_ids, update_cache=False)
 
     info_map = {}
@@ -10006,7 +10007,7 @@ async def api_precios_mayoristas_simular_todo(request: Request, account_id: int)
                                 "billable_weight": None, "tiers": {}}
                 pdata = prices_map.get(item_id) or {}
                 sku_ml = _extract_item_sku(item)
-                sku, sku_from = _wholesale_resolve_sku(item_id, sku_ml, sku_by_mla)
+                sku, sku_from = _resolve_sku_mla(item_id, sku_ml, sku_by_mla)
                 sim = _wholesale_sim_one(ctx, sku, tiers, analysis, pdata.get("tiers") or {})
                 results[item_id] = {
                     "item_id": item_id, "sku": sku, "sku_ml": sku_ml, "sku_from": sku_from,
@@ -10054,10 +10055,10 @@ async def api_precios_mayoristas_apply(request: Request, account_id: int):
     # dedupear: cada item_id ya es único de por sí, a diferencia de
     # _wholesale_matches que cruza en la otra dirección para /data). El SKU sale
     # de la base de Descuentos si el MLA está ahí (mismo criterio que /data:
-    # ver _wholesale_sku_by_mla), si no del catálogo de ML.
-    sku_by_mla = _wholesale_sku_by_mla(account_id)
+    # ver _disc_sku_by_mla), si no del catálogo de ML.
+    sku_by_mla = _disc_sku_by_mla(account_id)
     item_to_sku = {
-        it["item_id"]: _wholesale_resolve_sku(it["item_id"], it.get("sku") or "", sku_by_mla)[0].strip().upper()
+        it["item_id"]: _resolve_sku_mla(it["item_id"], it.get("sku") or "", sku_by_mla)[0].strip().upper()
         for it in catalog}
     item_to_currency = {it["item_id"]: it.get("currency_id") for it in catalog}
     margen_aid = _margen_account_id(get_visible_accounts(user_id, user)) or account_id
@@ -10152,6 +10153,213 @@ async def _get_all_fotos(account_id: int, acc: dict, force_refresh: bool = False
         items = await _fetch_fotos_items(client, headers, all_item_ids)
     FOTOS_CACHE[account_id] = {"at": datetime.utcnow(), "items": items}
     return items
+
+
+# ═══════════════════ Conversión (visitas vs ventas por MLA) ═══════════════
+# Hasta acá el panel contestaba "cuánto gané"; ninguna pantalla contestaba
+# "cuántos me vieron y no me compraron". La conversión parte el problema en
+# dos, y cada mitad se arregla distinto: pocas visitas = problema de
+# exposición (posición, tipo de publicación, Full, ads); muchas visitas y
+# pocas ventas = problema de oferta (precio, fotos, envío, reputación).
+CONVERSION_VISITS_CACHE: dict = {}
+CONVERSION_VISITS_TTL_SECONDS = 1800
+# Debajo de estas visitas no se puede afirmar nada de la conversión: 0 ventas
+# sobre 12 visitas es ruido estadístico, no un problema de precio.
+CONVERSION_MIN_VISITS = 30
+
+
+def _parse_visits_payload(data) -> dict:
+    """{item_id: visitas} tolerante al shape. El endpoint de visitas de ML no
+    está bien documentado y devuelve distintas formas según la variante que se
+    use (lista de dicts, dict item→int, dict item→{total_visits}), así que se
+    aceptan todas en vez de atarse a una."""
+    out = {}
+    if isinstance(data, list):
+        for e in data:
+            if not isinstance(e, dict):
+                continue
+            iid = e.get("item_id") or e.get("id")
+            v = e.get("total_visits", e.get("visits"))
+            if iid is not None and v is not None:
+                try:
+                    out[str(iid)] = int(v)
+                except (TypeError, ValueError):
+                    pass
+    elif isinstance(data, dict):
+        for k, v in data.items():
+            if not str(k).upper().startswith("ML"):
+                continue
+            if isinstance(v, bool):
+                continue
+            if isinstance(v, (int, float)):
+                out[str(k)] = int(v)
+            elif isinstance(v, dict):
+                vv = v.get("total_visits", v.get("visits"))
+                if vv is not None:
+                    try:
+                        out[str(k)] = int(vv)
+                    except (TypeError, ValueError):
+                        pass
+    return out
+
+
+async def _fetch_item_visits(account_id: int, item_ids: list, date_from: str, date_to: str,
+                             force_refresh: bool = False) -> dict:
+    """{item_id: visitas del período}. Primero el multiget
+    `/items/visits?ids=` (50 por request); si ML lo rechaza, cae al endpoint
+    por ítem. Cacheado por (cuenta, período) con TTL: las visitas se mueven
+    lento y son muchísimos requests."""
+    key = (account_id, date_from, date_to)
+    cached = CONVERSION_VISITS_CACHE.get(key) if not force_refresh else None
+    if cached and (datetime.utcnow() - cached["at"]).total_seconds() < CONVERSION_VISITS_TTL_SECONDS:
+        return cached["by_item"]
+    token = await refresh_ml_token(account_id)
+    if not token:
+        raise HTTPException(502)
+    headers = {"Authorization": f"Bearer {token}"}
+    # ML espera el rango como datetime ISO con offset.
+    df = f"{date_from}T00:00:00.000-00:00"
+    dt = f"{date_to}T23:59:59.999-00:00"
+    by_item: dict = {}
+    async with httpx.AsyncClient(timeout=60) as client:
+        async def multi(chunk):
+            try:
+                r = await client.get(f"{ML_API_URL}/items/visits", headers=headers,
+                                     params={"ids": ",".join(chunk), "date_from": df, "date_to": dt})
+                if r.status_code == 200:
+                    by_item.update(_parse_visits_payload(r.json()))
+                    return True
+            except Exception:
+                pass
+            return False
+
+        chunks = [item_ids[i:i + 50] for i in range(0, len(item_ids), 50)]
+        oks = await asyncio.gather(*[multi(c) for c in chunks])
+        # Fallback por ítem SOLO para los que el multiget no resolvió (si ML
+        # cambió el endpoint, esto sigue devolviendo el dato aunque más lento).
+        faltan = [i for i in item_ids if i not in by_item]
+        if faltan and not all(oks):
+            sem = asyncio.Semaphore(15)
+
+            async def one(item_id):
+                async with sem:
+                    try:
+                        r = await client.get(f"{ML_API_URL}/items/{item_id}/visits", headers=headers,
+                                             params={"date_from": df, "date_to": dt})
+                        if r.status_code == 200:
+                            d = r.json()
+                            v = d.get("total_visits") if isinstance(d, dict) else None
+                            if v is not None:
+                                by_item[item_id] = int(v)
+                    except Exception:
+                        pass
+
+            await asyncio.gather(*[one(i) for i in faltan])
+    CONVERSION_VISITS_CACHE[key] = {"at": datetime.utcnow(), "by_item": by_item}
+    return by_item
+
+
+def _conversion_sales_by_mla(account_id: int, date_from: str, date_to: str) -> tuple:
+    """(ventas_por_mla, unidades_sin_mla) sobre el caché de órdenes.
+
+    Devuelve también las unidades que NO se pudieron atribuir a una
+    publicación: el snapshot guarda el `item_id` recién desde 2026-07-30, así
+    que las órdenes cacheadas antes de eso solo tienen SKU. Se informan aparte
+    en vez de repartirlas a ojo — un 'Recargar de ML' del período las recupera.
+    Las canceladas no cuentan como venta."""
+    by_mla = {}
+    sin_mla = 0
+    for o in db_fetch_order_snapshots(account_id, date_from, date_to) or []:
+        if str(o.get("estado") or "").lower() in ("cancelled", "canceled"):
+            continue
+        for it in (o.get("items") or []):
+            qty = int(it.get("cantidad") or 0)
+            iid = it.get("item_id")
+            if not iid:
+                sin_mla += qty
+                continue
+            e = by_mla.setdefault(str(iid), {"unidades": 0, "monto": 0.0})
+            e["unidades"] += qty
+            e["monto"] += float(it.get("monto") or 0)
+    return by_mla, sin_mla
+
+
+@app.get("/conversion", response_class=HTMLResponse)
+async def conversion_page(request: Request):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse("/")
+    user = get_user(user_id)
+    _r = _page_redirect(user, "conversion")
+    if _r:
+        return _r
+    accounts = get_visible_accounts(user_id, user)
+    accounts = await refresh_visible_account_nicknames(accounts)
+    return templates.TemplateResponse("conversion.html", {
+        "request": request, "user": user, "accounts": accounts,
+        "perms": user_permissions(user),
+    })
+
+
+@app.get("/api/conversion/{account_id:int}/data")
+async def api_conversion_data(request: Request, account_id: int):
+    """Visitas vs ventas por publicación en el período.
+
+    Universo = catálogo activo de la cuenta (todas las publicaciones, tengan o
+    no ventas: las que nadie mira son justamente las que hay que ver). El SKU
+    se resuelve igual que en Precios Mayoristas: base de Descuentos por MLA y,
+    si el MLA no está cargado ahí, el de ML.
+
+    Las VENTAS salen del caché de órdenes de ESA cuenta (las visitas también
+    son por publicación de esa cuenta, mezclarlas no tendría sentido)."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    try:
+        days = max(1, min(90, int(request.query_params.get("days") or 30)))
+    except ValueError:
+        days = 30
+    refresh = (request.query_params.get("refresh") in ("1", "true", "yes"))
+    hoy = (datetime.utcnow() - timedelta(hours=3)).date()
+    date_from = str(hoy - timedelta(days=days - 1))
+    date_to = str(hoy)
+
+    catalog = await _get_all_publicaciones(account_id, acc, force_refresh=refresh)
+    sku_by_mla = _disc_sku_by_mla(account_id)
+    item_ids = [it["item_id"] for it in catalog]
+    visits = await _fetch_item_visits(account_id, item_ids, date_from, date_to, force_refresh=refresh)
+    sales, sin_mla = _conversion_sales_by_mla(account_id, date_from, date_to)
+
+    items = []
+    for it in catalog:
+        iid = it["item_id"]
+        sku, sku_from = _resolve_sku_mla(iid, it.get("sku") or "", sku_by_mla)
+        v = visits.get(iid)
+        s = sales.get(iid) or {"unidades": 0, "monto": 0.0}
+        conv = (s["unidades"] / v) if (v and v > 0) else None
+        items.append({
+            "item_id": iid, "sku": sku, "sku_ml": it.get("sku") or "", "sku_from": sku_from,
+            "titulo": it.get("titulo") or it.get("title") or "",
+            "permalink": it.get("permalink") or "",
+            "visitas": v, "unidades": s["unidades"], "monto": round(s["monto"], 2),
+            "conversion": conv,
+        })
+    total_v = sum(i["visitas"] or 0 for i in items)
+    total_u = sum(i["unidades"] for i in items)
+    items.sort(key=lambda i: (-(i["visitas"] or 0), i["sku"] or ""))
+    return {
+        "items": items,
+        "period": {"days": days, "from": date_from, "to": date_to},
+        "totales": {"visitas": total_v, "unidades": total_u,
+                    "conversion": (total_u / total_v) if total_v else None,
+                    "publicaciones": len(items),
+                    "sin_visitas": sum(1 for i in items if not i["visitas"]),
+                    "unidades_sin_mla": sin_mla},
+        "min_visitas": CONVERSION_MIN_VISITS,
+    }
 
 
 @app.get("/fotos", response_class=HTMLResponse)
@@ -12185,6 +12393,10 @@ async def _api_orders_impl(request: Request, account_id: int,
             order_cmv += item_cmv
             items.append({
                 "sku": sku,
+                # MLA del ítem vendido: lo necesita Conversión para cruzar
+                # ventas con visitas por publicación (un mismo SKU puede tener
+                # varias publicaciones y venden distinto).
+                "item_id": (i.get("item", {}) or {}).get("id"),
                 "titulo": i.get("item", {}).get("title", "?"),
                 "monto": round(float(i.get("unit_price", 0)) * qty, 2),
                 "comision": round(float(i.get("sale_fee", 0)) * qty, 2),
@@ -12655,6 +12867,7 @@ PAGES = [
     ("publicaciones", "Publicaciones"),
     ("fotos", "Fotos"),
     ("precios_mayoristas", "Precios Mayoristas"),
+    ("conversion", "Conversión"),
 ]
 PAGE_KEYS = {k for k, _ in PAGES}
 
@@ -13052,6 +13265,56 @@ async def debug_item_full(request: Request, account_ref: str):
             "available_fields": sorted(list(r2.json().keys())) if r2.status_code == 200 else None,
             "full_item": r2.json() if r2.status_code == 200 else r2.text[:2000],
         }
+
+
+@app.get("/api/debug/visits-probe/{account_ref}/{item_id}")
+async def debug_visits_probe(request: Request, account_ref: str, item_id: str):
+    """Muestra el crudo de las variantes de visitas de ML para un MLA: el
+    endpoint no está bien documentado y devuelve distintos shapes, así que si
+    Conversión muestra números raros conviene mirar acá antes de tocar el
+    parser (`_parse_visits_payload`). ?days=30 para cambiar la ventana."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = db_fetchone(
+        "SELECT * FROM ml_accounts WHERE user_id=:uid AND (CAST(id AS TEXT)=:ref OR ml_user_id=:ref)",
+        {"uid": user_id, "ref": account_ref},
+    )
+    if not acc:
+        raise HTTPException(404)
+    token = await refresh_ml_token(acc["id"])
+    if not token:
+        raise HTTPException(502)
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        days = max(1, min(150, int(request.query_params.get("days") or 30)))
+    except ValueError:
+        days = 30
+    hoy = (datetime.utcnow() - timedelta(hours=3)).date()
+    df = f"{hoy - timedelta(days=days - 1)}T00:00:00.000-00:00"
+    dt = f"{hoy}T23:59:59.999-00:00"
+    out = {"item_id": item_id, "days": days, "date_from": df, "date_to": dt}
+    async with httpx.AsyncClient(timeout=40) as client:
+        pruebas = [
+            ("multiget", f"{ML_API_URL}/items/visits", {"ids": item_id, "date_from": df, "date_to": dt}),
+            ("por_item", f"{ML_API_URL}/items/{item_id}/visits", {"date_from": df, "date_to": dt}),
+            ("time_window", f"{ML_API_URL}/items/{item_id}/visits/time_window",
+             {"last": days, "unit": "day"}),
+            ("user_totales", f"{ML_API_URL}/users/{acc['ml_user_id']}/items_visits",
+             {"date_from": df, "date_to": dt}),
+        ]
+        for nombre, url, params in pruebas:
+            try:
+                r = await client.get(url, headers=headers, params=params)
+                out[nombre] = {"http": r.status_code, "body": r.text[:1200]}
+                if r.status_code == 200:
+                    try:
+                        out[nombre]["parseado"] = _parse_visits_payload(r.json())
+                    except Exception as e:
+                        out[nombre]["parseado_error"] = str(e)[:200]
+            except Exception as e:
+                out[nombre] = {"error": str(e)[:200]}
+    return out
 
 
 @app.get("/api/debug/wholesale-probe/{account_ref}/{item_id}")

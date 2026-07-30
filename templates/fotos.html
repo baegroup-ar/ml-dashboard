@@ -61,7 +61,7 @@
     Tienda Bae App
   </div>
   <div class="nav-right">
-    {% if 'dashboard' in perms or 'reputacion' in perms or 'descuentos' in perms or 'ranking' in perms or 'etiquetas' in perms or 'publicaciones' in perms or 'fotos' in perms %}
+    {% if 'dashboard' in perms or 'reputacion' in perms or 'descuentos' in perms or 'ranking' in perms or 'etiquetas' in perms or 'publicaciones' in perms or 'fotos' in perms or 'precios_mayoristas' in perms or 'conversion' in perms %}
     <div class="nav-dropdown">
       <span class="btn-nav dropdown-trigger active">Mercadolibre ▾</span>
       <div class="dropdown-menu">
@@ -72,6 +72,8 @@
         {% if 'etiquetas' in perms %}<a href="/etiquetas" class="dropdown-item">Etiquetas</a>{% endif %}
         {% if 'publicaciones' in perms %}<a href="/publicaciones" class="dropdown-item">Publicaciones</a>{% endif %}
         <span class="dropdown-item active">Fotos</span>
+        {% if 'precios_mayoristas' in perms %}<a href="/precios-mayoristas" class="dropdown-item">Precios Mayoristas</a>{% endif %}
+        {% if 'conversion' in perms %}<a href="/conversion" class="dropdown-item">Conversión</a>{% endif %}
       </div>
     </div>
     {% endif %}

@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Conversión · Panel BAE</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Cantarell:ital,wght@0,400;0,700;1,400&amp;display=swap" rel="stylesheet"><link rel="icon" type="image/png" href="/static/bae-favicon.png">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Cantarell', 'Inter', system-ui, sans-serif; background: #fff; color: #111; }
+    nav { background: #fff; border-bottom: 1px solid #e5e5e3; padding: 0 1.5rem; height: 56px; display: flex; align-items: center; justify-content: space-between; }
+    .nav-brand { font-weight: 600; font-size: 15px; display: flex; align-items: center; gap: 8px; }
+    .nav-right { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+    .btn-nav { padding: 6px 14px; border: 1px solid #ddd; border-radius: 8px; background: #fff; font-size: 13px; cursor: pointer; text-decoration: none; color: #111; }
+    .nav-dropdown { position: relative; display: inline-block; }
+    .nav-dropdown .dropdown-trigger.active { color: #005CFF; font-weight: 500; border-color: #005CFF; }
+    .nav-dropdown .dropdown-menu { display: none; position: absolute; top: calc(100% + 4px); left: 0; background: #fff; border: 1px solid #ddd; border-radius: 8px; min-width: 170px; z-index: 100; box-shadow: 0 6px 16px rgba(0,0,0,0.10); padding: 6px; flex-direction: column; }
+    .nav-dropdown:hover .dropdown-menu { display: flex; }
+    .dropdown-menu a.dropdown-item, .dropdown-menu span.dropdown-item { display: block; padding: 8px 10px; font-size: 13px; color: #111; text-decoration: none; border-radius: 6px; white-space: nowrap; cursor: pointer; }
+    .dropdown-menu a.dropdown-item:hover { background: #f5f5f3; }
+    .dropdown-menu span.dropdown-item.active { color: #005CFF; font-weight: 500; background: #EAF1FF; cursor: default; }
+    main { max-width: 1850px; margin: 0 auto; padding: 1.5rem 0.75rem; }
+    h1 { font-size: 20px; font-weight: 600; margin-bottom: 6px; }
+    p.lead { font-size: 13px; color: #888; margin-bottom: 1.25rem; }
+    .card { background: #fff; border: 1px solid #e5e5e3; border-radius: 12px; padding: 1.25rem; margin-bottom: 1.25rem; }
+    .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .row label { font-size: 13px; color: #666; }
+    .row select, .row input { padding: 7px 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 13px; font-family: 'Inter', sans-serif; }
+    .row select { min-width: 180px; }
+    button.primary { padding: 8px 16px; border: none; border-radius: 8px; background: #005CFF; color: #fff; font-size: 13px; cursor: pointer; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 12px; }
+    th { padding: 7px 8px; text-align: left; color: #888; font-weight: 500; border-bottom: 1px solid #eee; font-size: 11px; background: #fff; position: sticky; top: 0; z-index: 2; white-space: nowrap; cursor: pointer; }
+    th.num, td.num { text-align: right; }
+    th:hover { color: #005CFF; }
+    td { padding: 6px 8px; border-bottom: 1px solid #f0f0ee; color: #333; }
+    tbody tr:hover { background: #fafaf8; }
+    .empty { padding: 2rem; text-align: center; color: #aaa; font-size: 13px; }
+    .no-accounts { text-align: center; padding: 4rem; color: #888; font-size: 14px; }
+    .muted { color: #bbb; }
+    .pos { color: #1a8a5a; } .mid { color: #c47a1e; } .neg { color: #c0392b; }
+    .tier-ml { font-size: 10px; color: #999; }
+    .badge { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 99px; font-weight: 500; white-space: nowrap; }
+    .badge.ok { background: #e6f5ee; color: #1a8a5a; }
+    .badge.warn { background: #fef0e6; color: #c47a1e; }
+    .badge.bad { background: #fdeeec; color: #c0392b; }
+    .badge.gray { background: #f0f0ee; color: #666; }
+    .cards { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 4px; }
+    .kpi { flex: 1; min-width: 150px; border: 1px solid #e5e5e3; border-radius: 10px; padding: 10px 14px; }
+    .kpi .k-label { font-size: 11px; color: #888; }
+    .kpi .k-value { font-size: 20px; font-weight: 600; margin-top: 2px; }
+    .param-hint { font-size: 11px; color: #999; margin-top: 8px; }
+    a.mla-link { color: #666; text-decoration: none; font-size: 11px; }
+    a.mla-link:hover { text-decoration: underline; }
+    .titulo { color: #666; font-size: 11px; max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  </style>
+</head>
+<body>
+<nav>
+  <div class="nav-brand">
+    <img src="/static/bae-icon.png" alt="Tienda Bae" style="height:32px;width:auto;display:block;" />
+    Tienda Bae App
+  </div>
+  <div class="nav-right">
+    {% if 'dashboard' in perms or 'reputacion' in perms or 'descuentos' in perms or 'ranking' in perms or 'etiquetas' in perms or 'publicaciones' in perms or 'fotos' in perms or 'precios_mayoristas' in perms or 'conversion' in perms %}
+    <div class="nav-dropdown">
+      <span class="btn-nav dropdown-trigger active">Mercadolibre ▾</span>
+      <div class="dropdown-menu">
+        {% if 'dashboard' in perms %}<a href="/dashboard" class="dropdown-item">Dashboard</a>{% endif %}
+        {% if 'reputacion' in perms %}<a href="/reputacion" class="dropdown-item">Reputación</a>{% endif %}
+        {% if 'descuentos' in perms %}<a href="/descuentos" class="dropdown-item">Descuentos</a>{% endif %}
+        {% if 'ranking' in perms %}<a href="/ranking" class="dropdown-item">Ranking</a>{% endif %}
+        {% if 'etiquetas' in perms %}<a href="/etiquetas" class="dropdown-item">Etiquetas</a>{% endif %}
+        {% if 'publicaciones' in perms %}<a href="/publicaciones" class="dropdown-item">Publicaciones</a>{% endif %}
+        {% if 'fotos' in perms %}<a href="/fotos" class="dropdown-item">Fotos</a>{% endif %}
+        {% if 'precios_mayoristas' in perms %}<a href="/precios-mayoristas" class="dropdown-item">Precios Mayoristas</a>{% endif %}
+        <span class="dropdown-item active">Conversión</span>
+      </div>
+    </div>
+    {% endif %}
+    {% if 'pvp' in perms or 'clientes' in perms or 'base_sku' in perms or 'envios_flex' in perms %}
+    <div class="nav-dropdown">
+      <span class="btn-nav dropdown-trigger">Base de Datos ▾</span>
+      <div class="dropdown-menu">
+        {% if 'pvp' in perms %}<a href="/pvp" class="dropdown-item">PVP</a>{% endif %}
+        {% if 'clientes' in perms %}<a href="/clientes" class="dropdown-item">Clientes</a>{% endif %}
+        {% if 'base_sku' in perms %}<a href="/base-sku" class="dropdown-item">SKUs</a>{% endif %}
+        {% if 'envios_flex' in perms %}<a href="/costos/envios-flex" class="dropdown-item">Envíos Flex</a>{% endif %}
+      </div>
+    </div>
+    {% endif %}
+    {% if 'stock' in perms %}<a href="/stock" class="btn-nav">Stock valorizado</a>{% endif %}
+    {% if 'compras' in perms or 'costos' in perms %}<a href="/compras" class="btn-nav">Compras</a>{% endif %}
+    {% if 'margen' in perms %}<a href="/margen" class="btn-nav">Margen</a>{% endif %}
+    {% if 'ponderado_envios' in perms %}<a href="/ponderado-envios" class="btn-nav">Ponderado Envíos</a>{% endif %}
+    <span style="color:#888;">{{ user.name }}</span>
+    {% if user.is_admin %}<a href="/admin" style="font-size:12px;color:#005CFF;text-decoration:none;">Admin</a>{% endif %}
+    <a href="/logout" class="btn-nav">Salir</a>
+  </div>
+</nav>
+
+<main>
+  <h1>Conversión</h1>
+  <p class="lead">
+    Cuánta gente vio cada publicación y cuántas compraron. Sirve para saber <b>dónde</b> está el problema:
+    pocas visitas es un problema de <b>exposición</b> (posicionamiento, tipo de publicación, Full, ads);
+    muchas visitas y pocas ventas es un problema de <b>oferta</b> (precio, fotos, envío, reputación).
+    Las visitas las informa Mercado Libre por publicación; las ventas salen del panel.
+  </p>
+
+  {% if accounts %}
+  <div class="card">
+    <div class="row">
+      <label>Cuenta ML:</label>
+      <select id="account-select" onchange="loadAll(false)">
+        {% set default_nick = 'TIENDA BAE' %}
+        {% set has_default = accounts | selectattr('nickname', 'equalto', default_nick) | list | length > 0 %}
+        {% for acc in accounts %}
+        <option value="{{ acc.id }}" {% if acc.nickname == default_nick or (not has_default and loop.first) %}selected{% endif %}>{{ acc.nickname }}</option>
+        {% endfor %}
+      </select>
+      <label>Período:</label>
+      <select id="days-select" onchange="loadAll(false)">
+        <option value="7">Últimos 7 días</option>
+        <option value="15">Últimos 15 días</option>
+        <option value="30" selected>Últimos 30 días</option>
+        <option value="60">Últimos 60 días</option>
+        <option value="90">Últimos 90 días</option>
+      </select>
+      <input type="text" id="search" placeholder="Buscar SKU o título..." oninput="renderTable()" style="width:240px;" />
+      <select id="filtro" onchange="renderTable()">
+        <option value="todas">Todas</option>
+        <option value="oportunidad">Visitas altas, no vende</option>
+        <option value="sinvisitas">Sin visitas</option>
+        <option value="convierte">Convierte bien</option>
+      </select>
+      <button class="btn-nav" onclick="loadAll(true)" title="Vuelve a pedir a Mercado Libre el catálogo y las visitas.">↻ Recargar de ML</button>
+      <span id="count-label" style="font-size:12px;color:#888;"></span>
+    </div>
+  </div>
+
+  <div class="cards" id="kpis"></div>
+  <div class="param-hint" id="aviso-sin-mla" style="margin-bottom:10px;"></div>
+
+  <div class="card">
+    <div style="overflow:auto;max-height:70vh;">
+      <table>
+        <thead id="thead-row"></thead>
+        <tbody id="tbody-items"></tbody>
+      </table>
+    </div>
+    <div class="param-hint">
+      <b>Conversión</b> = unidades vendidas ÷ visitas del período. Una publicación con menos de <span id="min-visitas">30</span> visitas
+      no se juzga (0 ventas sobre 10 visitas no dice nada): aparece como "Pocas visitas".
+      Las ventas se cuentan por publicación, así que dos publicaciones del mismo SKU se miden por separado — que es justamente lo que interesa acá.
+    </div>
+  </div>
+  {% else %}
+  <div class="card"><div class="no-accounts">No tenés cuentas de Mercado Libre conectadas.</div></div>
+  {% endif %}
+</main>
+
+<script>
+let ITEMS = [];
+let TOTALES = {};
+let MIN_VISITAS = 30;
+let SORT = { col: 'visitas', dir: -1 };
+
+const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const fmt = n => (n == null || isNaN(n)) ? '<span class="muted">—</span>' : '$' + Number(n).toLocaleString('es-AR', { maximumFractionDigits: 0 });
+const int = n => (n == null || isNaN(n)) ? '<span class="muted">—</span>' : Number(n).toLocaleString('es-AR');
+const pct = n => (n == null || isNaN(n)) ? '<span class="muted">—</span>' : (Number(n) * 100).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + '%';
+
+async function loadAll(refresh) {
+  const aid = document.getElementById('account-select').value;
+  const days = document.getElementById('days-select').value;
+  const lbl = document.getElementById('count-label');
+  lbl.textContent = refresh ? 'Recargando de Mercado Libre...' : 'Cargando...';
+  try {
+    const r = await fetch(`/api/conversion/${aid}/data?days=${days}${refresh ? '&refresh=1' : ''}`);
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.detail || 'error');
+    ITEMS = j.items || [];
+    TOTALES = j.totales || {};
+    MIN_VISITAS = j.min_visitas || 30;
+    document.getElementById('min-visitas').textContent = MIN_VISITAS;
+  } catch (e) {
+    ITEMS = []; TOTALES = {};
+    lbl.textContent = 'Error: ' + e.message;
+    return;
+  }
+  renderKpis();
+  renderThead();
+  renderTable();
+}
+
+function renderKpis() {
+  const t = TOTALES;
+  document.getElementById('kpis').innerHTML = `
+    <div class="kpi"><div class="k-label">Publicaciones</div><div class="k-value">${int(t.publicaciones)}</div></div>
+    <div class="kpi"><div class="k-label">Visitas del período</div><div class="k-value">${int(t.visitas)}</div></div>
+    <div class="kpi"><div class="k-label">Unidades vendidas</div><div class="k-value">${int(t.unidades)}</div></div>
+    <div class="kpi"><div class="k-label">Conversión general</div><div class="k-value">${pct(t.conversion)}</div></div>
+    <div class="kpi"><div class="k-label">Sin una sola visita</div><div class="k-value">${int(t.sin_visitas)}</div></div>`;
+  // El item_id en el snapshot de órdenes se guarda desde el 30/07/2026: las
+  // ventas cacheadas antes de eso no se pueden atribuir a una publicación.
+  const av = document.getElementById('aviso-sin-mla');
+  av.innerHTML = t.unidades_sin_mla
+    ? `⚠ ${int(t.unidades_sin_mla)} unidad(es) vendidas en el período no tienen la publicación identificada (se cachearon antes de que el panel guardara el MLA de cada venta), así que NO están contadas en la conversión de ninguna fila. Se corrigen recargando las ventas del período desde el Dashboard.`
+    : '';
+}
+
+// Diagnóstico por fila. El orden importa: primero descartamos las que no se
+// pueden juzgar (sin visitas suficientes), recién después miramos si vende.
+function diagnostico(it) {
+  const v = it.visitas || 0;
+  if (v === 0) return { label: 'Sin visitas', cls: 'bad', orden: 0,
+                        tip: 'Nadie la vio en el período: es un problema de exposición, no de precio.' };
+  if (v < MIN_VISITAS) return { label: 'Pocas visitas', cls: 'gray', orden: 1,
+                                tip: 'Muy pocas visitas para sacar conclusiones de la conversión.' };
+  if (!it.unidades) return { label: 'No convierte', cls: 'bad', orden: 2,
+                             tip: 'La ven pero no la compran: mirá precio, fotos, envío y competencia.' };
+  const c = it.conversion || 0;
+  if (c < 0.01) return { label: 'Convierte poco', cls: 'warn', orden: 3, tip: 'Menos de 1 venta cada 100 visitas.' };
+  return { label: 'OK', cls: 'ok', orden: 4, tip: 'Convierte bien.' };
+}
+
+const COLS = [
+  { key: 'mla', label: 'MLA', num: false },
+  { key: 'sku', label: 'SKU', num: false },
+  { key: 'titulo', label: 'Título', num: false },
+  { key: 'visitas', label: 'Visitas', num: true },
+  { key: 'unidades', label: 'Unidades', num: true },
+  { key: 'conversion', label: 'Conversión', num: true },
+  { key: 'monto', label: 'Vendido $', num: true },
+  { key: 'diag', label: 'Diagnóstico', num: false },
+];
+function renderThead() {
+  document.getElementById('thead-row').innerHTML = '<tr>' + COLS.map(c =>
+    `<th class="${c.num ? 'num' : ''}" onclick="sortBy('${c.key}')">${c.label}${SORT.col === c.key ? (SORT.dir < 0 ? ' ↓' : ' ↑') : ''}</th>`
+  ).join('') + '</tr>';
+}
+function sortBy(col) {
+  if (SORT.col === col) SORT.dir *= -1; else SORT = { col, dir: -1 };
+  renderThead();
+  renderTable();
+}
+function filtered() {
+  const q = (document.getElementById('search').value || '').trim().toLowerCase();
+  const f = document.getElementById('filtro').value;
+  let rows = ITEMS;
+  if (q) rows = rows.filter(it => (it.sku || '').toLowerCase().includes(q) || (it.titulo || '').toLowerCase().includes(q));
+  if (f === 'oportunidad') rows = rows.filter(it => (it.visitas || 0) >= MIN_VISITAS && !it.unidades);
+  else if (f === 'sinvisitas') rows = rows.filter(it => !it.visitas);
+  else if (f === 'convierte') rows = rows.filter(it => (it.conversion || 0) >= 0.01);
+  const dir = SORT.dir;
+  const val = it => {
+    switch (SORT.col) {
+      case 'mla': return it.item_id || '';
+      case 'sku': return (it.sku || '').toLowerCase();
+      case 'titulo': return (it.titulo || '').toLowerCase();
+      case 'diag': return diagnostico(it).orden;
+      default: return it[SORT.col] == null ? -1 : it[SORT.col];
+    }
+  };
+  return rows.slice().sort((a, b) => {
+    const va = val(a), vb = val(b);
+    if (va < vb) return -dir;
+    if (va > vb) return dir;
+    return 0;
+  });
+}
+// Único link: el gestor de publicaciones de ML filtrado por ese MLA (mismo
+// criterio que Precios Mayoristas: deja a un clic de "Modificar").
+function mlaCell(it) {
+  const manage = `https://www.mercadolibre.com.ar/publicaciones?filters=ACTIVE&page=1&sort=DEFAULT&search=${encodeURIComponent(it.item_id)}`;
+  return `<a class="mla-link" href="${manage}" target="_blank" rel="noopener" title="Abrir en Mis publicaciones de ML">${esc(it.item_id)}</a>`;
+}
+// El SKU sale de la base de Descuentos (cruce por MLA) y solo si el MLA no
+// está cargado ahí se usa el de ML — mismo criterio que Precios Mayoristas,
+// porque las publicaciones con cuotas llevan un SKU propio (-3C/-6C/...).
+function skuCell(it) {
+  const dif = it.sku_from === 'descuentos' && (it.sku_ml || '') &&
+              (it.sku_ml || '').trim().toUpperCase() !== (it.sku || '').trim().toUpperCase();
+  return `<b title="${it.sku_from === 'descuentos' ? 'SKU de la base de Descuentos (cruce por MLA)' : 'SKU cargado en Mercado Libre'}">${esc(it.sku || '—')}</b>` +
+    (dif ? `<div class="tier-ml muted">ML: ${esc(it.sku_ml)}</div>` : '');
+}
+function renderTable() {
+  const rows = filtered();
+  document.getElementById('count-label').textContent = `${rows.length} de ${ITEMS.length} publicación(es)`;
+  document.getElementById('tbody-items').innerHTML = rows.length ? rows.map(it => {
+    const d = diagnostico(it);
+    return `<tr>
+      <td>${mlaCell(it)}</td>
+      <td>${skuCell(it)}</td>
+      <td><div class="titulo" title="${esc(it.titulo)}">${esc(it.titulo)}</div></td>
+      <td class="num">${int(it.visitas)}</td>
+      <td class="num">${it.unidades ? int(it.unidades) : '<span class="muted">0</span>'}</td>
+      <td class="num">${it.conversion == null ? '<span class="muted">—</span>' : pct(it.conversion)}</td>
+      <td class="num">${it.monto ? fmt(it.monto) : '<span class="muted">—</span>'}</td>
+      <td><span class="badge ${d.cls}" title="${d.tip}">${d.label}</span></td>
+    </tr>`;
+  }).join('') : `<tr><td colspan="${COLS.length}" class="empty">${ITEMS.length ? 'Ninguna publicación cumple el filtro.' : 'Sin datos para el período.'}</td></tr>`;
+}
+
+document.addEventListener('DOMContentLoaded', () => loadAll(false));
+</script>
+</body>
+</html>
