@@ -170,8 +170,30 @@
       en un solo paquete. Acá ves, tramo por tramo, cuál es el <b>precio máximo que ML acepta</b> y si tu escala lo cumple.
       Como ML tarifa el envío por tramos de peso, el máximo no siempre baja de forma pareja: la columna <b>Techo real</b> aplica
       además la regla de que el precio tiene que ir bajando al subir la cantidad.
+      <b>Sin exigencia</b> = el envío lo paga el comprador, ML no pide ningún descuento por cantidad y el precio mayorista es libre.
     </div>
     <div id="sim-result"></div>
+
+    <div class="bulk-bar" style="margin-top:14px;">
+      <button class="primary" id="btn-sim-all" onclick="runSimAll()">Simular todas las publicaciones</button>
+      <span class="sep">|</span>
+      <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:#666;">
+        <input type="checkbox" id="simall-only-fail" onchange="renderSimAll()"> Solo los que exceden
+      </label>
+      <span class="sep">|</span>
+      <button class="btn-nav" onclick="exportSimAll()">Descargar CSV</button>
+      <span id="simall-msg" class="bulk-msg"></span>
+    </div>
+    <div class="param-hint">
+      Corre la misma simulación sobre toda la lista (respeta el buscador de SKU de arriba). Tarda: cada publicación necesita su
+      propia consulta de envío a ML. Se puede cortar en cualquier momento y lo ya calculado queda en pantalla.
+    </div>
+    <div style="overflow:auto;max-height:65vh;margin-top:8px;">
+      <table id="simall-table">
+        <thead id="simall-thead"></thead>
+        <tbody id="simall-tbody"></tbody>
+      </table>
+    </div>
   </div>
 
   <div class="card" id="view-tabla">
@@ -242,6 +264,15 @@ async function runSim(itemId) {
   } catch (e) { msg.textContent = 'Error: ' + e.message; }
 }
 const rentaCls = r => (r == null ? '' : (r < 0 ? 'neg' : (r < 0.10 ? 'mid' : 'pos')));
+// "Excede" = tu precio de ese tramo es MÁS CARO que el techo que acepta ML
+// (ML exige trasladar el ahorro de envío). "Sin exigencia" = ML no pide nada
+// para ese tramo (envío a cargo del comprador, o no devolvió peso/costo): ahí
+// el precio mayorista es libre, no hay nada que exceder.
+function simEstado(t) {
+  if (t.sin_dato) return { label: 'Sin dato', cls: 'mid' };
+  if (!t.exige) return { label: 'Sin exigencia', cls: 'muted' };
+  return t.cumple ? { label: 'Cumple', cls: 'pos' } : { label: 'Excede', cls: 'neg' };
+}
 function renderSim(j) {
   const shipNote = j.shipping.applies
     ? `Envío 1 un.: <b>${fmt(j.shipping.base_cost)}</b> · Peso facturable: <b>${j.shipping.billable_weight} g</b>`
@@ -256,7 +287,7 @@ function renderSim(j) {
       <td class="num">${t.pct_necesario != null ? t.pct_necesario.toFixed(2) + '%' : '<span class="muted">—</span>'}</td>
       <td class="num">${fmt(t.target_escala)} <span class="muted">(${(t.pct*100).toFixed(1)}%)</span>
         <div class="tier-ml ${rentaCls(t.renta_escala)}">renta ${pct(t.renta_escala)}</div></td>
-      <td class="num ${t.cumple ? 'pos' : 'neg'}"><b>${t.cumple ? 'Cumple' : 'Excede'}</b></td>
+      <td class="num ${simEstado(t).cls}"><b>${simEstado(t).label}</b></td>
       <td class="num">${fmt(t.cargado_en_ml)}
         ${t.cargado_en_ml != null ? `<div class="tier-ml ${rentaCls(t.renta_cargado)}">renta ${pct(t.renta_cargado)}</div>` : ''}</td>
     </tr>`).join('');
@@ -290,6 +321,122 @@ function renderSim(j) {
       </table>
     </div>${sugerencia}
     <div class="param-hint" style="margin-top:8px;">La <b>renta</b> usa el mismo motor que Margen → MELI (comisión variable, comisión por cuotas, comisión fija por tramos, costo de CMV e IVA del SKU), pero con el precio de cada tramo y el envío prorrateado: despachar ${(j.tiers||[]).map(t=>t.qty).join('/')} unidades juntas cuesta menos por unidad que despacharlas sueltas.</div>`;
+}
+
+// ── Simulación de TODA la lista ──
+// Se manda en tandas para poder mostrar progreso y cortar a mitad de camino:
+// cada publicación necesita su propia consulta de envío contra ML, así que
+// simular 600 avisos de una sola vez se comería el timeout.
+const SIMALL_CHUNK = 25;
+let SIMALL = [];
+let SIMALL_RUNNING = false;
+let SIMALL_STOP = false;
+
+async function runSimAll() {
+  if (SIMALL_RUNNING) { SIMALL_STOP = true; return; }
+  const q = (document.getElementById('search')?.value || '').trim().toLowerCase();
+  const targets = ITEMS.filter(it => !q || (it.sku || '').toLowerCase().includes(q));
+  const msg = document.getElementById('simall-msg');
+  const btn = document.getElementById('btn-sim-all');
+  if (!targets.length) { msg.textContent = 'No hay publicaciones para simular.'; return; }
+  SIMALL = []; SIMALL_STOP = false; SIMALL_RUNNING = true;
+  btn.textContent = 'Cortar';
+  renderSimAll();
+  try {
+    for (let i = 0; i < targets.length && !SIMALL_STOP; i += SIMALL_CHUNK) {
+      const chunk = targets.slice(i, i + SIMALL_CHUNK);
+      msg.textContent = `Simulando ${Math.min(i + chunk.length, targets.length)} de ${targets.length}...`;
+      try {
+        const r = await fetch(`/api/precios-mayoristas/${currentAccountId}/simular-todo`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ item_ids: chunk.map(c => c.item_id) }) });
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.detail || 'error');
+        SIMALL = SIMALL.concat(j.items || []);
+      } catch (e) {
+        msg.textContent = 'Error: ' + e.message;
+        break;
+      }
+      renderSimAll();
+    }
+    if (!msg.textContent.startsWith('Error')) {
+      msg.textContent = `${SIMALL.length} publicación(es) simuladas${SIMALL_STOP ? ' (cortado)' : ''}.`;
+    }
+  } finally {
+    SIMALL_RUNNING = false; SIMALL_STOP = false;
+    btn.textContent = 'Simular todas las publicaciones';
+    renderSimAll();
+  }
+}
+// Estado global de la fila: alcanza con que UN tramo exceda para que la
+// publicación no se pueda cargar tal cual está configurada.
+function simAllRowState(it) {
+  const tiers = it.tiers || [];
+  if (it.error) return { label: 'Error', cls: 'neg' };
+  if (!tiers.some(t => t.exige)) {
+    return tiers.some(t => t.sin_dato) ? { label: 'Sin dato', cls: 'mid' }
+                                       : { label: 'Sin exigencia', cls: 'muted' };
+  }
+  const fails = tiers.filter(t => t.exige && !t.cumple).length;
+  return fails ? { label: `Excede ${fails}`, cls: 'neg' } : { label: 'Cumple', cls: 'pos' };
+}
+function renderSimAll() {
+  const onlyFail = document.getElementById('simall-only-fail')?.checked;
+  const rows = SIMALL.filter(it => !onlyFail || simAllRowState(it).cls === 'neg');
+  document.getElementById('simall-thead').innerHTML = SIMALL.length ? `<tr>
+    <th>MLA</th><th>SKU</th>
+    <th class="num">PVP MELI</th>
+    <th class="num" title="Costo de envío de 1 unidad (lo que paga el vendedor)">Envío 1 un.</th>
+    <th class="num" title="Renta al PVP MELI con el envío de 1 unidad — igual que Margen → MELI">Renta 1 un.</th>
+    ${TIERS.map(t => `<th class="num">${t.qty}+ un. (${(t.pct * 100).toFixed(1)}%)</th>`).join('')}
+    <th class="num">Estado</th>
+  </tr>` : '';
+  document.getElementById('simall-tbody').innerHTML = rows.length ? rows.map(it => {
+    const st = simAllRowState(it);
+    const cells = TIERS.map(cfg => {
+      const t = (it.tiers || []).find(x => x.qty === cfg.qty);
+      if (!t) return '<td class="num muted">—</td>';
+      const e = simEstado(t);
+      return `<td class="num" title="Techo real de ML: ${t.precio_max_acumulado == null ? 'sin exigencia' : fmtPlain(t.precio_max_acumulado)}">
+        ${fmt(t.target_escala)}
+        <div class="tier-ml ${rentaCls(t.renta_escala)}">renta ${pct(t.renta_escala)}</div>
+        <div class="tier-ml ${e.cls}">${e.label}</div></td>`;
+    }).join('');
+    return `<tr>
+      <td>${mlaCell(it)}</td>
+      <td>${skuCell(it)}</td>
+      <td class="num">${fmt(it.base_price)}</td>
+      <td class="num">${fmt((it.shipping || {}).base_cost)}</td>
+      <td class="num ${rentaCls((it.margen || {}).renta_base)}">${pct((it.margen || {}).renta_base)}</td>
+      ${cells}
+      <td class="num ${st.cls}"><b>${st.label}</b>${it.error ? `<div class="tier-ml">${esc(it.error)}</div>` : ''}</td>
+    </tr>`;
+  }).join('') : (SIMALL.length ? `<tr><td colspan="${6 + TIERS.length}" class="empty">Ninguna publicación excede el techo de ML.</td></tr>` : '');
+}
+const fmtPlain = n => (n == null || isNaN(n)) ? '—' : '$' + Number(n).toLocaleString('es-AR', { maximumFractionDigits: 0 });
+function exportSimAll() {
+  if (!SIMALL.length) { document.getElementById('simall-msg').textContent = 'Simulá primero.'; return; }
+  const head = ['MLA', 'SKU', 'PVP MELI', 'Envio 1 un', 'Renta 1 un']
+    .concat(TIERS.flatMap(t => [`${t.qty}+ precio`, `${t.qty}+ renta`, `${t.qty}+ techo ML`, `${t.qty}+ estado`]))
+    .concat(['Estado']);
+  const num = n => (n == null || isNaN(n)) ? '' : String(n).replace('.', ',');
+  const lines = [head.join(';')].concat(SIMALL.map(it => {
+    const cols = [it.item_id, it.sku || '', num(it.base_price), num((it.shipping || {}).base_cost),
+                  num((it.margen || {}).renta_base)];
+    for (const cfg of TIERS) {
+      const t = (it.tiers || []).find(x => x.qty === cfg.qty);
+      cols.push(num(t && t.target_escala), num(t && t.renta_escala),
+                num(t && t.precio_max_acumulado), t ? simEstado(t).label : '');
+    }
+    cols.push(simAllRowState(it).label);
+    return cols.join(';');
+  }));
+  const blob = new Blob(['﻿' + lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'simulacion-mayorista.csv';
+  a.click();
+  URL.revokeObjectURL(a.href);
 }
 
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
@@ -415,16 +562,23 @@ function statusBadge(it) {
     : `<span class="badge warn" title="Lo que ML tiene cargado no coincide con tu escala sobre el PVP MELI actual">Diferencia</span>`;
   return main + extra;
 }
-// El link va al GESTOR de publicaciones de ML filtrado por ese MLA (a un clic
-// de "Modificar"), no al aviso público: la URL directa del formulario de
-// edición lleva un hash propio de cada publicación que no se puede construir
-// desde afuera. El ⧉ chico abre el aviso público por si se quiere ver.
+// Único link: el GESTOR de publicaciones de ML filtrado por ese MLA (a un clic
+// de "Modificar"). No se linkea el aviso público — la URL directa del
+// formulario de edición lleva un hash propio de cada publicación que no se
+// puede construir desde afuera, por eso se pasa por el gestor.
 function mlaCell(it) {
   const manage = `https://www.mercadolibre.com.ar/publicaciones?filters=ACTIVE&page=1&sort=DEFAULT&search=${encodeURIComponent(it.item_id)}`;
-  const pub = it.permalink
-    ? ` <a class="mla-link" href="${esc(it.permalink)}" target="_blank" rel="noopener" title="Ver el aviso público">⧉</a>`
-    : '';
-  return `<a class="mla-link" href="${manage}" target="_blank" rel="noopener" title="Abrir en Mis publicaciones de ML para modificarla">${esc(it.item_id)}</a>${pub}`;
+  return `<a class="mla-link" href="${manage}" target="_blank" rel="noopener" title="Abrir en Mis publicaciones de ML para modificarla">${esc(it.item_id)}</a>`;
+}
+// El SKU sale de la base de Descuentos (cruce por MLA) y solo si el MLA no
+// está cargado ahí se usa el de ML: las publicaciones con cuotas se manejan
+// con un SKU propio (-3C/-6C/...), que es el que tiene PVP y costo en Margen.
+// Cuando difieren se muestra abajo el de ML, para que se vea el cruce.
+function skuCell(it) {
+  const dif = it.sku_from === 'descuentos' && (it.sku_ml || '') &&
+              (it.sku_ml || '').trim().toUpperCase() !== (it.sku || '').trim().toUpperCase();
+  return `<b title="${it.sku_from === 'descuentos' ? 'SKU de la base de Descuentos (cruce por MLA)' : 'SKU cargado en Mercado Libre'}">${esc(it.sku)}</b>` +
+    (dif ? `<div class="tier-ml muted">ML: ${esc(it.sku_ml)}</div>` : '');
 }
 function renderTable() {
   const rows = filtered();
@@ -438,7 +592,7 @@ function renderTable() {
   tb.innerHTML = rows.length ? rows.map(it => `<tr>
     <td><input type="checkbox" class="row-check" ${SEL.has(it.item_id) ? 'checked' : ''} onchange="onCheck('${esc(it.item_id)}', this.checked)"></td>
     <td>${mlaCell(it)}</td>
-    <td><b>${esc(it.sku)}</b></td>
+    <td>${skuCell(it)}</td>
     <td class="num">${fmt(it.base_price)}</td>
     <td class="num">${it.pvp_real == null ? '<span class="muted">—</span>'
       : (Math.abs(it.pvp_real - it.base_price) > 1

@@ -9363,16 +9363,49 @@ async def _fetch_fotos_items(client, headers, item_ids: list) -> list:
 
 
 # ── Precios Mayoristas (Precio por Cantidad / PxQ de Mercado Libre) ───────
-def _wholesale_matches(catalog_items: list, price_by_sku_u: dict) -> list:
+def _wholesale_sku_by_mla(account_id: int) -> dict:
+    """{MLA: SKU} de la base de Descuentos (`product_discounts`) de esa cuenta.
+
+    El `seller_sku` que trae ML NO siempre es el SKU con el que trabaja la
+    casa: las publicaciones con opciones de cuotas se manejan con un SKU
+    propio (-3C/-6C/...), y es ESE el que tiene su PVP/desc/costo/tipo de
+    publicación en Margen. La base de Descuentos ya lleva ese mapeo MLA→SKU,
+    así que manda ella; si el MLA no está cargado ahí, se usa el SKU de ML.
+
+    OJO con las cuentas: `product_discounts` es POR CUENTA y el MLA también
+    pertenece a la cuenta elegida, así que acá va el account_id de la pantalla
+    — a diferencia del PVP, que sale siempre de la cuenta de Margen
+    (`_margen_account_id`)."""
+    rows = db_fetchall(
+        "SELECT mla, sku FROM product_discounts WHERE account_id=:a", {"a": account_id})
+    return {(r["mla"] or "").strip().upper(): (r["sku"] or "").strip()
+            for r in rows if (r["mla"] or "").strip() and (r["sku"] or "").strip()}
+
+
+def _wholesale_resolve_sku(item_id: str, sku_ml: str, sku_by_mla: dict) -> tuple:
+    """(sku_efectivo, origen) — Descuentos manda sobre el SKU de ML.
+    Ver `_wholesale_sku_by_mla`."""
+    sku_disc = (sku_by_mla or {}).get((item_id or "").strip().upper())
+    if sku_disc:
+        return sku_disc, "descuentos"
+    return (sku_ml or ""), "ml"
+
+
+def _wholesale_matches(catalog_items: list, price_by_sku_u: dict, sku_by_mla: dict = None) -> list:
     """Cruza el catálogo COMPLETO (todas las publicaciones activas) contra los
     SKU con PVP cargado. Un mismo SKU puede tener varias publicaciones (MLA)
     — NO se dedupea: cada MLA es su propia fila (el usuario carga el precio
-    mayorista publicación por publicación, no por SKU)."""
+    mayorista publicación por publicación, no por SKU).
+
+    El SKU de cada publicación se resuelve con `_wholesale_resolve_sku`: primero
+    la base de Descuentos (cruce por MLA), y recién si no está ahí el de ML."""
     out = []
     for it in catalog_items:
-        sku_u = (it.get("sku") or "").strip().upper()
+        sku, origin = _wholesale_resolve_sku(it["item_id"], it.get("sku") or "", sku_by_mla)
+        sku_u = sku.strip().upper()
         if sku_u in price_by_sku_u:
-            out.append({"sku": it.get("sku") or "", "item_id": it["item_id"],
+            out.append({"sku": sku, "sku_ml": it.get("sku") or "", "sku_from": origin,
+                       "item_id": it["item_id"],
                        "permalink": it.get("permalink") or "",
                        "currency_id": it.get("currency_id") or ""})
     return out
@@ -9466,12 +9499,18 @@ def _wholesale_parse_prices(data: dict) -> dict:
     return out
 
 
-async def _fetch_wholesale_prices_map(account_id: int, item_ids: list, force_refresh: bool = False) -> dict:
+async def _fetch_wholesale_prices_map(account_id: int, item_ids: list, force_refresh: bool = False,
+                                      update_cache: bool = True) -> dict:
     """{item_id: {"currency_id":..., "tiers": {qty:amount}}} leído de ML.
     GET /items/{id}/prices no tiene multiget (1 request por ítem), así que se
     cachea por cuenta con TTL, igual patrón que PUBLICACIONES_CACHE. Reintento
     con backoff ante 429/5xx: con catálogos grandes, sin retry ML rate-limitea
-    parte de los GET y esos ítems se verían como "sin cargar"."""
+    parte de los GET y esos ítems se verían como "sin cargar".
+
+    `update_cache=False` para los llamados que traen SOLO UN SUBCONJUNTO de las
+    publicaciones (la simulación masiva va de a tandas): el caché es por cuenta
+    y guardarlo con 25 ítems dejaría a todo el resto del catálogo apareciendo
+    como "sin cargar" hasta el próximo refresh."""
     cached = WHOLESALE_PRICES_CACHE.get(account_id) if not force_refresh else None
     if cached and (datetime.utcnow() - cached["at"]).total_seconds() < WHOLESALE_PRICES_CACHE_TTL_SECONDS:
         return cached["by_item"]
@@ -9500,7 +9539,8 @@ async def _fetch_wholesale_prices_map(account_id: int, item_ids: list, force_ref
                         continue
                     return
         await asyncio.gather(*[fetch_one(iid) for iid in item_ids])
-    WHOLESALE_PRICES_CACHE[account_id] = {"at": datetime.utcnow(), "by_item": by_item}
+    if update_cache:
+        WHOLESALE_PRICES_CACHE[account_id] = {"at": datetime.utcnow(), "by_item": by_item}
     return by_item
 
 
@@ -9520,21 +9560,34 @@ async def _wholesale_ship_cost(client, headers, seller_id, item, weight_grams):
            shp.get("logistic_type"), shp.get("mode"))
     if key in _WHOLESALE_SHIP_COST_CACHE:
         return _WHOLESALE_SHIP_COST_CACHE[key]
-    try:
-        r = await client.get(
-            f"{ML_API_URL}/users/{seller_id}/shipping_options/free", headers=headers,
-            params={"dimensions": f"1x1x1,{weight_grams:g}", "item_price": item.get("price"),
-                    "listing_type_id": item.get("listing_type_id"),
-                    "mode": shp.get("mode") or "me2", "condition": item.get("condition") or "new",
-                    "logistic_type": shp.get("logistic_type") or "cross_docking",
-                    "category_id": item.get("category_id"),
-                    "free_shipping": "true", "verbose": "true"})
+    # Reintento ante 429/5xx: la simulación masiva dispara muchas de estas
+    # seguidas y un rate-limit silencioso se vería como "sin exigencia".
+    for attempt in range(3):
+        try:
+            r = await client.get(
+                f"{ML_API_URL}/users/{seller_id}/shipping_options/free", headers=headers,
+                params={"dimensions": f"1x1x1,{weight_grams:g}", "item_price": item.get("price"),
+                        "listing_type_id": item.get("listing_type_id"),
+                        "mode": shp.get("mode") or "me2", "condition": item.get("condition") or "new",
+                        "logistic_type": shp.get("logistic_type") or "cross_docking",
+                        "category_id": item.get("category_id"),
+                        "free_shipping": "true", "verbose": "true"})
+        except Exception:
+            if attempt < 2:
+                await asyncio.sleep(0.4 * (2 ** attempt))
+                continue
+            return None
+        if r.status_code in (429, 500, 502, 503, 504) and attempt < 2:
+            await asyncio.sleep(0.4 * (2 ** attempt))
+            continue
         if r.status_code != 200:
             return None
-        cost = float(((r.json().get("coverage") or {}).get("all_country") or {}).get("list_cost"))
-    except (TypeError, ValueError, AttributeError, KeyError):
-        return None
-    except Exception:
+        try:
+            cost = float(((r.json().get("coverage") or {}).get("all_country") or {}).get("list_cost"))
+        except (TypeError, ValueError, AttributeError, KeyError):
+            return None
+        break
+    else:
         return None
     _WHOLESALE_SHIP_COST_CACHE[key] = cost
     return cost
@@ -9640,7 +9693,7 @@ async def api_precios_mayoristas_data(request: Request, account_id: int):
         " WHERE account_id=:a AND price IS NOT NULL", {"a": margen_aid})
     price_by_sku_u = {(r["sku"] or "").strip().upper(): r for r in rows}
     catalog = await _get_all_publicaciones(account_id, acc, force_refresh=refresh)
-    raw_matches = _wholesale_matches(catalog, price_by_sku_u)
+    raw_matches = _wholesale_matches(catalog, price_by_sku_u, _wholesale_sku_by_mla(account_id))
     matched = []
     for m in raw_matches:
         r = price_by_sku_u[(m["sku"] or "").strip().upper()]
@@ -9678,7 +9731,8 @@ async def api_precios_mayoristas_data(request: Request, account_id: int):
         extra_qtys = sorted(q for q in ml_tiers if q not in {t["qty"] for t in tiers})
         applied = applied_map.get(m["item_id"])
         items.append({
-            "sku": m["sku"], "item_id": m["item_id"], "permalink": m["permalink"],
+            "sku": m["sku"], "sku_ml": m.get("sku_ml"), "sku_from": m.get("sku_from"),
+            "item_id": m["item_id"], "permalink": m["permalink"],
             "pvp_meli": m["pvp_meli"], "base_price": base_price, "pvp_real": pvp_real,
             "currency_id": m.get("currency_id"),
             "tiers": row_tiers, "in_sync": in_sync, "has_wholesale": has_wholesale,
@@ -9699,6 +9753,108 @@ async def api_precios_mayoristas_config_save(request: Request, account_id: int):
     body = await request.json()
     tiers = wholesale_save_config(account_id, body.get("tiers") or [])
     return {"ok": True, "tiers": tiers}
+
+
+def _wholesale_sim_context(user: dict, user_id: int, account_id: int) -> dict:
+    """Todo lo que la simulación necesita de Margen/Costos, leído UNA vez para
+    que sirva a cualquier cantidad de publicaciones (lo usa tanto la simulación
+    de una como la de la lista completa). Mismos resolvers que Margen → MELI."""
+    margen_aid = _margen_account_id(get_visible_accounts(user_id, user)) or account_id
+    p = margen_get_config(margen_aid)
+    cost_aid = _cost_account_id_for(user, margen_aid)
+    versioned = db_get_product_costs(cost_aid)
+    variant_map = _get_variant_map(cost_aid)
+    mrows = db_fetchall(
+        "SELECT sku, price, desc_meli, comision_var, costo_manual, tipo_publicacion, envio_manual"
+        " FROM product_sale_prices WHERE account_id=:a", {"a": margen_aid})
+    manual_map_u, variant_map_u, comvar_map_u, _envio_manual_u = _margen_maps(mrows, variant_map)
+    return {
+        "p": p, "versioned": versioned,
+        "today_iso": (datetime.utcnow() - timedelta(hours=3)).date().isoformat(),
+        "manual_map_u": manual_map_u, "variant_map_u": variant_map_u,
+        "comvar_map_u": comvar_map_u,
+        "row_by_sku_u": {(r["sku"] or "").strip().upper(): r for r in mrows},
+    }
+
+
+def _wholesale_sim_one(ctx: dict, sku: str, tiers: list, analysis: dict, ml_tiers: dict) -> dict:
+    """Corazón de la simulación para UNA publicación: tramo por tramo, el techo
+    que exige ML por el ahorro de envío y la renta resultante.
+
+    `cumple` responde "¿mi escala entra en lo que ML acepta?". Cuando ML no
+    exige nada (envío a cargo del comprador, o no devolvió peso/costo) NO hay
+    techo: ahí `exige` es False y `cumple` queda en True — un tramo sin
+    exigencia no puede "exceder" nada."""
+    sku_u = (sku or "").strip().upper()
+    p = ctx["p"]
+    own = ctx["row_by_sku_u"].get(sku_u)
+    base_price = _margen_pvp_meli(
+        float(own["price"]) if own and own["price"] is not None else None,
+        float(own["desc_meli"]) if own and own["desc_meli"] is not None else None) if own else None
+    costo, iva_rate = _margen_resolve_cost(
+        sku_u, ctx["manual_map_u"], ctx["versioned"], ctx["today_iso"], ctx["variant_map_u"])
+    comvar = _margen_resolve_comvar(sku_u, ctx["comvar_map_u"], ctx["variant_map_u"])
+    tipo = _margen_tipo_resolve(sku_u, own["tipo_publicacion"] if own else None)
+    ccf = _margen_com_cuotas_frac(tipo, p)
+
+    rows = []
+    running_max = None
+    for t in tiers:
+        info = (analysis.get("tiers") or {}).get(t["qty"]) or {}
+        saving = info.get("saving_per_unit")
+        ship_cost = info.get("ship_cost")
+        target = round(base_price * (1 - t["pct"]), 2) if base_price else None
+        max_ml = round(base_price - saving, 2) if (base_price and saving is not None) else None
+        if max_ml is not None:
+            running_max = max_ml if running_max is None else min(running_max, max_ml)
+        # Envío por unidad del tramo, neto del IVA fijo de envíos (mismo
+        # criterio que el envío ponderado de Margen: se usa DIRECTO).
+        envio_unit = ((ship_cost / t["qty"]) / (1 + MARGEN_ENVIO_IVA_RATE / 100.0)) if ship_cost else None
+
+        def _renta(price):
+            if not price:
+                return None
+            comp = margen_compute(price, iva_rate, comvar, costo, p, ccf, envio_auto=envio_unit)
+            return comp["renta"] if comp else None
+
+        rows.append({
+            "qty": t["qty"], "pct": t["pct"],
+            "ship_cost": ship_cost,
+            "ship_cost_unit": round(ship_cost / t["qty"], 2) if ship_cost else None,
+            "saving_per_unit": saving,
+            "precio_max_ml": max_ml,
+            "precio_max_acumulado": running_max,
+            "pct_necesario": (round((1 - running_max / base_price) * 100, 2)
+                              if (base_price and running_max) else None),
+            "target_escala": target,
+            "exige": running_max is not None,
+            # ML sí exige para esta publicación (envío del vendedor) pero no se
+            # pudo obtener el costo del paquete de N: es "falta el dato", no
+            # "no hay exigencia" — distinguirlo evita leerlo como vía libre.
+            "sin_dato": bool(analysis.get("applies")) and ship_cost is None,
+            "cumple": (running_max is None
+                       or (target is not None and target <= running_max + 0.01)),
+            "cargado_en_ml": ml_tiers.get(t["qty"]),
+            "renta_escala": _renta(target),
+            "renta_max_ml": _renta(running_max),
+            "renta_cargado": _renta(ml_tiers.get(t["qty"])),
+        })
+    # Renta de referencia: 1 unidad al PVP MELI, con el envío de 1 unidad (mismo
+    # criterio que muestra Margen → MELI).
+    base_ship = analysis.get("base_cost")
+    renta_base = None
+    if base_price:
+        comp0 = margen_compute(
+            base_price, iva_rate, comvar, costo, p, ccf,
+            envio_auto=(base_ship / (1 + MARGEN_ENVIO_IVA_RATE / 100.0)) if base_ship else None)
+        renta_base = comp0["renta"] if comp0 else None
+    return {
+        "base_price": base_price,
+        "margen": {"costo_sin_iva": costo, "iva_rate": iva_rate,
+                   "comision_var": comvar if comvar is not None else p["comision_var_default"],
+                   "com_cuotas": ccf, "tipo_publicacion": tipo, "renta_base": renta_base},
+        "tiers": rows,
+    }
 
 
 @app.get("/api/precios-mayoristas/{account_id:int}/simular/{item_id}")
@@ -9745,85 +9901,116 @@ async def api_precios_mayoristas_simular(request: Request, account_id: int, item
         analysis = await wholesale_shipping_analysis(
             client, headers, acc["ml_user_id"], item, [t["qty"] for t in tiers])
 
-    # ── Datos de Margen para la renta (misma cuenta y mismos resolvers) ──
-    sku = _extract_item_sku(item)
-    sku_u = (sku or "").strip().upper()
-    margen_aid = _margen_account_id(get_visible_accounts(user_id, user)) or account_id
-    p = margen_get_config(margen_aid)
-    cost_aid = _cost_account_id_for(user, margen_aid)
-    versioned = db_get_product_costs(cost_aid)
-    variant_map = _get_variant_map(cost_aid)
-    today_iso = (datetime.utcnow() - timedelta(hours=3)).date().isoformat()
-    mrows = db_fetchall(
-        "SELECT sku, price, desc_meli, comision_var, costo_manual, tipo_publicacion, envio_manual"
-        " FROM product_sale_prices WHERE account_id=:a", {"a": margen_aid})
-    manual_map_u, variant_map_u, comvar_map_u, _envio_manual_u = _margen_maps(mrows, variant_map)
-    own = next((r for r in mrows if (r["sku"] or "").strip().upper() == sku_u), None)
-    base_price = _margen_pvp_meli(
-        float(own["price"]) if own and own["price"] is not None else None,
-        float(own["desc_meli"]) if own and own["desc_meli"] is not None else None) if own else None
-    costo, iva_rate = _margen_resolve_cost(sku_u, manual_map_u, versioned, today_iso, variant_map_u)
-    comvar = _margen_resolve_comvar(sku_u, comvar_map_u, variant_map_u)
-    tipo = _margen_tipo_resolve(sku_u, own["tipo_publicacion"] if own else None)
-    ccf = _margen_com_cuotas_frac(tipo, p)
-
-    rows = []
-    running_max = None
-    for t in tiers:
-        info = (analysis.get("tiers") or {}).get(t["qty"]) or {}
-        saving = info.get("saving_per_unit")
-        ship_cost = info.get("ship_cost")
-        target = round(base_price * (1 - t["pct"]), 2) if base_price else None
-        max_ml = round(base_price - saving, 2) if (base_price and saving is not None) else None
-        if max_ml is not None:
-            running_max = max_ml if running_max is None else min(running_max, max_ml)
-        # Envío por unidad del tramo, neto del IVA fijo de envíos (mismo
-        # criterio que el envío ponderado de Margen: se usa DIRECTO).
-        envio_unit = ((ship_cost / t["qty"]) / (1 + MARGEN_ENVIO_IVA_RATE / 100.0)) if ship_cost else None
-
-        def _renta(price):
-            if not price:
-                return None
-            comp = margen_compute(price, iva_rate, comvar, costo, p, ccf, envio_auto=envio_unit)
-            return comp["renta"] if comp else None
-
-        rows.append({
-            "qty": t["qty"], "pct": t["pct"],
-            "ship_cost": ship_cost,
-            "ship_cost_unit": round(ship_cost / t["qty"], 2) if ship_cost else None,
-            "saving_per_unit": saving,
-            "precio_max_ml": max_ml,
-            "precio_max_acumulado": running_max,
-            "pct_necesario": (round((1 - running_max / base_price) * 100, 2)
-                              if (base_price and running_max) else None),
-            "target_escala": target,
-            "cumple": (target is not None and running_max is not None and target <= running_max + 0.01),
-            "cargado_en_ml": ml_tiers.get(t["qty"]),
-            "renta_escala": _renta(target),
-            "renta_max_ml": _renta(running_max),
-            "renta_cargado": _renta(ml_tiers.get(t["qty"])),
-        })
-    # Renta de referencia: 1 unidad al PVP MELI, con el envío de 1 unidad (mismo
-    # criterio que muestra Margen → MELI).
-    base_ship = analysis.get("base_cost")
-    renta_base = None
-    if base_price:
-        comp0 = margen_compute(
-            base_price, iva_rate, comvar, costo, p, ccf,
-            envio_auto=(base_ship / (1 + MARGEN_ENVIO_IVA_RATE / 100.0)) if base_ship else None)
-        renta_base = comp0["renta"] if comp0 else None
+    # SKU: manda la base de Descuentos (cruce por MLA), si no el de ML — es el
+    # SKU con el que Margen tiene el PVP/costo/tipo de esta publicación.
+    sku, sku_from = _wholesale_resolve_sku(item_id, _extract_item_sku(item),
+                                           _wholesale_sku_by_mla(account_id))
+    ctx = _wholesale_sim_context(user, user_id, account_id)
+    sim = _wholesale_sim_one(ctx, sku, tiers, analysis, ml_tiers)
     return {
-        "item_id": item_id, "sku": sku, "title": item.get("title"),
-        "base_price": base_price, "pvp_real": pvp_real,
+        "item_id": item_id, "sku": sku, "sku_from": sku_from, "title": item.get("title"),
+        "base_price": sim["base_price"], "pvp_real": pvp_real,
         "currency_id": pdata.get("currency_id"),
-        "margen": {"costo_sin_iva": costo, "iva_rate": iva_rate,
-                   "comision_var": comvar if comvar is not None else p["comision_var_default"],
-                   "com_cuotas": ccf, "tipo_publicacion": tipo, "renta_base": renta_base},
+        "margen": sim["margen"],
         "shipping": {"applies": analysis.get("applies"), "reason": analysis.get("reason"),
                      "base_cost": analysis.get("base_cost"),
                      "billable_weight": analysis.get("billable_weight")},
-        "tiers": rows,
+        "tiers": sim["tiers"],
     }
+
+
+# Lo mínimo que necesita wholesale_shipping_analysis + la renta, para no pedir
+# GET /items/{id} uno por uno en la simulación masiva (multiget de a 20).
+WHOLESALE_SIM_ATTRS = ("id,title,price,shipping,listing_type_id,category_id,condition,"
+                       "seller_sku,attributes,variations")
+
+
+@app.post("/api/precios-mayoristas/{account_id:int}/simular-todo")
+async def api_precios_mayoristas_simular_todo(request: Request, account_id: int):
+    """Misma simulación que `/simular/{item_id}` pero para un LOTE de
+    publicaciones, para poder ver la lista completa en vez de ir MLA por MLA.
+
+    El frontend manda los item_ids de a tandas (así muestra progreso y no se
+    come un timeout): acá se resuelve el catálogo por multiget (20 por request,
+    en vez de un GET /items por publicación) y el análisis de envío corre en
+    paralelo con un tope, porque cada publicación necesita su propio
+    `shipping_options/free` para saber el peso facturable (el costo por
+    peso/categoría sí se comparte vía _WHOLESALE_SHIP_COST_CACHE).
+
+    Los /prices salen del caché que ya llenó /data (mismo TTL), así que en
+    general no se vuelven a pedir."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    user = get_user(user_id)
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    body = await request.json()
+    item_ids = [str(i).strip() for i in (body.get("item_ids") or []) if str(i or "").strip()]
+    if not item_ids:
+        raise HTTPException(400, "Falta la lista de publicaciones.")
+    if len(item_ids) > 60:
+        raise HTTPException(400, "Máximo 60 publicaciones por tanda.")
+    tiers = wholesale_get_config(account_id)
+    qtys = [t["qty"] for t in tiers]
+    token = await refresh_ml_token(account_id)
+    if not token:
+        raise HTTPException(502)
+    headers = {"Authorization": f"Bearer {token}"}
+    ctx = _wholesale_sim_context(user, user_id, account_id)
+    sku_by_mla = _wholesale_sku_by_mla(account_id)
+    prices_map = await _fetch_wholesale_prices_map(account_id, item_ids, update_cache=False)
+
+    info_map = {}
+    sem = asyncio.Semaphore(6)
+    async with httpx.AsyncClient(timeout=90) as client:
+        async def fetch_batch(chunk):
+            try:
+                rb = await client.get(f"{ML_API_URL}/items", headers=headers,
+                                      params={"ids": ",".join(chunk), "attributes": WHOLESALE_SIM_ATTRS})
+                if rb.status_code != 200:
+                    return
+                for entry in rb.json():
+                    body_ = entry.get("body") if isinstance(entry, dict) and entry.get("code") == 200 else None
+                    if isinstance(body_, dict) and body_.get("id"):
+                        info_map[body_["id"]] = body_
+            except Exception:
+                pass
+
+        await asyncio.gather(*[fetch_batch(item_ids[i:i + 20]) for i in range(0, len(item_ids), 20)])
+
+        results = {}
+
+        async def sim_one(item_id):
+            async with sem:
+                item = info_map.get(item_id)
+                if not item:
+                    results[item_id] = {"item_id": item_id, "error": "No se pudo leer la publicación."}
+                    return
+                try:
+                    analysis = await wholesale_shipping_analysis(
+                        client, headers, acc["ml_user_id"], item, qtys)
+                except Exception as e:
+                    analysis = {"applies": False, "reason": str(e)[:120], "base_cost": None,
+                                "billable_weight": None, "tiers": {}}
+                pdata = prices_map.get(item_id) or {}
+                sku_ml = _extract_item_sku(item)
+                sku, sku_from = _wholesale_resolve_sku(item_id, sku_ml, sku_by_mla)
+                sim = _wholesale_sim_one(ctx, sku, tiers, analysis, pdata.get("tiers") or {})
+                results[item_id] = {
+                    "item_id": item_id, "sku": sku, "sku_ml": sku_ml, "sku_from": sku_from,
+                    "title": item.get("title"), "error": None,
+                    "base_price": sim["base_price"], "pvp_real": pdata.get("sale_price"),
+                    "margen": sim["margen"],
+                    "shipping": {"applies": analysis.get("applies"), "reason": analysis.get("reason"),
+                                 "base_cost": analysis.get("base_cost"),
+                                 "billable_weight": analysis.get("billable_weight")},
+                    "tiers": sim["tiers"],
+                }
+
+        await asyncio.gather(*[sim_one(i) for i in item_ids])
+    return {"items": [results[i] for i in item_ids if i in results]}
 
 
 @app.post("/api/precios-mayoristas/{account_id:int}/apply")
@@ -9855,8 +10042,13 @@ async def api_precios_mayoristas_apply(request: Request, account_id: int):
     catalog = await _get_all_publicaciones(account_id, acc)
     # item_id -> SKU/currency directo del catálogo (1 a 1, no hace falta
     # dedupear: cada item_id ya es único de por sí, a diferencia de
-    # _wholesale_matches que cruza en la otra dirección para /data).
-    item_to_sku = {it["item_id"]: (it.get("sku") or "").strip().upper() for it in catalog}
+    # _wholesale_matches que cruza en la otra dirección para /data). El SKU sale
+    # de la base de Descuentos si el MLA está ahí (mismo criterio que /data:
+    # ver _wholesale_sku_by_mla), si no del catálogo de ML.
+    sku_by_mla = _wholesale_sku_by_mla(account_id)
+    item_to_sku = {
+        it["item_id"]: _wholesale_resolve_sku(it["item_id"], it.get("sku") or "", sku_by_mla)[0].strip().upper()
+        for it in catalog}
     item_to_currency = {it["item_id"]: it.get("currency_id") for it in catalog}
     margen_aid = _margen_account_id(get_visible_accounts(user_id, user)) or account_id
     rows = db_fetchall(
