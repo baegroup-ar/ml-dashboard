@@ -156,6 +156,10 @@
 
   <div class="card">
     <div class="bulk-bar">
+      <label id="diff-filter-wrap" style="display:none;align-items:center;gap:5px;font-size:12px;color:#666;">
+        <input type="checkbox" id="only-diff" onchange="renderTable()"> Solo con diferencia
+      </label>
+      <span class="sep" id="diff-filter-sep" style="display:none;">|</span>
       <span id="sel-count" class="bulk-count">0 seleccionados</span>
       <button class="btn-nav" onclick="selectOutOfSync()">Seleccionar desactualizados</button>
       <span class="sep">|</span>
@@ -186,6 +190,10 @@ function setTab(t) {
   TAB = t;
   document.getElementById('tab-sincargar').classList.toggle('active', t === 'sincargar');
   document.getElementById('tab-cargado').classList.toggle('active', t === 'cargado');
+  const isCargado = t === 'cargado';
+  document.getElementById('diff-filter-wrap').style.display = isCargado ? 'flex' : 'none';
+  document.getElementById('diff-filter-sep').style.display = isCargado ? '' : 'none';
+  if (!isCargado) document.getElementById('only-diff').checked = false;
   renderThead();
   renderTable();
 }
@@ -258,39 +266,46 @@ async function saveTiersConfig() {
 // ── Tabla principal ──
 function renderThead() {
   const cols = TIERS.map(t => `<th class="num">${t.qty}+ un. (${(t.pct * 100).toFixed(1)}%)</th>`).join('');
+  const cargadoCols = TAB === 'cargado' ? '<th>Estado</th><th></th>' : '';
   document.getElementById('thead-row').innerHTML = `<tr>
     <th style="width:30px;"><input type="checkbox" onchange="toggleAll(this)"></th>
-    <th>SKU</th>
     <th>MLA</th>
+    <th>SKU</th>
     <th class="num">PVP MELI</th>
     ${cols}
-    <th>Estado</th>
-    ${TAB === 'cargado' ? '<th></th>' : ''}
+    ${cargadoCols}
   </tr>`;
 }
 // Sin cargar / Cargado: separa por si ML ya tiene ALGÚN tramo mayorista
 // cargado para esa publicación (has_wholesale), sin importar si coincide con
-// la config actual (eso lo indica el badge de Estado).
+// la config actual (eso lo indica el filtro "Solo con diferencia" / Estado).
 function filtered() {
   const q = (document.getElementById('search')?.value || '').trim().toLowerCase();
   let rows = ITEMS.filter(it => TAB === 'cargado' ? it.has_wholesale : !it.has_wholesale);
+  if (TAB === 'cargado' && document.getElementById('only-diff')?.checked) {
+    rows = rows.filter(it => !it.in_sync);
+  }
   if (q) rows = rows.filter(it => (it.sku || '').toLowerCase().includes(q));
   return rows;
 }
+// Sin cargar: solo se muestra el precio objetivo (no hay nada en ML todavía).
+// Cargado: primero el precio QUE HOY TIENE ML (lo importante para el usuario),
+// abajo el que debería tener según el cálculo — así se ve la diferencia.
 function tierCell(it, t) {
   const row = (it.tiers || []).find(r => r.qty === t.qty);
   if (!row) return `<td class="num muted">—</td>`;
+  if (TAB !== 'cargado') {
+    return `<td class="num"><div class="tier-target">${fmt(row.target_amount)}</div></td>`;
+  }
   const inSync = row.current_amount != null && Math.abs(row.current_amount - row.target_amount) <= 1;
-  const cls = row.current_amount == null ? '' : (inSync ? 'pos' : 'mid');
+  const cls = inSync ? 'pos' : 'mid';
   return `<td class="num">
-    <div class="tier-target ${cls}">${fmt(row.target_amount)}</div>
-    <div class="tier-ml">ML: ${row.current_amount != null ? fmt(row.current_amount) : '—'}</div>
+    <div class="tier-target ${cls}">${fmt(row.current_amount)}</div>
+    <div class="tier-ml">Debería: ${fmt(row.target_amount)}</div>
   </td>`;
 }
 function statusBadge(it) {
-  if (it.in_sync) return `<span class="badge ok">Sincronizado</span>`;
-  const anyLoaded = (it.tiers || []).some(t => t.current_amount != null);
-  return anyLoaded ? `<span class="badge warn">Desactualizado</span>` : `<span class="badge gray">Sin cargar en ML</span>`;
+  return it.in_sync ? `<span class="badge ok">OK</span>` : `<span class="badge warn">Diferencia</span>`;
 }
 function renderTable() {
   const rows = filtered();
@@ -299,16 +314,16 @@ function renderTable() {
   const total = ITEMS.length;
   if (el) el.textContent = `${n} de ${total} publicación(es) (${TAB === 'cargado' ? 'cargado' : 'sin cargar'})`;
   const tb = document.getElementById('tbody-items');
-  const extraCol = TAB === 'cargado' ? 1 : 0;
+  const isCargado = TAB === 'cargado';
+  const totalCols = 4 + TIERS.length + (isCargado ? 2 : 0);
   tb.innerHTML = rows.length ? rows.map(it => `<tr>
     <td><input type="checkbox" class="row-check" ${SEL.has(it.item_id) ? 'checked' : ''} onchange="onCheck('${esc(it.item_id)}', this.checked)"></td>
-    <td><b>${esc(it.sku)}</b></td>
     <td>${it.permalink ? `<a class="mla-link" href="${esc(it.permalink)}" target="_blank" rel="noopener">${esc(it.item_id)}</a>` : esc(it.item_id)}</td>
+    <td><b>${esc(it.sku)}</b></td>
     <td class="num">${fmt(it.pvp_meli)}</td>
     ${TIERS.map(t => tierCell(it, t)).join('')}
-    <td>${statusBadge(it)}</td>
-    ${TAB === 'cargado' ? `<td><button class="btn-small" onclick="applyOne('${esc(it.item_id)}')">Actualizar</button></td>` : ''}
-  </tr>`).join('') : `<tr><td colspan="${4 + TIERS.length + 1 + extraCol}" class="empty">${total ? 'Ninguna publicación cumple el filtro.' : 'No hay SKU con PVP MELI y publicación activa correspondiente.'}</td></tr>`;
+    ${isCargado ? `<td>${statusBadge(it)}</td><td><button class="btn-small" onclick="applyOne('${esc(it.item_id)}')">Actualizar</button></td>` : ''}
+  </tr>`).join('') : `<tr><td colspan="${totalCols}" class="empty">${total ? 'Ninguna publicación cumple el filtro.' : 'No hay SKU con PVP MELI y publicación activa correspondiente.'}</td></tr>`;
   updateSelCount();
 }
 

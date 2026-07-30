@@ -9391,16 +9391,30 @@ async def _fetch_wholesale_prices_map(account_id: int, item_ids: list, force_ref
         raise HTTPException(502)
     headers = {"Authorization": f"Bearer {token}"}
     by_item: dict = {}
-    sem = asyncio.Semaphore(15)
+    # Concurrencia + reintento con backoff ante 429/5xx (mismo patrón que el
+    # descubridor de promos, main.py ~8520): con catálogos grandes (varios
+    # cientos de MLA) sin retry, ML rate-limitea una porción grande de los
+    # GET individuales y esos ítems quedan silenciosamente afuera de
+    # `by_item` → se ven como "sin cargar" aunque sí tengan tramos en ML.
+    sem = asyncio.Semaphore(20)
     async with httpx.AsyncClient(timeout=30) as client:
         async def fetch_one(item_id):
             async with sem:
-                try:
-                    r = await client.get(f"{ML_API_URL}/items/{item_id}/prices", headers=headers)
+                for attempt in range(3):
+                    try:
+                        r = await client.get(f"{ML_API_URL}/items/{item_id}/prices", headers=headers)
+                    except Exception:
+                        if attempt < 2:
+                            await asyncio.sleep(0.4 * (2 ** attempt))
+                            continue
+                        return
                     if r.status_code == 200:
                         by_item[item_id] = _wholesale_parse_prices(r.json())
-                except Exception:
-                    pass
+                        return
+                    if r.status_code in (429, 500, 502, 503, 504) and attempt < 2:
+                        await asyncio.sleep(0.4 * (2 ** attempt))
+                        continue
+                    return
         await asyncio.gather(*[fetch_one(iid) for iid in item_ids])
     WHOLESALE_PRICES_CACHE[account_id] = {"at": datetime.utcnow(), "by_item": by_item}
     return by_item
