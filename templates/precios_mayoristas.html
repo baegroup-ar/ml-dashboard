@@ -46,6 +46,7 @@
     .tier-target { font-weight: 600; }
     .tier-target.pos { color: #1a8a5a; }
     .tier-target.mid { color: #c47a1e; }
+    .pos { color: #1a8a5a; } .mid { color: #c47a1e; } .neg { color: #c0392b; }
     .tier-ml { font-size: 10px; color: #999; }
     .bulk-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 12px; margin-bottom: 12px; background: #f7f9fc; border: 1px solid #e6ecf5; border-radius: 10px; font-size: 13px; }
     .bulk-bar .bulk-count { color: #005CFF; font-size: 12px; }
@@ -240,31 +241,38 @@ async function runSim(itemId) {
     box.innerHTML = renderSim(j);
   } catch (e) { msg.textContent = 'Error: ' + e.message; }
 }
+const rentaCls = r => (r == null ? '' : (r < 0 ? 'neg' : (r < 0.10 ? 'mid' : 'pos')));
 function renderSim(j) {
   const shipNote = j.shipping.applies
-    ? `Envío de 1 unidad: <b>${fmt(j.shipping.base_cost)}</b> · Peso facturable: <b>${j.shipping.billable_weight} g</b>`
+    ? `Envío 1 un.: <b>${fmt(j.shipping.base_cost)}</b> · Peso facturable: <b>${j.shipping.billable_weight} g</b>`
     : `<span class="badge gray">Sin exigencia de ML</span> ${esc(j.shipping.reason || '')}`;
-  const rows = (j.tiers || []).map(t => {
-    const okCls = t.cumple ? 'pos' : 'neg';
-    return `<tr>
+  const m = j.margen || {};
+  const rows = (j.tiers || []).map(t => `<tr>
       <td><b>${t.qty}+ un.</b></td>
-      <td class="num">${fmt(t.ship_cost)}</td>
+      <td class="num">${fmt(t.ship_cost)}<div class="tier-ml">${fmt(t.ship_cost_unit)}/un.</div></td>
       <td class="num">${fmt(t.saving_per_unit)}</td>
-      <td class="num"><b>${fmt(t.precio_max_acumulado)}</b></td>
+      <td class="num"><b>${fmt(t.precio_max_acumulado)}</b>
+        <div class="tier-ml ${rentaCls(t.renta_max_ml)}">renta ${pct(t.renta_max_ml)}</div></td>
       <td class="num">${t.pct_necesario != null ? t.pct_necesario.toFixed(2) + '%' : '<span class="muted">—</span>'}</td>
-      <td class="num">${fmt(t.target_escala)} <span class="muted">(${(t.pct*100).toFixed(1)}%)</span></td>
-      <td class="num ${okCls}"><b>${t.cumple ? 'Cumple' : 'Excede'}</b></td>
-      <td class="num">${fmt(t.cargado_en_ml)}</td>
-    </tr>`;
-  }).join('');
+      <td class="num">${fmt(t.target_escala)} <span class="muted">(${(t.pct*100).toFixed(1)}%)</span>
+        <div class="tier-ml ${rentaCls(t.renta_escala)}">renta ${pct(t.renta_escala)}</div></td>
+      <td class="num ${t.cumple ? 'pos' : 'neg'}"><b>${t.cumple ? 'Cumple' : 'Excede'}</b></td>
+      <td class="num">${fmt(t.cargado_en_ml)}
+        ${t.cargado_en_ml != null ? `<div class="tier-ml ${rentaCls(t.renta_cargado)}">renta ${pct(t.renta_cargado)}</div>` : ''}</td>
+    </tr>`).join('');
   const maxPct = Math.max(...(j.tiers || []).map(t => t.pct_necesario || 0));
   const sugerencia = j.shipping.applies && isFinite(maxPct) && maxPct > 0
-    ? `<div class="param-hint" style="margin-top:10px;">Para que <b>todos</b> los tramos de esta publicación pasen, el descuento del último tramo tendría que ser de al menos <b>${maxPct.toFixed(2)}%</b>.</div>`
+    ? `<div class="param-hint" style="margin-top:10px;">Para que <b>todos</b> los tramos pasen, el descuento del último tramo tendría que ser de al menos <b>${maxPct.toFixed(2)}%</b>.</div>`
     : '';
+  const realNote = (j.pvp_real != null && j.base_price && Math.abs(j.pvp_real - j.base_price) > 1)
+    ? ` · <span class="mid">PVP Real en ML: ${fmt(j.pvp_real)}</span> <span class="muted">(campaña con aporte de ML — no se usa de base)</span>` : '';
   return `
     <div style="font-size:13px;margin-bottom:8px;">
       <b>${esc(j.sku || '')}</b> — ${esc((j.title || '').slice(0, 80))}<br>
-      <span style="color:#666;">Precio vigente de 1 unidad en ML: <b>${fmt(j.base_price)}</b> · ${shipNote}</span>
+      <span style="color:#666;">PVP MELI: <b>${fmt(j.base_price)}</b>${realNote} · ${shipNote}</span><br>
+      <span style="color:#666;">Costo s/IVA: <b>${fmt(m.costo_sin_iva)}</b> · IVA ${m.iva_rate}% ·
+        Com. var ${pct(m.comision_var)}${m.com_cuotas ? ` · Cuotas ${pct(m.com_cuotas)} (${esc(m.tipo_publicacion)})` : ''} ·
+        Renta a 1 un.: <b class="${rentaCls(m.renta_base)}">${pct(m.renta_base)}</b></span>
     </div>
     <div style="overflow:auto;">
       <table>
@@ -280,11 +288,14 @@ function renderSim(j) {
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>
-    </div>${sugerencia}`;
+    </div>${sugerencia}
+    <div class="param-hint" style="margin-top:8px;">La <b>renta</b> usa el mismo motor que Margen → MELI (comisión variable, comisión por cuotas, comisión fija por tramos, costo de CMV e IVA del SKU), pero con el precio de cada tramo y el envío prorrateado: despachar ${(j.tiers||[]).map(t=>t.qty).join('/')} unidades juntas cuesta menos por unidad que despacharlas sueltas.</div>`;
 }
 
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 const fmt = n => (n == null || isNaN(n)) ? '<span class="muted">—</span>' : '$' + Number(n).toLocaleString('es-AR', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+// Fracción (0.16) → "16,0%". Mismo formato que Margen.
+const pct = n => (n == null || isNaN(n)) ? '<span class="muted">—</span>' : (Number(n) * 100).toLocaleString('es-AR', { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + '%';
 
 function onAccountChange() {
   currentAccountId = document.getElementById('account-select').value;
@@ -355,7 +366,8 @@ function renderThead() {
     <th style="width:30px;"><input type="checkbox" onchange="toggleAll(this)"></th>
     <th>MLA</th>
     <th>SKU</th>
-    <th class="num" title="Precio vigente de 1 unidad en ML — es la base sobre la que se calculan los tramos">Precio base</th>
+    <th class="num" title="PVP Lista − Desc. MELI. Es la base de los tramos: el descuento mayorista lo pagás vos entero.">PVP MELI</th>
+    <th class="num" title="Precio que ML muestra hoy (incluye campañas con aporte de ML). Solo referencia: no se usa para calcular.">PVP Real</th>
     ${cols}
     ${TAB === 'cargado' ? '<th>Estado</th>' : ''}
     <th></th>
@@ -422,14 +434,16 @@ function renderTable() {
   if (el) el.textContent = `${n} de ${total} publicación(es) (${TAB === 'cargado' ? 'cargado' : 'sin cargar'})`;
   const tb = document.getElementById('tbody-items');
   const isCargado = TAB === 'cargado';
-  const totalCols = 5 + TIERS.length + (isCargado ? 2 : 0);
+  const totalCols = 6 + TIERS.length + (isCargado ? 1 : 0);
   tb.innerHTML = rows.length ? rows.map(it => `<tr>
     <td><input type="checkbox" class="row-check" ${SEL.has(it.item_id) ? 'checked' : ''} onchange="onCheck('${esc(it.item_id)}', this.checked)"></td>
     <td>${mlaCell(it)}</td>
     <td><b>${esc(it.sku)}</b></td>
-    <td class="num" title="${it.base_is_ml ? 'Precio vigente en ML (incluye campañas de ML)' : 'PVP MELI (ML no devolvió precio vigente)'}">
-      ${fmt(it.base_price)}${it.base_is_ml && it.pvp_meli && Math.abs(it.base_price - it.pvp_meli) > 1
-        ? `<div class="tier-ml">PVP MELI: ${fmt(it.pvp_meli)}</div>` : ''}</td>
+    <td class="num">${fmt(it.base_price)}</td>
+    <td class="num">${it.pvp_real == null ? '<span class="muted">—</span>'
+      : (Math.abs(it.pvp_real - it.base_price) > 1
+          ? `<span class="mid" title="ML vende más barato por una campaña con aporte de ML">${fmt(it.pvp_real)}</span>`
+          : fmt(it.pvp_real))}</td>
     ${TIERS.map(t => tierCell(it, t)).join('')}
     ${isCargado ? `<td>${statusBadge(it)}</td>` : ''}
     <td><button class="btn-small" onclick="setTab('simulacion');runSim('${esc(it.item_id)}')" title="Ver cuánto exige bajar ML por el ahorro de envío">Simular</button>${

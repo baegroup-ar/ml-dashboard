@@ -9657,11 +9657,13 @@ async def api_precios_mayoristas_data(request: Request, account_id: int):
         pdata = prices_map.get(m["item_id"]) or {}
         ml_tiers = pdata.get("tiers") or {}
         has_wholesale = bool(ml_tiers)
-        # BASE del cálculo = precio VIGENTE de 1 unidad en ML (incluye campañas
-        # de ML). Si se usara el PVP propio, en publicaciones con campaña el
-        # "mayorista" saldría más caro que el minorista. Fallback al PVP MELI
-        # solo si ML no devolvió precio.
-        base_price = pdata.get("sale_price") or m["pvp_meli"]
+        # BASE del cálculo = PVP MELI (PVP Lista − Desc. MELI). NO se usa el
+        # precio vigente de ML: cuando la publicación está en una campaña de
+        # ML, parte de ese descuento lo aporta ML — y ese aporte NO existe en
+        # el precio mayorista, donde el descuento sale entero del vendedor.
+        # `pvp_real` se expone solo como referencia informativa.
+        base_price = m["pvp_meli"]
+        pvp_real = pdata.get("sale_price")
         row_tiers = []
         in_sync = has_wholesale
         for t in tiers:
@@ -9677,8 +9679,7 @@ async def api_precios_mayoristas_data(request: Request, account_id: int):
         applied = applied_map.get(m["item_id"])
         items.append({
             "sku": m["sku"], "item_id": m["item_id"], "permalink": m["permalink"],
-            "pvp_meli": m["pvp_meli"], "base_price": base_price,
-            "base_is_ml": pdata.get("sale_price") is not None,
+            "pvp_meli": m["pvp_meli"], "base_price": base_price, "pvp_real": pvp_real,
             "currency_id": m.get("currency_id"),
             "tiers": row_tiers, "in_sync": in_sync, "has_wholesale": has_wholesale,
             "extra_tiers": [{"qty": q, "amount": ml_tiers[q]} for q in extra_qtys],
@@ -9709,10 +9710,20 @@ async def api_precios_mayoristas_simular(request: Request, account_id: int, item
     solo paquete (ver wholesale_shipping_analysis). Además exige que el precio
     BAJE al subir la cantidad, y como ML tarifa el envío por tramos de peso, el
     máximo permitido no siempre decrece: por eso se acumula el mínimo
-    (`precio_max_acumulado`), que es el techo real utilizable en cada tramo."""
+    (`precio_max_acumulado`), que es el techo real utilizable en cada tramo.
+
+    Además calcula la RENTA de cada tramo con el mismo motor que Margen → MELI
+    (`margen_compute`), pero con dos diferencias propias del mayorista:
+      - el precio es el del tramo, no el PVP MELI;
+      - el envío por unidad es `costo_envio(N)/N` (despachar N juntas sale
+        menos por unidad), neto del 21% de IVA de envíos igual que el envío
+        ponderado de Margen. Se pasa como `envio_auto` para que respete el
+        umbral de envío gratis: si el precio del tramo queda por debajo, lo
+        paga el comprador y no descuenta nada."""
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
+    user = get_user(user_id)
     acc = _account_for_user(account_id, user_id)
     if not acc:
         raise HTTPException(404)
@@ -9729,23 +9740,57 @@ async def api_precios_mayoristas_simular(request: Request, account_id: int, item
         rp = await client.get(f"{ML_API_URL}/items/{item_id}/prices",
                               headers={**headers, **WHOLESALE_SHOW_ALL_HEADER})
         pdata = _wholesale_parse_prices(rp.json()) if rp.status_code == 200 else {}
-        base_price = pdata.get("sale_price")
         ml_tiers = pdata.get("tiers") or {}
+        pvp_real = pdata.get("sale_price")
         analysis = await wholesale_shipping_analysis(
             client, headers, acc["ml_user_id"], item, [t["qty"] for t in tiers])
+
+    # ── Datos de Margen para la renta (misma cuenta y mismos resolvers) ──
+    sku = _extract_item_sku(item)
+    sku_u = (sku or "").strip().upper()
+    margen_aid = _margen_account_id(get_visible_accounts(user_id, user)) or account_id
+    p = margen_get_config(margen_aid)
+    cost_aid = _cost_account_id_for(user, margen_aid)
+    versioned = db_get_product_costs(cost_aid)
+    variant_map = _get_variant_map(cost_aid)
+    today_iso = (datetime.utcnow() - timedelta(hours=3)).date().isoformat()
+    mrows = db_fetchall(
+        "SELECT sku, price, desc_meli, comision_var, costo_manual, tipo_publicacion, envio_manual"
+        " FROM product_sale_prices WHERE account_id=:a", {"a": margen_aid})
+    manual_map_u, variant_map_u, comvar_map_u, _envio_manual_u = _margen_maps(mrows, variant_map)
+    own = next((r for r in mrows if (r["sku"] or "").strip().upper() == sku_u), None)
+    base_price = _margen_pvp_meli(
+        float(own["price"]) if own and own["price"] is not None else None,
+        float(own["desc_meli"]) if own and own["desc_meli"] is not None else None) if own else None
+    costo, iva_rate = _margen_resolve_cost(sku_u, manual_map_u, versioned, today_iso, variant_map_u)
+    comvar = _margen_resolve_comvar(sku_u, comvar_map_u, variant_map_u)
+    tipo = _margen_tipo_resolve(sku_u, own["tipo_publicacion"] if own else None)
+    ccf = _margen_com_cuotas_frac(tipo, p)
 
     rows = []
     running_max = None
     for t in tiers:
         info = (analysis.get("tiers") or {}).get(t["qty"]) or {}
         saving = info.get("saving_per_unit")
+        ship_cost = info.get("ship_cost")
         target = round(base_price * (1 - t["pct"]), 2) if base_price else None
         max_ml = round(base_price - saving, 2) if (base_price and saving is not None) else None
         if max_ml is not None:
             running_max = max_ml if running_max is None else min(running_max, max_ml)
+        # Envío por unidad del tramo, neto del IVA fijo de envíos (mismo
+        # criterio que el envío ponderado de Margen: se usa DIRECTO).
+        envio_unit = ((ship_cost / t["qty"]) / (1 + MARGEN_ENVIO_IVA_RATE / 100.0)) if ship_cost else None
+
+        def _renta(price):
+            if not price:
+                return None
+            comp = margen_compute(price, iva_rate, comvar, costo, p, ccf, envio_auto=envio_unit)
+            return comp["renta"] if comp else None
+
         rows.append({
             "qty": t["qty"], "pct": t["pct"],
-            "ship_cost": info.get("ship_cost"),
+            "ship_cost": ship_cost,
+            "ship_cost_unit": round(ship_cost / t["qty"], 2) if ship_cost else None,
             "saving_per_unit": saving,
             "precio_max_ml": max_ml,
             "precio_max_acumulado": running_max,
@@ -9754,11 +9799,26 @@ async def api_precios_mayoristas_simular(request: Request, account_id: int, item
             "target_escala": target,
             "cumple": (target is not None and running_max is not None and target <= running_max + 0.01),
             "cargado_en_ml": ml_tiers.get(t["qty"]),
+            "renta_escala": _renta(target),
+            "renta_max_ml": _renta(running_max),
+            "renta_cargado": _renta(ml_tiers.get(t["qty"])),
         })
+    # Renta de referencia: 1 unidad al PVP MELI, con el envío de 1 unidad (mismo
+    # criterio que muestra Margen → MELI).
+    base_ship = analysis.get("base_cost")
+    renta_base = None
+    if base_price:
+        comp0 = margen_compute(
+            base_price, iva_rate, comvar, costo, p, ccf,
+            envio_auto=(base_ship / (1 + MARGEN_ENVIO_IVA_RATE / 100.0)) if base_ship else None)
+        renta_base = comp0["renta"] if comp0 else None
     return {
-        "item_id": item_id, "sku": _extract_item_sku(item),
-        "title": item.get("title"), "base_price": base_price,
+        "item_id": item_id, "sku": sku, "title": item.get("title"),
+        "base_price": base_price, "pvp_real": pvp_real,
         "currency_id": pdata.get("currency_id"),
+        "margen": {"costo_sin_iva": costo, "iva_rate": iva_rate,
+                   "comision_var": comvar if comvar is not None else p["comision_var_default"],
+                   "com_cuotas": ccf, "tipo_publicacion": tipo, "renta_base": renta_base},
         "shipping": {"applies": analysis.get("applies"), "reason": analysis.get("reason"),
                      "base_cost": analysis.get("base_cost"),
                      "billable_weight": analysis.get("billable_weight")},
@@ -9820,20 +9880,10 @@ async def api_precios_mayoristas_apply(request: Request, account_id: int):
                 if not pvp_meli:
                     results.append({"item_id": item_id, "sku": sku_u, "ok": False, "error": "PVP MELI inválido."})
                     return
-                # Base = precio vigente de 1 unidad en ML (igual criterio que
-                # /data: en publicaciones con campaña de ML el PVP propio daría
-                # un mayorista más caro que el minorista).
+                # Base = PVP MELI. NO el precio vigente de ML: en campañas de ML
+                # parte del descuento lo aporta ML, y ese aporte no existe en el
+                # precio mayorista (ahí el descuento es todo del vendedor).
                 base_price = pvp_meli
-                try:
-                    rp = await client.get(
-                        f"{ML_API_URL}/items/{item_id}/prices",
-                        headers={**headers, **WHOLESALE_SHOW_ALL_HEADER})
-                    if rp.status_code == 200:
-                        sp = _wholesale_parse_prices(rp.json()).get("sale_price")
-                        if sp:
-                            base_price = sp
-                except Exception:
-                    pass
                 currency_id = item_to_currency.get(item_id)
                 if not currency_id:
                     # Catálogo cacheado de antes de que se agregara currency_id
