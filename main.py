@@ -12493,6 +12493,48 @@ async def debug_item_full(request: Request, account_ref: str):
         }
 
 
+@app.get("/api/debug/wholesale-probe/{account_ref}/{item_id}")
+async def debug_wholesale_probe(request: Request, account_ref: str, item_id: str):
+    """Prueba los caminos de LECTURA de Precio por Cantidad que aparecieron en
+    la doc de "Precios netos por cantidad" (temporal, debug):
+      1. GET /items/{id}/prices con header `show-all-prices: true` — el default
+         (sin header) NO devuelve los tramos PxQ, que es lo que veníamos viendo.
+      2. GET /items/{id}/sale_price?...&quantity=N — precio efectivo para esa
+         cantidad; si ML rechazó el tramo debería devolver el precio normal.
+    """
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = db_fetchone(
+        "SELECT * FROM ml_accounts WHERE user_id=:uid AND (CAST(id AS TEXT)=:ref OR ml_user_id=:ref)",
+        {"uid": user_id, "ref": account_ref},
+    )
+    if not acc:
+        raise HTTPException(404)
+    token = await refresh_ml_token(acc["id"])
+    if not token:
+        raise HTTPException(502)
+    headers = {"Authorization": f"Bearer {token}"}
+    out = {"item_id": item_id}
+    async with httpx.AsyncClient(timeout=30) as client:
+        # 1) /prices con y sin el header show-all-prices
+        for label, extra in (("prices_plain", {}), ("prices_show_all", {"show-all-prices": "true"})):
+            r = await client.get(f"{ML_API_URL}/items/{item_id}/prices",
+                                 headers={**headers, **extra})
+            out[label] = {"status": r.status_code,
+                          "body": r.json() if r.status_code == 200 else r.text[:800]}
+        # 2) sale_price por cantidad (1 = referencia, resto = tramos típicos)
+        sale_prices = {}
+        for qty in (1, 2, 3, 5, 10, 15):
+            rs = await client.get(
+                f"{ML_API_URL}/items/{item_id}/sale_price", headers=headers,
+                params={"context": "channel_marketplace,user_type_business", "quantity": qty})
+            sale_prices[qty] = {"status": rs.status_code,
+                                "body": rs.json() if rs.status_code == 200 else rs.text[:400]}
+        out["sale_price_by_quantity"] = sale_prices
+    return out
+
+
 @app.get("/api/debug/promos/{account_ref}")
 async def debug_promos(request: Request, account_ref: str):
     """Prueba múltiples endpoints de promos y devuelve los resultados crudos.
