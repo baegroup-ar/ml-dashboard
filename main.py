@@ -9403,26 +9403,66 @@ def wholesale_applied_get(account_id: int) -> dict:
 WHOLESALE_SHOW_ALL_HEADER = {"show-all-prices": "true"}
 
 
+def _wholesale_price_active(cond: dict, now: datetime) -> bool:
+    """¿El nodo de precio está vigente ahora? (start_time/end_time en UTC ISO)."""
+    for key, is_start in (("start_time", True), ("end_time", False)):
+        raw = cond.get(key)
+        if not raw:
+            continue
+        try:
+            t = datetime.strptime(str(raw).replace("Z", ""), "%Y-%m-%dT%H:%M:%S")
+        except ValueError:
+            continue
+        if is_start and now < t:
+            return False
+        if not is_start and now > t:
+            return False
+    return True
+
+
 def _wholesale_parse_prices(data: dict) -> dict:
-    """GET /items/{id}/prices (con show-all-prices) → {"currency_id":...,
-    "tiers": {qty: amount}}. El nodo `standard` sin `min_purchase_unit` es el
-    precio base (da la moneda); cada tramo mayorista es otro nodo `standard`
-    con `conditions.min_purchase_unit` y `user_type_business`."""
-    out = {"currency_id": None, "tiers": {}}
+    """GET /items/{id}/prices (con show-all-prices) →
+    {"currency_id":..., "tiers": {qty: amount}, "sale_price": float|None}.
+
+    - `tiers`: nodos `standard` con `min_purchase_unit` + `user_type_business`
+      (los precios mayoristas).
+    - `sale_price`: precio VIGENTE de 1 unidad = el más bajo entre el precio
+      base y las promociones activas del canal marketplace. Es contra ESTE
+      precio (no contra el PVP de la base propia) que ML valida el precio
+      mayorista, y es el que ve el comprador — si una publicación está en una
+      campaña de ML, calcular sobre el PVP propio daría un "mayorista" más caro
+      que el minorista. Verificado contra GET /sale_price en publicaciones con
+      y sin campaña."""
+    out = {"currency_id": None, "tiers": {}, "sale_price": None}
+    now = datetime.utcnow()
+    candidates = []
     for node in (data.get("prices") or []):
-        if not isinstance(node, dict) or node.get("type") != "standard":
+        if not isinstance(node, dict):
             continue
         cond = node.get("conditions") or {}
+        restr = cond.get("context_restrictions") or []
         min_unit = cond.get("min_purchase_unit")
-        if min_unit is None:
-            if out["currency_id"] is None:
-                out["currency_id"] = node.get("currency_id")
+        if min_unit is not None:
+            if node.get("type") == "standard" and "user_type_business" in restr:
+                try:
+                    out["tiers"][int(min_unit)] = float(node.get("amount"))
+                except (TypeError, ValueError):
+                    pass
             continue
-        if "user_type_business" in (cond.get("context_restrictions") or []):
-            try:
-                out["tiers"][int(min_unit)] = float(node.get("amount"))
-            except (TypeError, ValueError):
-                pass
+        # Candidato a precio de 1 unidad: sin restricción de canal, o del canal
+        # marketplace (ignoramos precios de otros canales, ej. mshops).
+        if restr and "channel_marketplace" not in restr:
+            continue
+        if node.get("type") == "standard" and not restr and out["currency_id"] is None:
+            out["currency_id"] = node.get("currency_id")
+        if not _wholesale_price_active(cond, now):
+            continue
+        try:
+            candidates.append(float(node.get("amount")))
+        except (TypeError, ValueError):
+            pass
+    if candidates:
+        out["sale_price"] = min(candidates)
     return out
 
 
@@ -9614,12 +9654,18 @@ async def api_precios_mayoristas_data(request: Request, account_id: int):
     applied_map = wholesale_applied_get(account_id)
     items = []
     for m in matched:
-        ml_tiers = (prices_map.get(m["item_id"]) or {}).get("tiers") or {}
+        pdata = prices_map.get(m["item_id"]) or {}
+        ml_tiers = pdata.get("tiers") or {}
         has_wholesale = bool(ml_tiers)
+        # BASE del cálculo = precio VIGENTE de 1 unidad en ML (incluye campañas
+        # de ML). Si se usara el PVP propio, en publicaciones con campaña el
+        # "mayorista" saldría más caro que el minorista. Fallback al PVP MELI
+        # solo si ML no devolvió precio.
+        base_price = pdata.get("sale_price") or m["pvp_meli"]
         row_tiers = []
         in_sync = has_wholesale
         for t in tiers:
-            target = round(m["pvp_meli"] * (1 - t["pct"]), 2)
+            target = round(base_price * (1 - t["pct"]), 2)
             current = ml_tiers.get(t["qty"])
             if current is None or abs(current - target) > 1:
                 in_sync = False
@@ -9631,7 +9677,9 @@ async def api_precios_mayoristas_data(request: Request, account_id: int):
         applied = applied_map.get(m["item_id"])
         items.append({
             "sku": m["sku"], "item_id": m["item_id"], "permalink": m["permalink"],
-            "pvp_meli": m["pvp_meli"], "currency_id": m.get("currency_id"),
+            "pvp_meli": m["pvp_meli"], "base_price": base_price,
+            "base_is_ml": pdata.get("sale_price") is not None,
+            "currency_id": m.get("currency_id"),
             "tiers": row_tiers, "in_sync": in_sync, "has_wholesale": has_wholesale,
             "extra_tiers": [{"qty": q, "amount": ml_tiers[q]} for q in extra_qtys],
             "applied_at": (applied or {}).get("applied_at"),
@@ -9650,6 +9698,72 @@ async def api_precios_mayoristas_config_save(request: Request, account_id: int):
     body = await request.json()
     tiers = wholesale_save_config(account_id, body.get("tiers") or [])
     return {"ok": True, "tiers": tiers}
+
+
+@app.get("/api/precios-mayoristas/{account_id:int}/simular/{item_id}")
+async def api_precios_mayoristas_simular(request: Request, account_id: int, item_id: str):
+    """Simulación por publicación: cuánto exige ML bajar en cada tramo por el
+    ahorro de envío, y si la escala configurada cumple.
+
+    ML obliga a trasladar al comprador el ahorro de despachar N unidades en un
+    solo paquete (ver wholesale_shipping_analysis). Además exige que el precio
+    BAJE al subir la cantidad, y como ML tarifa el envío por tramos de peso, el
+    máximo permitido no siempre decrece: por eso se acumula el mínimo
+    (`precio_max_acumulado`), que es el techo real utilizable en cada tramo."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    tiers = wholesale_get_config(account_id)
+    token = await refresh_ml_token(account_id)
+    if not token:
+        raise HTTPException(502)
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(timeout=60) as client:
+        ri = await client.get(f"{ML_API_URL}/items/{item_id}", headers=headers)
+        if ri.status_code != 200:
+            raise HTTPException(404, f"No se pudo leer la publicación (HTTP {ri.status_code}).")
+        item = ri.json()
+        rp = await client.get(f"{ML_API_URL}/items/{item_id}/prices",
+                              headers={**headers, **WHOLESALE_SHOW_ALL_HEADER})
+        pdata = _wholesale_parse_prices(rp.json()) if rp.status_code == 200 else {}
+        base_price = pdata.get("sale_price")
+        ml_tiers = pdata.get("tiers") or {}
+        analysis = await wholesale_shipping_analysis(
+            client, headers, acc["ml_user_id"], item, [t["qty"] for t in tiers])
+
+    rows = []
+    running_max = None
+    for t in tiers:
+        info = (analysis.get("tiers") or {}).get(t["qty"]) or {}
+        saving = info.get("saving_per_unit")
+        target = round(base_price * (1 - t["pct"]), 2) if base_price else None
+        max_ml = round(base_price - saving, 2) if (base_price and saving is not None) else None
+        if max_ml is not None:
+            running_max = max_ml if running_max is None else min(running_max, max_ml)
+        rows.append({
+            "qty": t["qty"], "pct": t["pct"],
+            "ship_cost": info.get("ship_cost"),
+            "saving_per_unit": saving,
+            "precio_max_ml": max_ml,
+            "precio_max_acumulado": running_max,
+            "pct_necesario": (round((1 - running_max / base_price) * 100, 2)
+                              if (base_price and running_max) else None),
+            "target_escala": target,
+            "cumple": (target is not None and running_max is not None and target <= running_max + 0.01),
+            "cargado_en_ml": ml_tiers.get(t["qty"]),
+        })
+    return {
+        "item_id": item_id, "sku": _extract_item_sku(item),
+        "title": item.get("title"), "base_price": base_price,
+        "currency_id": pdata.get("currency_id"),
+        "shipping": {"applies": analysis.get("applies"), "reason": analysis.get("reason"),
+                     "base_cost": analysis.get("base_cost"),
+                     "billable_weight": analysis.get("billable_weight")},
+        "tiers": rows,
+    }
 
 
 @app.post("/api/precios-mayoristas/{account_id:int}/apply")
@@ -9706,6 +9820,20 @@ async def api_precios_mayoristas_apply(request: Request, account_id: int):
                 if not pvp_meli:
                     results.append({"item_id": item_id, "sku": sku_u, "ok": False, "error": "PVP MELI inválido."})
                     return
+                # Base = precio vigente de 1 unidad en ML (igual criterio que
+                # /data: en publicaciones con campaña de ML el PVP propio daría
+                # un mayorista más caro que el minorista).
+                base_price = pvp_meli
+                try:
+                    rp = await client.get(
+                        f"{ML_API_URL}/items/{item_id}/prices",
+                        headers={**headers, **WHOLESALE_SHOW_ALL_HEADER})
+                    if rp.status_code == 200:
+                        sp = _wholesale_parse_prices(rp.json()).get("sale_price")
+                        if sp:
+                            base_price = sp
+                except Exception:
+                    pass
                 currency_id = item_to_currency.get(item_id)
                 if not currency_id:
                     # Catálogo cacheado de antes de que se agregara currency_id
@@ -9721,7 +9849,7 @@ async def api_precios_mayoristas_apply(request: Request, account_id: int):
                     results.append({"item_id": item_id, "sku": sku_u, "ok": False,
                                     "error": "No se pudo determinar la moneda del ítem."})
                     return
-                target_tiers = {t["qty"]: round(pvp_meli * (1 - t["pct"]), 2) for t in tiers}
+                target_tiers = {t["qty"]: round(base_price * (1 - t["pct"]), 2) for t in tiers}
                 prices_body = [
                     {"amount": amount, "currency_id": currency_id,
                      "conditions": {"context_restrictions": ["channel_marketplace", "user_type_business"],
