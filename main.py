@@ -12530,10 +12530,18 @@ async def debug_wholesale_probe(request: Request, account_ref: str, item_id: str
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.get(f"{ML_API_URL}/items/{item_id}/prices", headers=headers, params=params)
         parsed = _wholesale_parse_prices(r.json()) if r.status_code == 200 else None
+        # Chequeo aparte: ¿ML marca este ítem con el tag "standard_price_by_quantity"?
+        # Si NO está el tag pero la UI de ML sí muestra tramos cargados, el precio
+        # mayorista de esta publicación no vive en el recurso /prices en absoluto
+        # (posible feature vieja/paralela, no la PxQ nueva de la API).
+        ri = await client.get(f"{ML_API_URL}/items/{item_id}", headers=headers,
+                              params={"attributes": "id,tags,price,base_price"})
+        tags = ri.json().get("tags") if ri.status_code == 200 else None
     return {
         "item_id": item_id, "context_sent": context or None, "status": r.status_code,
         "raw": r.json() if r.status_code == 200 else r.text[:2000],
         "parsed_by_our_code": parsed,
+        "item_tags": tags, "has_pxq_tag": ("standard_price_by_quantity" in (tags or [])),
     }
 
 
