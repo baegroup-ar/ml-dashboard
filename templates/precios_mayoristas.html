@@ -112,6 +112,9 @@
   <p class="lead">
     Sincroniza la escala de "Precio por Cantidad" (Precios mayoristas, sección Negocios de cada publicación) en Mercado Libre.
     Los tramos se calculan sobre el <b>PVP MELI</b> (el mismo de Margen: PVP Lista − Desc. MELI), no sobre el PVP de lista.
+    <br><b>Importante:</b> Mercado Libre no expone por API lo que ya tenés cargado ahí (aunque su propia web sí lo muestre), así que
+    "Cargado"/"Sin cargar" reflejan lo que <b>este panel aplicó</b> la última vez, no necesariamente el estado real en ML — si cargaste
+    o cambiaste algo a mano directamente en Mercado Libre, este panel no se entera hasta que vuelvas a aplicar desde acá.
   </p>
 
   {% if accounts %}
@@ -126,7 +129,7 @@
         {% endfor %}
       </select>
       <input type="text" id="search" placeholder="Buscar SKU..." oninput="renderTable()" style="width:260px;" />
-      <button class="btn-nav" onclick="loadAll(true)">↻ Recargar de ML</button>
+      <button class="btn-nav" onclick="loadAll(true)" title="Refresca el catálogo de publicaciones (SKU, MLA, moneda) contra ML. No trae precios mayoristas: eso no se puede leer por API, ver nota arriba.">↻ Recargar catálogo</button>
       <span id="count-label" style="font-size:12px;color:#888;"></span>
     </div>
   </div>
@@ -144,7 +147,7 @@
           <button class="primary" onclick="saveTiersConfig()">Guardar parámetros</button>
           <span id="cfg-msg" style="font-size:12px;color:#1a8a5a;"></span>
         </div>
-        <div class="param-hint">Máximo 5 tramos (límite de Mercado Libre). Al aplicar, esta escala reemplaza COMPLETA cualquier tramo cargado en ML para la publicación (incluso los cargados a mano ahí) — no se preservan tramos que no estén en esta lista.</div>
+        <div class="param-hint">Máximo 5 tramos (límite de Mercado Libre). Al aplicar, esta escala reemplaza COMPLETA cualquier tramo cargado en ML para la publicación (incluso los cargados a mano ahí, aunque este panel no pueda verlos) — no se preservan tramos que no estén en esta lista.</div>
       </div>
     </details>
   </div>
@@ -288,9 +291,11 @@ function filtered() {
   if (q) rows = rows.filter(it => (it.sku || '').toLowerCase().includes(q));
   return rows;
 }
-// Sin cargar: solo se muestra el precio objetivo (no hay nada en ML todavía).
-// Cargado: primero el precio QUE HOY TIENE ML (lo importante para el usuario),
-// abajo el que debería tener según el cálculo — así se ve la diferencia.
+// Sin cargar: solo se muestra el precio objetivo (nunca se aplicó desde acá).
+// Cargado: primero el precio que ESTE PANEL aplicó la última vez (no lo que
+// tenga ML ahora mismo, eso no se puede leer por API — ver nota arriba de la
+// página), abajo el que correspondería según el PVP MELI actual — si difieren
+// es porque el PVP MELI cambió desde la última aplicación.
 function tierCell(it, t) {
   const row = (it.tiers || []).find(r => r.qty === t.qty);
   if (!row) return `<td class="num muted">—</td>`;
@@ -299,13 +304,15 @@ function tierCell(it, t) {
   }
   const inSync = row.current_amount != null && Math.abs(row.current_amount - row.target_amount) <= 1;
   const cls = inSync ? 'pos' : 'mid';
-  return `<td class="num">
+  return `<td class="num" title="Último aplicado desde este panel (no necesariamente lo que ML tiene guardado)">
     <div class="tier-target ${cls}">${fmt(row.current_amount)}</div>
-    <div class="tier-ml">Debería: ${fmt(row.target_amount)}</div>
+    <div class="tier-ml">Correspondería: ${fmt(row.target_amount)}</div>
   </td>`;
 }
 function statusBadge(it) {
-  return it.in_sync ? `<span class="badge ok">OK</span>` : `<span class="badge warn">Diferencia</span>`;
+  return it.in_sync
+    ? `<span class="badge ok" title="El PVP MELI no cambió desde la última vez que se aplicó desde este panel">OK</span>`
+    : `<span class="badge warn" title="El PVP MELI cambió desde la última aplicación — conviene reaplicar">Diferencia</span>`;
 }
 function renderTable() {
   const rows = filtered();
