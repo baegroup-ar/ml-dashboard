@@ -306,7 +306,8 @@ function renderSim(j) {
       <td class="num">${t.target_escala == null
           ? (t.sin_costo ? '<span class="muted" title="Sin costo cargado en Costos CMV: no se puede igualar la renta">Sin costo</span>' : '<span class="muted">—</span>')
           : priceRenta(t.target_escala, t.renta_escala)}
-        <div class="tier-ml">${t.pct_resultante != null ? t.pct_resultante.toFixed(1) + '% de desc.' : ''}</div></td>
+        <div class="tier-ml">${t.pct_resultante != null ? t.pct_resultante.toFixed(1) + '% de desc.' : ''}${
+          t.iso_recortado ? ' <span class="mid" title="Acá el envío por unidad sube (ML cobra el envío por tramos de peso), así que el precio que igualaría la renta sería MÁS ALTO que el del tramo anterior. Como ML exige que el precio baje al subir la cantidad, se mantiene el anterior y la renta queda apenas abajo del objetivo.">▾ tope del tramo anterior</span>' : ''}</div></td>
       <td class="num ${simEstado(t).cls}"><b>${simEstado(t).label}</b></td>
       <td class="num">${t.cargado_en_ml != null ? priceRenta(t.cargado_en_ml, t.renta_cargado) : '<span class="muted">—</span>'}</td>
     </tr>`).join('');

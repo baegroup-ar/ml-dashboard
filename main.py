@@ -9940,16 +9940,24 @@ def _wholesale_sim_one(ctx: dict, sku: str, tiers: list, analysis: dict, ml_tier
         iso = _wholesale_precio_iso_renta(renta_base, costo, iva_rate, comvar,
                                           ccf, envio_unit, p, envio_conocido=envio_ok,
                                           tope=base_price)
+        iso_propio = iso
         if iso is not None and base_price:
             # ML exige que el precio BAJE al subir la cantidad: se acumula el
             # mínimo, igual que el techo. (El tope del PVP ya lo aplicó el helper.)
             running_iso = iso if running_iso is None else min(running_iso, iso)
             iso = running_iso
         target = iso
+        # Como ML tarifa el envío por tramos de PESO, el envío por unidad no
+        # siempre baja al sumar unidades: ahí el precio que igualaría la renta
+        # subiría, y como no puede subir queda el del tramo anterior. La renta
+        # de ese tramo cae un poco por debajo del objetivo: hay que decirlo.
+        iso_recortado = bool(iso is not None and iso_propio is not None
+                             and iso < iso_propio - 0.01)
 
         rows.append({
             "qty": t["qty"], "pct": t["pct"],
             "precio_iso_renta": iso,
+            "iso_recortado": iso_recortado,
             "pct_resultante": (round((1 - target / base_price) * 100, 2)
                                if (base_price and target) else None),
             "ship_cost": ship_cost,
