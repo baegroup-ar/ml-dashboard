@@ -9,7 +9,7 @@
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: 'Cantarell', 'Inter', system-ui, sans-serif; background: #fff; color: #111; }
-    nav { background: #fff; border-bottom: 1px solid #e5e5e3; padding: 0 1.5rem; height: 56px; display: flex; align-items: center; justify-content: space-between; }
+    nav { background: #fff; border-bottom: 1px solid #e5e5e3; padding: 0 1.5rem; height: 56px; display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 40; }
     .nav-brand { font-weight: 600; font-size: 15px; display: flex; align-items: center; gap: 8px; }
     .nav-right { display: flex; align-items: center; gap: 10px; font-size: 13px; }
     .btn-nav { padding: 6px 14px; border: 1px solid #ddd; border-radius: 8px; background: #fff; font-size: 13px; cursor: pointer; text-decoration: none; color: #111; }
@@ -62,7 +62,7 @@
     table.tiers-tbl .p-in { width: 90px; text-align: right; padding: 6px 8px; border: 1px solid #ddd; border-radius: 6px; font-size: 13px; }
     .param-hint { font-size: 11px; color: #999; margin-top: 8px; }
     details.params summary { cursor: pointer; font-size: 14px; font-weight: 600; color: #444; }
-    .tabs { display: flex; gap: 6px; margin-bottom: 14px; }
+    .tabs { display: flex; gap: 6px; margin-bottom: 6px; position: sticky; top: 56px; z-index: 30; background: #fff; padding: 10px 0 8px; }
     .tab-btn { padding: 8px 18px; border: 1px solid #ddd; border-radius: 8px; background: #fff; font-size: 13px; cursor: pointer; color: #444; }
     .tab-btn.active { background: #005CFF; color: #fff; border-color: #005CFF; font-weight: 500; }
     .btn-small { padding: 3px 10px; border: 1px solid #005CFF; border-radius: 6px; background: #fff; color: #005CFF; font-size: 11px; cursor: pointer; }
