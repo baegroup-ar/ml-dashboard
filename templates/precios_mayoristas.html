@@ -624,6 +624,9 @@ function applyOne(itemId) {
   applyItemIds([itemId], `¿Actualizar los tramos mayoristas de ${it ? it.sku : itemId} en Mercado Libre con el PVP MELI actual?`);
 }
 
+// setTab deja los controles coherentes con la solapa inicial (el rótulo del
+// botón de selección cambia según sea "Sin cargar" o "Cargado").
+setTab('sincargar');
 if (currentAccountId) loadAll(false);
 </script>
 </body>
