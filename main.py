@@ -487,6 +487,25 @@ def init_db():
                 PRIMARY KEY (account_id, item_id)
             )
         """))
+        # Análisis de envío por publicación (Precios Mayoristas). Calcular el
+        # precio mayorista necesita el peso facturable y el costo del paquete de
+        # N unidades, y eso es 1 request por MLA contra ML (ver
+        # wholesale_shipping_analysis): sobre ~900 publicaciones no se puede
+        # hacer en cada carga. Se persiste porque cambia rara vez (peso y
+        # dimensiones del producto), mientras que el PRECIO se recalcula siempre
+        # en vivo a partir del PVP MELI y el costo, que sí cambian seguido.
+        # `qtys` = cantidades de la escala con las que se calculó: si se cambian,
+        # el análisis guardado ya no sirve.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS item_shipping_cache (
+                account_id INTEGER NOT NULL REFERENCES ml_accounts(id) ON DELETE CASCADE,
+                item_id TEXT NOT NULL,
+                qtys TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                cached_at TIMESTAMP DEFAULT NOW(),
+                PRIMARY KEY (account_id, item_id)
+            )
+        """))
         # Visitas por publicación (Conversión). ML no permite pedirlas en lote:
         # es 1 request por MLA (ver _fetch_visits_batch), así que el resultado se
         # persiste acá para no repetir ~900 requests en cada carga ni perderlos
@@ -9659,6 +9678,68 @@ async def wholesale_shipping_analysis(client, headers, seller_id, item, qtys: li
             "billable_weight": weight, "tiers": out}
 
 
+# El análisis de envío se persiste (item_shipping_cache) porque es 1 request por
+# publicación: sin eso, las solapas Sin cargar/Cargado no podrían mostrar precios
+# calculados sobre ~900 avisos. TTL largo: lo que se guarda es peso facturable y
+# costo del paquete, que cambian rara vez. El precio NO se cachea, se recalcula
+# siempre con el PVP MELI y el costo del momento.
+WHOLESALE_SHIP_TTL_SECONDS = 3 * 24 * 3600
+# Publicaciones por tanda del endpoint de cálculo: cada una es 1 request de envío.
+WHOLESALE_CALC_BATCH = 25
+
+
+def _wholesale_ship_read_cache(account_id: int) -> dict:
+    """{item_id: {'analysis': {...}, 'qtys': [...], 'cached_at': dt}} — todo lo
+    guardado, sin filtrar por antigüedad: un análisis viejo sirve para mostrar un
+    precio, y el TTL solo decide qué se vuelve a pedir (mismo criterio que las
+    visitas de Conversión). Las claves de `tiers` vuelven a int: json las guarda
+    como string y el resto del código busca por cantidad numérica."""
+    rows = db_fetchall(
+        "SELECT item_id, qtys, payload, cached_at FROM item_shipping_cache"
+        " WHERE account_id=:a", {"a": account_id})
+    out = {}
+    for r in rows or []:
+        try:
+            an = json.loads(r["payload"] or "{}")
+            an["tiers"] = {int(k): v for k, v in (an.get("tiers") or {}).items()}
+            out[r["item_id"]] = {"analysis": an, "qtys": json.loads(r["qtys"] or "[]"),
+                                 "cached_at": r["cached_at"]}
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+def _wholesale_ship_pending(account_id: int, item_ids: list, qtys: list,
+                            cache: dict = None) -> list:
+    """Publicaciones cuyo análisis de envío falta, venció, o se calculó con otras
+    cantidades de escala (si cambian las cantidades, los costos por paquete que
+    se guardaron ya no corresponden)."""
+    cache = _wholesale_ship_read_cache(account_id) if cache is None else cache
+    corte = datetime.utcnow() - timedelta(seconds=WHOLESALE_SHIP_TTL_SECONDS)
+    qs = sorted(int(q) for q in qtys)
+    pend = []
+    for iid in item_ids:
+        e = cache.get(iid)
+        if not e or sorted(int(q) for q in (e.get("qtys") or [])) != qs:
+            pend.append(iid)
+            continue
+        ca = e.get("cached_at")
+        if not ca or (ca.replace(tzinfo=None) if getattr(ca, "tzinfo", None) else ca) < corte:
+            pend.append(iid)
+    return pend
+
+
+def _wholesale_ship_save(account_id: int, por_item: dict, qtys: list) -> None:
+    if not por_item:
+        return
+    qs = json.dumps(sorted(int(q) for q in qtys))
+    db_executemany(
+        "INSERT INTO item_shipping_cache (account_id, item_id, qtys, payload, cached_at)"
+        " VALUES (:a, :i, :q, :p, NOW()) ON CONFLICT (account_id, item_id)"
+        " DO UPDATE SET qtys=EXCLUDED.qtys, payload=EXCLUDED.payload, cached_at=NOW()",
+        [{"a": account_id, "i": k, "q": qs, "p": json.dumps(v)} for k, v in por_item.items()])
+
+
 def wholesale_applied_upsert(account_id: int, item_id: str, sku: str, tiers: dict, currency_id: str) -> None:
     db_execute(
         "INSERT INTO wholesale_applied (account_id, item_id, sku, tiers, currency_id, applied_at)"
@@ -9733,6 +9814,7 @@ async def api_precios_mayoristas_data(request: Request, account_id: int):
     # Costos/comisiones/IVA de Margen, una sola lectura para todo el catálogo:
     # el precio objetivo ahora sale del margen, no de un porcentaje.
     sim_ctx = _wholesale_sim_context(user, user_id, account_id)
+    ship_cache = _wholesale_ship_read_cache(account_id)
     items = []
     for m in matched:
         pdata = prices_map.get(m["item_id"]) or {}
@@ -9745,26 +9827,40 @@ async def api_precios_mayoristas_data(request: Request, account_id: int):
         # `pvp_real` se expone solo como referencia informativa.
         base_price = m["pvp_meli"]
         pvp_real = pdata.get("sale_price")
-        # Precio objetivo = el que iguala la renta de 1 unidad. Acá NO se puede
-        # consultar el envío (sería un request por publicación sobre todo el
-        # catálogo), así que solo se calcula cuando el envío no interviene: por
-        # debajo del umbral de envío gratis lo paga el comprador en todos los
-        # tramos. El resto queda como "hay que simular" en vez de un número
-        # aproximado, que es justo lo que no sirve para aplicar precios.
-        sim = _wholesale_sim_one(sim_ctx, m["sku"], tiers, {"applies": None, "tiers": {}}, ml_tiers)
-        iso_by_qty = {tr["qty"]: tr["target_escala"] for tr in sim["tiers"]}
+        # Precio objetivo = el mismo motor que usa la simulación, con el análisis
+        # de envío que trajo el cálculo por tandas (`/calcular-lote`). Si esta
+        # publicación todavía no lo tiene, se pasa `applies: None` y el motor no
+        # inventa nada: los tramos quedan sin precio y la fila figura pendiente.
+        an = (ship_cache.get(m["item_id"]) or {}).get("analysis") or {"applies": None, "tiers": {}}
+        sim = _wholesale_sim_one(sim_ctx, m["sku"], tiers, an, ml_tiers)
+        sim_by_qty = {tr["qty"]: tr for tr in sim["tiers"]}
         row_tiers = []
         in_sync = has_wholesale
         for t in tiers:
-            target = iso_by_qty.get(t["qty"])
+            tr = sim_by_qty.get(t["qty"]) or {}
+            target = tr.get("target_escala")
             current = ml_tiers.get(t["qty"])
             if target is None:
                 in_sync = None if in_sync else in_sync
             elif current is None or abs(current - target) > 1:
                 in_sync = False
-            row_tiers.append({"qty": t["qty"], "pct": t["pct"],
-                              "current_amount": current, "target_amount": target,
-                              "requiere_sim": target is None})
+            row_tiers.append({
+                "qty": t["qty"], "current_amount": current, "target_amount": target,
+                "requiere_sim": target is None,
+                # Todo lo que la simulación mostraba por tramo, para que las
+                # solapas Sin cargar/Cargado muestren lo mismo sin otra pantalla.
+                "renta_escala": tr.get("renta_escala"),
+                "renta_cargado": tr.get("renta_cargado"),
+                "precio_max_acumulado": tr.get("precio_max_acumulado"),
+                "renta_max_ml": tr.get("renta_max_ml"),
+                "pct_resultante": tr.get("pct_resultante"),
+                "por_escalon": tr.get("por_escalon"),
+                "escalon_pct": tr.get("escalon_pct"),
+                "iso_recortado": tr.get("iso_recortado"),
+                "exige": tr.get("exige"), "cumple": tr.get("cumple"),
+                "sin_dato": tr.get("sin_dato"), "sin_costo": tr.get("sin_costo"),
+                "desc_sospechoso": tr.get("desc_sospechoso"),
+            })
         # Tramos que ML tiene cargados pero que NO están en la escala configurada
         # (ej. cargados a mano en ML con otra cantidad mínima).
         extra_qtys = sorted(q for q in ml_tiers if q not in {t["qty"] for t in tiers})
@@ -9777,9 +9873,93 @@ async def api_precios_mayoristas_data(request: Request, account_id: int):
             "tiers": row_tiers, "in_sync": in_sync, "has_wholesale": has_wholesale,
             "extra_tiers": [{"qty": q, "amount": ml_tiers[q]} for q in extra_qtys],
             "applied_at": (applied or {}).get("applied_at"),
+            # Margen de la publicación, lo mismo que mostraba la simulación.
+            "margen": sim["margen"],
+            "shipping": {"applies": an.get("applies"), "reason": an.get("reason"),
+                         "base_cost": an.get("base_cost"),
+                         "billable_weight": an.get("billable_weight")},
+            "calculado": m["item_id"] in ship_cache,
         })
     items.sort(key=lambda it: (it["sku"] or "", it["item_id"]))
-    return {"items": items, "config": {"tiers": tiers}, "defaults": {"tiers": WHOLESALE_DEFAULT_TIERS}}
+    pendientes = _wholesale_ship_pending(
+        account_id, [m["item_id"] for m in matched], [t["qty"] for t in tiers], ship_cache)
+    return {"items": items, "config": {"tiers": tiers}, "defaults": {"tiers": WHOLESALE_DEFAULT_TIERS},
+            "pendientes": len(pendientes), "batch": WHOLESALE_CALC_BATCH}
+
+
+@app.post("/api/precios-mayoristas/{account_id:int}/calcular-lote")
+async def api_precios_mayoristas_calcular_lote(request: Request, account_id: int):
+    """Trae el análisis de envío de UNA tanda de publicaciones y lo persiste.
+
+    El precio mayorista necesita el costo del paquete de N unidades, y eso es 1
+    request por publicación: sobre ~900 avisos no entra en un solo request. El
+    front encadena tandas mostrando progreso y cada tanda queda guardada, así la
+    pantalla se completa sola y la próxima vez abre calculada."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    user = get_user(user_id)
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    try:
+        offset = max(0, int(request.query_params.get("offset") or 0))
+    except ValueError:
+        offset = 0
+    tiers = wholesale_get_config(account_id)
+    qtys = [t["qty"] for t in tiers]
+    margen_aid = _margen_account_id(get_visible_accounts(user_id, user)) or account_id
+    rows = db_fetchall(
+        "SELECT sku, price, desc_meli FROM product_sale_prices"
+        " WHERE account_id=:a AND price IS NOT NULL", {"a": margen_aid})
+    price_by_sku_u = {(r["sku"] or "").strip().upper(): r for r in rows}
+    catalog = await _get_all_publicaciones(account_id, acc)
+    matched = _wholesale_matches(catalog, price_by_sku_u, _disc_sku_by_mla(account_id))
+    item_ids = [m["item_id"] for m in matched]
+    pendientes = _wholesale_ship_pending(account_id, item_ids, qtys)
+    # `offset` saltea las que fallan siempre, para que no bloqueen la cola (mismo
+    # criterio que el lote de visitas de Conversión).
+    tanda = pendientes[offset:offset + WHOLESALE_CALC_BATCH]
+    if not tanda:
+        return {"procesadas": 0, "pendientes": len(pendientes), "total": len(item_ids), "ok": 0}
+    token = await refresh_ml_token(account_id)
+    if not token:
+        raise HTTPException(502)
+    headers = {"Authorization": f"Bearer {token}"}
+    info_map, por_item = {}, {}
+    sem = asyncio.Semaphore(6)
+    async with httpx.AsyncClient(timeout=90) as client:
+        async def fetch_batch(chunk):
+            try:
+                rb = await client.get(f"{ML_API_URL}/items", headers=headers,
+                                      params={"ids": ",".join(chunk), "attributes": WHOLESALE_SIM_ATTRS})
+                if rb.status_code != 200:
+                    return
+                for entry in rb.json():
+                    body_ = entry.get("body") if isinstance(entry, dict) and entry.get("code") == 200 else None
+                    if isinstance(body_, dict) and body_.get("id"):
+                        info_map[body_["id"]] = body_
+            except Exception:
+                pass
+
+        await asyncio.gather(*[fetch_batch(tanda[i:i + 20]) for i in range(0, len(tanda), 20)])
+
+        async def one(item_id):
+            async with sem:
+                item = info_map.get(item_id)
+                if not item:
+                    return
+                try:
+                    por_item[item_id] = await wholesale_shipping_analysis(
+                        client, headers, acc["ml_user_id"], item, qtys)
+                except Exception:
+                    pass
+
+        await asyncio.gather(*[one(i) for i in tanda])
+
+    _wholesale_ship_save(account_id, por_item, qtys)
+    return {"procesadas": len(tanda), "ok": len(por_item), "total": len(item_ids),
+            "pendientes": max(0, len(pendientes) - len(por_item))}
 
 
 @app.post("/api/precios-mayoristas/{account_id:int}/config")
@@ -10169,7 +10349,7 @@ async def api_precios_mayoristas_simular_todo(request: Request, account_id: int)
 
         await asyncio.gather(*[fetch_batch(item_ids[i:i + 20]) for i in range(0, len(item_ids), 20)])
 
-        results = {}
+        results = {}   # /simular-todo
 
         async def sim_one(item_id):
             async with sem:
@@ -10252,11 +10432,14 @@ async def api_precios_mayoristas_apply(request: Request, account_id: int):
     row_by_sku_u = {(r["sku"] or "").strip().upper(): r for r in rows}
     ctx = _wholesale_sim_context(user, user_id, account_id)
     qtys = [t["qty"] for t in tiers]
+    ship_cache = _wholesale_ship_read_cache(account_id)
+    nuevos_ship = {}
     results = []
     sem = asyncio.Semaphore(6)
     async with httpx.AsyncClient(timeout=90) as client:
         # Los ítems completos (peso/categoría/envío) que necesita el análisis de
-        # envío, por multiget de a 20 igual que /simular-todo.
+        # envío, por multiget de a 20 igual que /calcular-lote. Solo hace falta
+        # para las publicaciones que no estén ya en el caché de envío.
         info_map = {}
 
         async def fetch_batch(chunk):
@@ -10272,7 +10455,10 @@ async def api_precios_mayoristas_apply(request: Request, account_id: int):
             except Exception:
                 pass
 
-        await asyncio.gather(*[fetch_batch(item_ids[i:i + 20]) for i in range(0, len(item_ids), 20)])
+        faltan_ship = [i for i in item_ids if i not in ship_cache]
+        await asyncio.gather(*[fetch_batch(faltan_ship[i:i + 20])
+                               for i in range(0, len(faltan_ship), 20)])
+
         async def apply_one(item_id):
             async with sem:
                 sku_u = item_to_sku.get(item_id)
@@ -10309,17 +10495,23 @@ async def api_precios_mayoristas_apply(request: Request, account_id: int):
                     return
                 # Mismo motor que la simulación: el precio de cada tramo es el
                 # que iguala la renta de 1 unidad, no un porcentaje fijo.
-                item = info_map.get(item_id)
-                if not item:
-                    results.append({"item_id": item_id, "sku": sku_u, "ok": False,
-                                    "error": "No se pudo leer la publicación para calcular el envío."})
-                    return
-                try:
-                    analysis = await wholesale_shipping_analysis(
-                        client, headers, acc["ml_user_id"], item, qtys)
-                except Exception as e:
-                    analysis = {"applies": False, "reason": str(e)[:120], "base_cost": None,
-                                "billable_weight": None, "tiers": {}}
+                # El análisis de envío sale del caché que llenó /calcular-lote
+                # (la pantalla ya lo trajo para mostrar el precio); solo se
+                # consulta a ML el que falte, para no repetir ~900 requests.
+                analysis = (ship_cache.get(item_id) or {}).get("analysis")
+                if analysis is None:
+                    item = info_map.get(item_id)
+                    if not item:
+                        results.append({"item_id": item_id, "sku": sku_u, "ok": False,
+                                        "error": "No se pudo leer la publicación para calcular el envío."})
+                        return
+                    try:
+                        analysis = await wholesale_shipping_analysis(
+                            client, headers, acc["ml_user_id"], item, qtys)
+                        nuevos_ship[item_id] = analysis
+                    except Exception as e:
+                        analysis = {"applies": False, "reason": str(e)[:120], "base_cost": None,
+                                    "billable_weight": None, "tiers": {}}
                 sim = _wholesale_sim_one(ctx, sku_u, tiers, analysis, {})
                 target_tiers = {}
                 problema = None
@@ -10382,6 +10574,9 @@ async def api_precios_mayoristas_apply(request: Request, account_id: int):
                     results.append({"item_id": item_id, "sku": sku_u, "ok": False,
                                     "error": f"HTTP {r.status_code}: {r.text[:200]}"})
         await asyncio.gather(*[apply_one(iid) for iid in item_ids])
+    # Guardar los análisis que hubo que consultar acá, así la pantalla no los
+    # vuelve a pedir después de aplicar.
+    _wholesale_ship_save(account_id, nuevos_ship, qtys)
     return {"ok": True, "updated": sum(1 for res in results if res["ok"]), "results": results}
 
 
