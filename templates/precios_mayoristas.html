@@ -118,9 +118,9 @@
   <h1>Precios Mayoristas</h1>
   <p class="lead">
     Sincroniza la escala de "Precio por Cantidad" (Precios mayoristas, sección Negocios de cada publicación) en Mercado Libre.
-    Los tramos se calculan sobre el <b>PVP MELI</b> (el mismo de Margen: PVP Lista − Desc. MELI), no sobre el PVP de lista.
+    El precio de cada tramo se <b>calcula solo</b>: es el que hace que vender esa cantidad deje la <b>misma renta %</b> que vender 1 unidad al <b>PVP MELI</b> (el mismo de Margen: PVP Lista − Desc. MELI).
     Los tramos que ves en la columna de cada cantidad son los que <b>Mercado Libre tiene cargados ahora mismo</b> (leídos en vivo);
-    abajo, el precio que correspondería según tu escala.
+    abajo, el precio que correspondería.
   </p>
 
   {% if accounts %}
@@ -142,10 +142,10 @@
 
   <div class="card">
     <details class="params">
-      <summary>⚙ Escala de tramos (cantidad mínima + % adicional sobre PVP MELI)</summary>
+      <summary>⚙ Escala de tramos (cantidades mínimas)</summary>
       <div class="param-section">
         <table class="tiers-tbl">
-          <thead><tr><th class="num">Cantidad mínima</th><th class="num">Desc. adicional %</th><th></th></tr></thead>
+          <thead><tr><th class="num">Cantidad mínima</th><th></th></tr></thead>
           <tbody id="tiers-tbody"></tbody>
         </table>
         <div class="row" style="margin-top:10px;">
@@ -153,7 +153,7 @@
           <button class="primary" onclick="saveTiersConfig()">Guardar parámetros</button>
           <span id="cfg-msg" style="font-size:12px;color:#1a8a5a;"></span>
         </div>
-        <div class="param-hint">Máximo 5 tramos (límite de Mercado Libre). Al aplicar, esta escala reemplaza COMPLETA cualquier tramo cargado en ML para la publicación (incluso los cargados a mano ahí, aunque este panel no pueda verlos) — no se preservan tramos que no estén en esta lista.</div>
+        <div class="param-hint">El <b>precio</b> de cada tramo no se configura: se calcula para que vender esa cantidad deje la <b>misma renta %</b> que vender 1 unidad al PVP MELI (te ahorrás la comisión fija y parte del envío, y ese ahorro es el que baja el precio). Acá solo elegís las cantidades. Máximo 5 tramos (límite de Mercado Libre). Al aplicar, esta escala reemplaza COMPLETA cualquier tramo cargado en ML para la publicación (incluso los cargados a mano ahí, aunque este panel no pueda verlos) — no se preservan tramos que no estén en esta lista.</div>
       </div>
     </details>
   </div>
@@ -173,7 +173,7 @@
     </div>
     <div class="param-hint" style="margin-bottom:10px;">
       Mercado Libre exige que el precio mayorista traslade al comprador el ahorro de envío que genera despachar varias unidades
-      en un solo paquete. Acá ves, tramo por tramo, cuál es el <b>precio máximo que ML acepta</b> y si tu escala lo cumple.
+      en un solo paquete. Acá ves, tramo por tramo, el <b>precio que iguala la renta de 1 unidad</b>, cuál es el <b>precio máximo que ML acepta</b> y si el precio calculado lo cumple.
       Como ML tarifa el envío por tramos de peso, el máximo no siempre baja de forma pareja: la columna <b>Techo real</b> aplica
       además la regla de que el precio tiene que ir bajando al subir la cantidad.
       <b>Sin exigencia</b> = el envío lo paga el comprador, ML no pide ningún descuento por cantidad y el precio mayorista es libre.
@@ -303,8 +303,10 @@ function renderSim(j) {
       <td class="num">${fmt(t.saving_per_unit)}</td>
       <td class="num"><b>${t.exige ? priceRenta(t.precio_max_acumulado, t.renta_max_ml) : '<span class="muted">—</span>'}</b></td>
       <td class="num">${t.pct_necesario != null ? t.pct_necesario.toFixed(2) + '%' : '<span class="muted">—</span>'}</td>
-      <td class="num">${priceRenta(t.target_escala, t.renta_escala)}
-        <div class="tier-ml">${(t.pct*100).toFixed(1)}% de desc.</div></td>
+      <td class="num">${t.target_escala == null
+          ? (t.sin_costo ? '<span class="muted" title="Sin costo cargado en Costos CMV: no se puede igualar la renta">Sin costo</span>' : '<span class="muted">—</span>')
+          : priceRenta(t.target_escala, t.renta_escala)}
+        <div class="tier-ml">${t.pct_resultante != null ? t.pct_resultante.toFixed(1) + '% de desc.' : ''}</div></td>
       <td class="num ${simEstado(t).cls}"><b>${simEstado(t).label}</b></td>
       <td class="num">${t.cargado_en_ml != null ? priceRenta(t.cargado_en_ml, t.renta_cargado) : '<span class="muted">—</span>'}</td>
     </tr>`).join('');
@@ -330,14 +332,15 @@ function renderSim(j) {
           <th class="num">Ahorro por unidad</th>
           <th class="num">Techo real (ML)</th>
           <th class="num">Desc. necesario</th>
-          <th class="num">Tu escala</th>
+          <th class="num" title="Precio calculado para que vender N unidades deje la MISMA renta % que vender 1 al PVP MELI">Precio (misma renta)</th>
           <th class="num" title="OK = tu precio entra en lo que ML acepta. Si no, cuánto más caro está: eso es lo que hay que bajar. Vacío = ML no exige nada en ese tramo.">Estado</th>
           <th class="num">Cargado en ML</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </div>${sugerencia}
-    <div class="param-hint" style="margin-top:8px;">La <b>renta</b> usa el mismo motor que Margen → MELI (comisión variable, comisión por cuotas, costo de CMV e IVA del SKU), con dos diferencias propias del mayorista: <b>no lleva comisión fija</b> (ML no cobra el costo fijo por venta en Precio por Cantidad) y el envío va prorrateado — despachar ${(j.tiers||[]).map(t=>t.qty).join('/')} unidades juntas cuesta menos por unidad que despacharlas sueltas. Por eso da mejor que en Margen. La <b>renta a 1 un.</b> sí incluye la fija: es una venta minorista común y tiene que coincidir con Margen → MELI.</div>`;
+    <div class="param-hint" style="margin-top:8px;">El <b>precio de cada tramo se calcula</b> para que vender esa cantidad deje exactamente la <b>misma renta %</b> que vender 1 unidad al PVP MELI (${pct(m.renta_base)}). La escala configurada define las <b>cantidades</b>; el precio sale del margen, no de un porcentaje fijo. Podés bajar más de eso si querés, nunca menos sin perder renta.<br>
+      La renta usa el mismo motor que Margen → MELI (comisión variable, comisión por cuotas, costo de CMV e IVA del SKU) con dos diferencias propias del mayorista: <b>no lleva comisión fija</b> (ML no la cobra en Precio por Cantidad) y el envío va prorrateado — despachar ${(j.tiers||[]).map(t=>t.qty).join('/')} unidades juntas cuesta menos por unidad. <b>Por eso el precio puede bajar bastante</b>: te ahorrás la comisión fija y parte del envío, y ese ahorro es el que se traslada al precio. La <b>renta a 1 un.</b> sí incluye la fija: es una venta minorista común y tiene que coincidir con Margen → MELI.</div>`;
 }
 
 // ── Simulación de TODA la lista ──
@@ -408,7 +411,7 @@ function renderSimAll() {
     <th class="num">PVP MELI</th>
     <th class="num" title="Costo de envío de 1 unidad (lo que paga el vendedor)">Envío 1 un.</th>
     <th class="num" title="Renta al PVP MELI con el envío de 1 unidad — igual que Margen → MELI">Renta 1 un.</th>
-    ${TIERS.map(t => `<th class="num">${t.qty}+ un. (${(t.pct * 100).toFixed(1)}%)</th>`).join('')}
+    ${TIERS.map(t => `<th class="num" title="Precio para que ${t.qty} unidades dejen la misma renta que 1">${t.qty}+ un.</th>`).join('')}
     <th class="num" title="OK = todos los tramos entran en lo que ML acepta. Si no, el peor desvío: cuánto hay que bajar para que entren. Vacío = ML no exige nada en esta publicación.">Estado</th>
   </tr>` : '';
   document.getElementById('simall-tbody').innerHTML = rows.length ? rows.map(it => {
@@ -424,8 +427,11 @@ function renderSimAll() {
         : (t.exige
             ? `<div class="tier-max ${e.cls === 'neg' ? 'neg' : ''}"><span class="cap">máx ML</span>${priceRenta(t.precio_max_acumulado, t.renta_max_ml)}</div>`
             : '');
-      return `<td class="num" title="Tu escala: ${(cfg.pct * 100).toFixed(1)}% sobre el PVP MELI">
-        <div class="tier-target">${priceRenta(t.target_escala, t.renta_escala)}</div>${linea2}</td>`;
+      const precio = t.target_escala == null
+        ? (t.sin_costo ? '<span class="muted" title="Sin costo cargado en Costos CMV">Sin costo</span>' : '<span class="muted">—</span>')
+        : priceRenta(t.target_escala, t.renta_escala);
+      return `<td class="num" title="${t.pct_resultante != null ? t.pct_resultante.toFixed(1) + '% menos que el PVP MELI, para dejar la misma renta que 1 unidad' : 'Precio que iguala la renta de 1 unidad'}">
+        <div class="tier-target">${precio}</div>${linea2}</td>`;
     }).join('');
     return `<tr>
       <td>${mlaCell(it)}</td>
@@ -499,9 +505,10 @@ async function loadAll(refresh) {
 // ── Parámetros: escala de tramos ──
 function renderTiersConfig() {
   const tb = document.getElementById('tiers-tbody');
+  // Solo cantidades: el precio de cada tramo lo calcula el margen (el que
+  // iguala la renta de 1 unidad), ya no un porcentaje cargado a mano.
   tb.innerHTML = TIERS.map((t, i) => `<tr>
     <td class="num"><input type="number" class="p-in" min="2" step="1" value="${t.qty}" onchange="onTierEdit(${i}, 'qty', this.value)"></td>
-    <td class="num"><input type="number" class="p-in" min="0" step="0.1" value="${(t.pct * 100).toFixed(2)}" onchange="onTierEdit(${i}, 'pct', this.value)"></td>
     <td><button class="btn-nav" onclick="removeTierRow(${i})" title="Quitar tramo">🗑</button></td>
   </tr>`).join('');
   document.getElementById('btn-add-tier').disabled = TIERS.length >= 5;
@@ -537,7 +544,7 @@ async function saveTiersConfig() {
 
 // ── Tabla principal ──
 function renderThead() {
-  const cols = TIERS.map(t => `<th class="num">${t.qty}+ un. (${(t.pct * 100).toFixed(1)}%)</th>`).join('');
+  const cols = TIERS.map(t => `<th class="num" title="Precio para que ${t.qty} unidades dejen la misma renta % que vender 1">${t.qty}+ un.</th>`).join('');
   document.getElementById('thead-row').innerHTML = `<tr>
     <th style="width:30px;"><input type="checkbox" onchange="toggleAll(this)"></th>
     <th>MLA</th>
@@ -564,16 +571,28 @@ function filtered() {
 // Sin cargar: solo el precio objetivo (ML no tiene ningún tramo en esa publicación).
 // Cargado: arriba el precio que ML tiene AHORA (leído en vivo), abajo el que
 // correspondería según el PVP MELI actual — si difieren, conviene actualizar.
+// El precio objetivo iguala la renta de 1 unidad. Cuando el PVP entra en la
+// franja de envío gratis hace falta el costo real del paquete (1 consulta por
+// publicación), que acá no se puede pedir para todo el catálogo: esos casos
+// dicen "Simular" en vez de mostrar un número estimado.
+const OBJ_SIM = '<span class="muted" title="El PVP entra en la franja de envío gratis: el precio depende del costo del paquete. Usá Simular para calcularlo.">Simular</span>';
 function tierCell(it, t) {
   const row = (it.tiers || []).find(r => r.qty === t.qty);
   if (!row) return `<td class="num muted">—</td>`;
+  const obj = row.target_amount == null ? OBJ_SIM : fmt(row.target_amount);
   if (TAB !== 'cargado') {
-    return `<td class="num"><div class="tier-target">${fmt(row.target_amount)}</div></td>`;
+    return `<td class="num"><div class="tier-target">${obj}</div></td>`;
   }
   if (row.current_amount == null) {
     return `<td class="num" title="ML no tiene este tramo cargado">
       <div class="tier-target mid">—</div>
-      <div class="tier-ml">Correspondería: ${fmt(row.target_amount)}</div>
+      <div class="tier-ml">Correspondería: ${obj}</div>
+    </td>`;
+  }
+  if (row.target_amount == null) {
+    return `<td class="num" title="Precio cargado hoy en Mercado Libre">
+      <div class="tier-target mid">${fmt(row.current_amount)}</div>
+      <div class="tier-ml">${OBJ_SIM}</div>
     </td>`;
   }
   const inSync = Math.abs(row.current_amount - row.target_amount) <= 1;

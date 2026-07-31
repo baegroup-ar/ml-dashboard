@@ -9730,6 +9730,9 @@ async def api_precios_mayoristas_data(request: Request, account_id: int):
     prices_map = await _fetch_wholesale_prices_map(
         account_id, [m["item_id"] for m in matched], force_refresh=refresh)
     applied_map = wholesale_applied_get(account_id)
+    # Costos/comisiones/IVA de Margen, una sola lectura para todo el catálogo:
+    # el precio objetivo ahora sale del margen, no de un porcentaje.
+    sim_ctx = _wholesale_sim_context(user, user_id, account_id)
     items = []
     for m in matched:
         pdata = prices_map.get(m["item_id"]) or {}
@@ -9742,15 +9745,26 @@ async def api_precios_mayoristas_data(request: Request, account_id: int):
         # `pvp_real` se expone solo como referencia informativa.
         base_price = m["pvp_meli"]
         pvp_real = pdata.get("sale_price")
+        # Precio objetivo = el que iguala la renta de 1 unidad. Acá NO se puede
+        # consultar el envío (sería un request por publicación sobre todo el
+        # catálogo), así que solo se calcula cuando el envío no interviene: por
+        # debajo del umbral de envío gratis lo paga el comprador en todos los
+        # tramos. El resto queda como "hay que simular" en vez de un número
+        # aproximado, que es justo lo que no sirve para aplicar precios.
+        sim = _wholesale_sim_one(sim_ctx, m["sku"], tiers, {"applies": None, "tiers": {}}, ml_tiers)
+        iso_by_qty = {tr["qty"]: tr["target_escala"] for tr in sim["tiers"]}
         row_tiers = []
         in_sync = has_wholesale
         for t in tiers:
-            target = round(base_price * (1 - t["pct"]), 2)
+            target = iso_by_qty.get(t["qty"])
             current = ml_tiers.get(t["qty"])
-            if current is None or abs(current - target) > 1:
+            if target is None:
+                in_sync = None if in_sync else in_sync
+            elif current is None or abs(current - target) > 1:
                 in_sync = False
             row_tiers.append({"qty": t["qty"], "pct": t["pct"],
-                              "current_amount": current, "target_amount": target})
+                              "current_amount": current, "target_amount": target,
+                              "requiere_sim": target is None})
         # Tramos que ML tiene cargados pero que NO están en la escala configurada
         # (ej. cargados a mano en ML con otra cantidad mínima).
         extra_qtys = sorted(q for q in ml_tiers if q not in {t["qty"] for t in tiers})
@@ -9802,6 +9816,48 @@ def _wholesale_sim_context(user: dict, user_id: int, account_id: int) -> dict:
     }
 
 
+def _wholesale_precio_iso_renta(renta_objetivo, costo_sin_iva, iva_rate, comvar,
+                                ccf, envio_unit, p, envio_conocido=True):
+    """Precio (con IVA) al que vender N unidades deja la MISMA renta % que vender
+    1 al PVP MELI. Se despeja de `margen_compute`, no se busca por iteración.
+
+    Con `p = P/factor` (precio sin IVA) y `k = com_var + com_cuotas`, la renta de
+    un tramo es `[p(1-k) - envío_N - costo] / p`. Igualándola a `r` y despejando:
+
+        P = factor · (envío_N + costo) / (1 - k - r)
+
+    Los tramos no pagan comisión fija (ML no la cobra en Precio por Cantidad)
+    pero la renta objetivo SÍ la incluye —es la venta suelta real—, así que el
+    precio baja también por la fija que dejamos de pagar, no solo por el envío.
+
+    Dos ramas porque `margen_compute` solo cobra envío cuando el precio llega al
+    umbral de envío gratis: la ecuación cambia de un lado al otro del umbral."""
+    if renta_objetivo is None:
+        return None
+    costo = float(costo_sin_iva or 0)
+    # Sin costo cargado no hay renta que igualar: devolver un precio acá sería
+    # inventarlo, y este número termina aplicándose a ML.
+    if costo <= 0:
+        return None
+    factor = 1 + (float(iva_rate or 0) / 100.0)
+    cv = float(comvar if comvar is not None else p["comision_var_default"])
+    den = 1.0 - cv - float(ccf or 0.0) - float(renta_objetivo)
+    if den <= 0.0001:
+        return None          # renta inalcanzable: se la comen las comisiones
+    th = float(p["envio_threshold"])
+    envio = float(envio_unit) if envio_unit is not None else (p["envio_promedio"] / factor)
+    con_envio = factor * (envio + costo) / den
+    if con_envio >= th:
+        # El precio de equilibrio cae en la franja de envío gratis: sin el costo
+        # real del paquete el número sería inventado, y este precio se aplica a
+        # ML. Mejor no devolver nada y que la pantalla pida simular.
+        return round(con_envio, 2) if envio_conocido else None
+    sin_envio = factor * costo / den
+    if sin_envio < th:
+        return round(sin_envio, 2)     # bajo el umbral el envío no interviene
+    return None
+
+
 def _wholesale_sim_one(ctx: dict, sku: str, tiers: list, analysis: dict, ml_tiers: dict) -> dict:
     """Corazón de la simulación para UNA publicación: tramo por tramo, el techo
     que exige ML por el ahorro de envío y la renta resultante.
@@ -9822,13 +9878,31 @@ def _wholesale_sim_one(ctx: dict, sku: str, tiers: list, analysis: dict, ml_tier
     tipo = _margen_tipo_resolve(sku_u, own["tipo_publicacion"] if own else None)
     ccf = _margen_com_cuotas_frac(tipo, p)
 
+    # Renta de referencia: 1 unidad al PVP MELI con el envío de 1 unidad. Va CON
+    # comisión fija porque es una venta minorista común (tiene que coincidir con
+    # Margen → MELI), y es el objetivo que los tramos tienen que igualar.
+    base_ship = analysis.get("base_cost")
+    renta_base = None
+    if base_price:
+        comp0 = margen_compute(
+            base_price, iva_rate, comvar, costo, p, ccf,
+            envio_auto=(base_ship / (1 + MARGEN_ENVIO_IVA_RATE / 100.0)) if base_ship else None)
+        renta_base = comp0["renta"] if comp0 else None
+    # Sin consultar el envío (applies None: lo usa /data sobre todo el catálogo),
+    # la renta de 1 unidad de un PVP en franja de envío gratis saldría del envío
+    # PROMEDIO configurado. Sería una estimación, y de ella cuelga el precio que
+    # se aplica a ML: mejor no dar número y que la pantalla pida simular.
+    if (analysis.get("applies") is None and base_price
+            and base_price >= p["envio_threshold"]):
+        renta_base = None
+
     rows = []
     running_max = None
+    running_iso = None
     for t in tiers:
         info = (analysis.get("tiers") or {}).get(t["qty"]) or {}
         saving = info.get("saving_per_unit")
         ship_cost = info.get("ship_cost")
-        target = round(base_price * (1 - t["pct"]), 2) if base_price else None
         max_ml = round(base_price - saving, 2) if (base_price and saving is not None) else None
         if max_ml is not None:
             running_max = max_ml if running_max is None else min(running_max, max_ml)
@@ -9837,10 +9911,9 @@ def _wholesale_sim_one(ctx: dict, sku: str, tiers: list, analysis: dict, ml_tier
         envio_unit = ((ship_cost / t["qty"]) / (1 + MARGEN_ENVIO_IVA_RATE / 100.0)) if ship_cost else None
 
         # SIN comisión fija: en las ventas por Precio por Cantidad ML no cobra
-        # el costo fijo por venta que sí aplica a la venta minorista suelta
-        # (por eso el mayorista rinde mejor de lo que daría el motor de Margen
-        # tal cual). La renta de referencia a 1 unidad, más abajo, SÍ la lleva:
-        # esa es una venta minorista común y tiene que coincidir con Margen.
+        # el costo fijo por venta que sí aplica a la venta minorista suelta (por
+        # eso el mayorista rinde mejor de lo que daría el motor de Margen tal
+        # cual). La renta de referencia de 1 unidad, arriba, SÍ la lleva.
         def _renta(price):
             if not price:
                 return None
@@ -9848,8 +9921,30 @@ def _wholesale_sim_one(ctx: dict, sku: str, tiers: list, analysis: dict, ml_tier
                                   envio_auto=envio_unit, sin_fija=True)
             return comp["renta"] if comp else None
 
+        # Precio del tramo = el que iguala la renta de 1 unidad. Reemplaza al
+        # porcentaje configurado: la escala define QUÉ cantidades, el margen
+        # define a qué precio.
+        # El envío se sabe cuando ML devolvió el costo del paquete, o cuando
+        # consta que no aplica (lo paga el comprador). `applies` en None es
+        # "todavía no se consultó" (lo usa /data, que no puede pedirlo por
+        # publicación) y NO habilita a estimar.
+        envio_ok = (ship_cost is not None) or (analysis.get("applies") is False)
+        iso = _wholesale_precio_iso_renta(renta_base, costo, iva_rate, comvar,
+                                          ccf, envio_unit, p, envio_conocido=envio_ok)
+        if iso is not None and base_price:
+            # No puede quedar por encima del PVP MELI (sería un "mayorista" más
+            # caro que la unidad suelta) y ML exige que el precio BAJE al subir la
+            # cantidad: se acumula el mínimo, igual que el techo de ML.
+            iso = min(iso, base_price)
+            running_iso = iso if running_iso is None else min(running_iso, iso)
+            iso = running_iso
+        target = iso
+
         rows.append({
             "qty": t["qty"], "pct": t["pct"],
+            "precio_iso_renta": iso,
+            "pct_resultante": (round((1 - target / base_price) * 100, 2)
+                               if (base_price and target) else None),
             "ship_cost": ship_cost,
             "ship_cost_unit": round(ship_cost / t["qty"], 2) if ship_cost else None,
             "saving_per_unit": saving,
@@ -9863,22 +9958,16 @@ def _wholesale_sim_one(ctx: dict, sku: str, tiers: list, analysis: dict, ml_tier
             # pudo obtener el costo del paquete de N: es "falta el dato", no
             # "no hay exigencia" — distinguirlo evita leerlo como vía libre.
             "sin_dato": bool(analysis.get("applies")) and ship_cost is None,
-            "cumple": (running_max is None
-                       or (target is not None and target <= running_max + 0.01)),
+            # Sin costo cargado no hay precio que calcular: es "falta el dato",
+            # no "excede" (un tramo sin precio no puede pasarse de ningún techo).
+            "sin_costo": target is None,
+            "cumple": (running_max is None or target is None
+                       or target <= running_max + 0.01),
             "cargado_en_ml": ml_tiers.get(t["qty"]),
             "renta_escala": _renta(target),
             "renta_max_ml": _renta(running_max),
             "renta_cargado": _renta(ml_tiers.get(t["qty"])),
         })
-    # Renta de referencia: 1 unidad al PVP MELI, con el envío de 1 unidad (mismo
-    # criterio que muestra Margen → MELI).
-    base_ship = analysis.get("base_cost")
-    renta_base = None
-    if base_price:
-        comp0 = margen_compute(
-            base_price, iva_rate, comvar, costo, p, ccf,
-            envio_auto=(base_ship / (1 + MARGEN_ENVIO_IVA_RATE / 100.0)) if base_ship else None)
-        renta_base = comp0["renta"] if comp0 else None
     return {
         "base_price": base_price,
         "margen": {"costo_sin_iva": costo, "iva_rate": iva_rate,
@@ -10046,11 +10135,18 @@ async def api_precios_mayoristas_simular_todo(request: Request, account_id: int)
 
 @app.post("/api/precios-mayoristas/{account_id:int}/apply")
 async def api_precios_mayoristas_apply(request: Request, account_id: int):
-    """Aplica la escala configurada a las publicaciones seleccionadas. Manda
-    SIEMPRE el set completo de tramos SIN `id` (todos nuevos): ML borra
-    cualquier tramo existente que no se referencie por id, así que esta
-    pantalla queda como fuente de verdad de la escala completa (pisa
-    cualquier tramo cargado a mano en ML que no coincida con la config).
+    """Aplica la escala a las publicaciones seleccionadas. Manda SIEMPRE el set
+    completo de tramos SIN `id` (todos nuevos): ML borra cualquier tramo
+    existente que no se referencie por id, así que esta pantalla queda como
+    fuente de verdad de la escala completa (pisa cualquier tramo cargado a mano
+    en ML que no coincida con la config).
+
+    El PRECIO de cada tramo es el que iguala la renta de 1 unidad
+    (`_wholesale_precio_iso_renta`), calculado con el MISMO motor que la
+    simulación (`_wholesale_sim_one`) — la config aporta las cantidades, no los
+    porcentajes. Por eso acá también hace falta el análisis de envío por
+    publicación: aplicar un precio distinto del que muestra la simulación sería
+    la peor forma de equivocarse, porque se escribe en ML.
 
     Igual que /data: el catálogo sale de la cuenta elegida, pero el PVP se lee
     de la cuenta de Margen (_margen_account_id)."""
@@ -10085,9 +10181,29 @@ async def api_precios_mayoristas_apply(request: Request, account_id: int):
     rows = db_fetchall(
         "SELECT sku, price, desc_meli FROM product_sale_prices WHERE account_id=:a", {"a": margen_aid})
     row_by_sku_u = {(r["sku"] or "").strip().upper(): r for r in rows}
+    ctx = _wholesale_sim_context(user, user_id, account_id)
+    qtys = [t["qty"] for t in tiers]
     results = []
-    sem = asyncio.Semaphore(8)
-    async with httpx.AsyncClient(timeout=30) as client:
+    sem = asyncio.Semaphore(6)
+    async with httpx.AsyncClient(timeout=90) as client:
+        # Los ítems completos (peso/categoría/envío) que necesita el análisis de
+        # envío, por multiget de a 20 igual que /simular-todo.
+        info_map = {}
+
+        async def fetch_batch(chunk):
+            try:
+                rb = await client.get(f"{ML_API_URL}/items", headers=headers,
+                                      params={"ids": ",".join(chunk), "attributes": WHOLESALE_SIM_ATTRS})
+                if rb.status_code != 200:
+                    return
+                for entry in rb.json():
+                    body_ = entry.get("body") if isinstance(entry, dict) and entry.get("code") == 200 else None
+                    if isinstance(body_, dict) and body_.get("id"):
+                        info_map[body_["id"]] = body_
+            except Exception:
+                pass
+
+        await asyncio.gather(*[fetch_batch(item_ids[i:i + 20]) for i in range(0, len(item_ids), 20)])
         async def apply_one(item_id):
             async with sem:
                 sku_u = item_to_sku.get(item_id)
@@ -10122,7 +10238,39 @@ async def api_precios_mayoristas_apply(request: Request, account_id: int):
                     results.append({"item_id": item_id, "sku": sku_u, "ok": False,
                                     "error": "No se pudo determinar la moneda del ítem."})
                     return
-                target_tiers = {t["qty"]: round(base_price * (1 - t["pct"]), 2) for t in tiers}
+                # Mismo motor que la simulación: el precio de cada tramo es el
+                # que iguala la renta de 1 unidad, no un porcentaje fijo.
+                item = info_map.get(item_id)
+                if not item:
+                    results.append({"item_id": item_id, "sku": sku_u, "ok": False,
+                                    "error": "No se pudo leer la publicación para calcular el envío."})
+                    return
+                try:
+                    analysis = await wholesale_shipping_analysis(
+                        client, headers, acc["ml_user_id"], item, qtys)
+                except Exception as e:
+                    analysis = {"applies": False, "reason": str(e)[:120], "base_cost": None,
+                                "billable_weight": None, "tiers": {}}
+                sim = _wholesale_sim_one(ctx, sku_u, tiers, analysis, {})
+                target_tiers = {}
+                problema = None
+                for tr in sim["tiers"]:
+                    precio = tr.get("target_escala")
+                    if precio is None:
+                        problema = ("Sin costo cargado en Costos CMV: no se puede calcular "
+                                    "el precio que iguala la renta.")
+                        break
+                    # Un precio por encima del techo lo rechaza ML. Se corta acá
+                    # con el motivo en vez de mandarlo y comerse un error crudo.
+                    if not tr.get("cumple"):
+                        problema = (f"El precio que iguala la renta en {tr['qty']}+ un. "
+                                    f"(${precio:,.0f}) supera el máximo que ML acepta "
+                                    f"(${(tr.get('precio_max_acumulado') or 0):,.0f}).")
+                        break
+                    target_tiers[tr["qty"]] = precio
+                if problema:
+                    results.append({"item_id": item_id, "sku": sku_u, "ok": False, "error": problema})
+                    return
                 prices_body = [
                     {"amount": amount, "currency_id": currency_id,
                      "conditions": {"context_restrictions": ["channel_marketplace", "user_type_business"],
