@@ -267,6 +267,10 @@ function renderKpis() {
   const avisos = [];
   if (t.sin_dato)
     avisos.push(`⚠ ${int(t.sin_dato)} publicación(es) todavía sin visitas de Mercado Libre: no están contadas en las visitas ni en la conversión general, y figuran como <b>Sin dato</b> (que no es lo mismo que "sin visitas"). Si el número no baja solo, reintentá con <b>↻ Recargar de ML</b>.`);
+  // Las visitas siempre cubren el período; las ventas salen del caché de
+  // órdenes. Si el caché arranca más tarde, la conversión sale baja de mentira.
+  if (t.ventas_incompletas)
+    avisos.push(`⚠ Las ventas cacheadas de este período arrancan el <b>${esc(t.ventas_desde)}</b>, pero el período empieza antes. Las visitas sí cubren todo el período, así que la conversión de las publicaciones sale <b>más baja de lo real</b>. Traé las ventas que faltan con <b>↻ Recargar de ML</b>, o usá un período más corto.`);
   if (t.unidades_sin_mla)
     avisos.push(`⚠ ${int(t.unidades_sin_mla)} unidad(es) vendidas en el período no tienen la publicación identificada (se cachearon antes de que el panel guardara el MLA de cada venta), así que NO están contadas en la conversión de ninguna fila. Se corrigen con <b>↻ Recargar de ML</b>, que recompone las ventas del período — tarda varios minutos y hay que hacerlo una sola vez por período.`);
   av.innerHTML = avisos.map(a => `<div>${a}</div>`).join('');

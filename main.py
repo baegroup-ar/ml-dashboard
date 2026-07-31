@@ -10476,6 +10476,20 @@ async def api_conversion_data(request: Request, account_id: int):
         except Exception:
             pass
     sales, sin_mla = _conversion_sales_by_mla(account_id, date_from, date_to)
+    # Las visitas salen de ML (siempre cubren el período completo) pero las
+    # ventas salen del caché de órdenes, que suele tener ~30 días. Si el caché
+    # arranca después que el período, la conversión de 60/90 días compara
+    # visitas de 90 días contra ventas de 30 y da artificialmente baja. No se
+    # puede maquillar: hay que decirlo.
+    _cob = db_fetchone(
+        "SELECT MIN(paid_date) AS desde FROM order_snapshot_cache"
+        " WHERE account_id=:a AND paid_date BETWEEN :df AND :dt",
+        {"a": account_id, "df": date_from, "dt": date_to})
+    ventas_desde = str(_cob["desde"])[:10] if (_cob and _cob["desde"]) else None
+    # 3 días de tolerancia: que no haya ventas el primer día del período es
+    # normal; que no las haya durante una semana es que faltan datos.
+    ventas_incompletas = bool(
+        ventas_desde and (date.fromisoformat(ventas_desde) - date.fromisoformat(date_from)).days > 3)
 
     items = []
     for it in catalog:
@@ -10505,7 +10519,9 @@ async def api_conversion_data(request: Request, account_id: int):
                     "publicaciones": len(items),
                     "sin_visitas": sum(1 for i in items if i["visitas"] == 0),
                     "sin_dato": sum(1 for i in items if i["visitas"] is None),
-                    "unidades_sin_mla": sin_mla},
+                    "unidades_sin_mla": sin_mla,
+                    "ventas_desde": ventas_desde,
+                    "ventas_incompletas": ventas_incompletas},
         "pendientes": len(pendientes),
         "batch": VISITS_BATCH,
         "min_visitas": CONVERSION_MIN_VISITS,
