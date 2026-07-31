@@ -9816,6 +9816,14 @@ def _wholesale_sim_context(user: dict, user_id: int, account_id: int) -> dict:
     }
 
 
+# Descuento MÍNIMO por volumen, sobre el precio del PRIMER tramo, según la
+# posición del tramo (1º…5º). La renta igualada sola no alcanza para armar una
+# escala: cuando el envío lo paga el comprador (PVP < envio_threshold) no hay
+# ahorro de envío que trasladar y los cinco tramos dan el MISMO precio, con lo
+# que comprar más no conviene en nada. Estos escalones garantizan que el precio
+# baje igual. Van por posición, no por cantidad, para que sigan valiendo si se
+# cambian las cantidades de la escala.
+WHOLESALE_TIER_STEP_PCT = [0.0, 0.005, 0.01, 0.015, 0.02]
 # Piso de cordura del costo, como fracción del PVP MELI: por debajo de esto se
 # toma como "sin costo" en vez de calcular un precio mayorista irrisorio.
 WHOLESALE_COSTO_MIN_FRAC = 0.01
@@ -9927,7 +9935,8 @@ def _wholesale_sim_one(ctx: dict, sku: str, tiers: list, analysis: dict, ml_tier
     rows = []
     running_max = None
     running_iso = None
-    for t in tiers:
+    precio_t1 = None          # precio del primer tramo: base de los escalones
+    for idx, t in enumerate(tiers):
         info = (analysis.get("tiers") or {}).get(t["qty"]) or {}
         saving = info.get("saving_per_unit")
         ship_cost = info.get("ship_cost")
@@ -9966,7 +9975,21 @@ def _wholesale_sim_one(ctx: dict, sku: str, tiers: list, analysis: dict, ml_tier
             # mínimo, igual que el techo. (El tope del PVP ya lo aplicó el helper.)
             running_iso = iso if running_iso is None else min(running_iso, iso)
             iso = running_iso
+        if idx == 0:
+            precio_t1 = iso
+        # Escalón mínimo por volumen sobre el precio del primer tramo. Se toma el
+        # MENOR de los dos: si el ahorro de envío ya baja más que el escalón
+        # (típico arriba del umbral de envío gratis), manda el envío y la renta
+        # queda igualada; si no (envío a cargo del comprador, o tramo topeado por
+        # el peso), manda el escalón y el precio baja igual.
+        step = (WHOLESALE_TIER_STEP_PCT[idx] if idx < len(WHOLESALE_TIER_STEP_PCT)
+                else WHOLESALE_TIER_STEP_PCT[-1])
+        escalon = round(precio_t1 * (1 - step), 2) if (precio_t1 and step) else None
         target = iso
+        por_escalon = False
+        if iso is not None and escalon is not None and escalon < iso - 0.01:
+            target = escalon
+            por_escalon = True
         # Como ML tarifa el envío por tramos de PESO, el envío por unidad no
         # siempre baja al sumar unidades: ahí el precio que igualaría la renta
         # subiría, y como no puede subir queda el del tramo anterior. La renta
@@ -9978,6 +10001,10 @@ def _wholesale_sim_one(ctx: dict, sku: str, tiers: list, analysis: dict, ml_tier
             "qty": t["qty"], "pct": t["pct"],
             "precio_iso_renta": iso,
             "iso_recortado": iso_recortado,
+            # El precio salió del escalón por volumen, no de la renta igualada:
+            # la renta de ese tramo queda por debajo del objetivo a propósito.
+            "por_escalon": por_escalon,
+            "escalon_pct": round(step * 100, 2),
             "pct_resultante": (round((1 - target / base_price) * 100, 2)
                                if (base_price and target) else None),
             # Descuento sospechosamente grande: se muestra igual, pero /apply lo

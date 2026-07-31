@@ -153,7 +153,7 @@
           <button class="primary" onclick="saveTiersConfig()">Guardar parámetros</button>
           <span id="cfg-msg" style="font-size:12px;color:#1a8a5a;"></span>
         </div>
-        <div class="param-hint">El <b>precio</b> de cada tramo no se configura: se calcula para que vender esa cantidad deje la <b>misma renta %</b> que vender 1 unidad al PVP MELI (te ahorrás la comisión fija y parte del envío, y ese ahorro es el que baja el precio). Acá solo elegís las cantidades. Máximo 5 tramos (límite de Mercado Libre). Al aplicar, esta escala reemplaza COMPLETA cualquier tramo cargado en ML para la publicación (incluso los cargados a mano ahí, aunque este panel no pueda verlos) — no se preservan tramos que no estén en esta lista.</div>
+        <div class="param-hint">El <b>precio</b> de cada tramo no se configura: se calcula para que vender esa cantidad deje la <b>misma renta %</b> que vender 1 unidad al PVP MELI (te ahorrás la comisión fija y parte del envío, y ese ahorro es el que baja el precio), con un <b>escalón mínimo por volumen</b> de −0,5% / −1% / −1,5% / −2% sobre el precio de 2 unidades para los tramos 2º a 5º, que es el que manda cuando el envío no aporta descuento. Acá solo elegís las cantidades. Máximo 5 tramos (límite de Mercado Libre). Al aplicar, esta escala reemplaza COMPLETA cualquier tramo cargado en ML para la publicación (incluso los cargados a mano ahí, aunque este panel no pueda verlos) — no se preservan tramos que no estén en esta lista.</div>
       </div>
     </details>
   </div>
@@ -284,6 +284,16 @@ function simGap(t) {
 }
 // Estado de un tramo: si ML no exige nada no se dice nada (no hay techo que
 // respetar). Si exige, "OK" cuando tu precio entra, o cuánto falta bajar.
+// De dónde salió el precio del tramo: si mandó el escalón por volumen, la renta
+// queda por debajo de la igualada A PROPÓSITO y hay que decirlo, si no parece
+// una inconsistencia del cálculo.
+function origenTramo(t) {
+  if (t.por_escalon)
+    return ` <span class="mid" title="Acá el ahorro de envío no alcanza para bajar el precio (o el envío por peso lo dejó igual al tramo anterior), así que se aplica el escalón por volumen: ${t.escalon_pct}% menos que el precio de 2 unidades. La renta de este tramo queda por debajo de la de 1 unidad, a propósito, para que comprar más convenga.">−${t.escalon_pct}% por volumen</span>`;
+  if (t.iso_recortado)
+    return ' <span class="mid" title="Acá el envío por unidad sube (ML cobra el envío por tramos de peso), así que el precio que igualaría la renta sería MÁS ALTO que el del tramo anterior. Como ML exige que el precio baje al subir la cantidad, se mantiene el anterior.">▾ tope del tramo anterior</span>';
+  return '';
+}
 function simEstado(t) {
   if (t.sin_costo) return { label: 'Sin costo', cls: 'mid' };
   // Un descuento enorme casi siempre sale de un costo mal cargado: se avisa y
@@ -310,8 +320,7 @@ function renderSim(j) {
       <td class="num">${t.target_escala == null
           ? (t.sin_costo ? '<span class="muted" title="Sin costo cargado en Costos CMV: no se puede igualar la renta">Sin costo</span>' : '<span class="muted">—</span>')
           : priceRenta(t.target_escala, t.renta_escala)}
-        <div class="tier-ml">${t.pct_resultante != null ? t.pct_resultante.toFixed(1) + '% de desc.' : ''}${
-          t.iso_recortado ? ' <span class="mid" title="Acá el envío por unidad sube (ML cobra el envío por tramos de peso), así que el precio que igualaría la renta sería MÁS ALTO que el del tramo anterior. Como ML exige que el precio baje al subir la cantidad, se mantiene el anterior y la renta queda apenas abajo del objetivo.">▾ tope del tramo anterior</span>' : ''}</div></td>
+        <div class="tier-ml">${t.pct_resultante != null ? t.pct_resultante.toFixed(1) + '% de desc.' : ''}${origenTramo(t)}</div></td>
       <td class="num ${simEstado(t).cls}"><b>${simEstado(t).label}</b></td>
       <td class="num">${t.cargado_en_ml != null ? priceRenta(t.cargado_en_ml, t.renta_cargado) : '<span class="muted">—</span>'}</td>
     </tr>`).join('');
@@ -347,7 +356,7 @@ function renderSim(j) {
         <tbody>${rows}</tbody>
       </table>
     </div>${sugerencia}
-    <div class="param-hint" style="margin-top:8px;">El <b>precio de cada tramo se calcula</b> para que vender esa cantidad deje exactamente la <b>misma renta %</b> que vender 1 unidad al PVP MELI (${pct(m.renta_base)}). La escala configurada define las <b>cantidades</b>; el precio sale del margen, no de un porcentaje fijo. Podés bajar más de eso si querés, nunca menos sin perder renta.<br>
+    <div class="param-hint" style="margin-top:8px;">El <b>precio de cada tramo se calcula</b> para que vender esa cantidad deje la <b>misma renta %</b> que vender 1 unidad al PVP MELI (${pct(m.renta_base)}), y si eso no hace bajar el precio se aplica un <b>escalón por volumen</b> sobre el precio de 2 unidades (−0,5% / −1% / −1,5% / −2% del 2º al 5º tramo). Manda el que dé <b>más</b> descuento: arriba de $33.000 suele ganar el ahorro de envío; abajo, donde el envío lo paga el comprador y los cinco tramos darían el mismo precio, gana el escalón. En los tramos marcados <b>"por volumen"</b> la renta queda por debajo de la de 1 unidad a propósito, para que comprar más convenga.<br>
       La renta usa el mismo motor que Margen → MELI (comisión variable, comisión por cuotas, costo de CMV e IVA del SKU) con dos diferencias propias del mayorista: <b>no lleva comisión fija</b> (ML no la cobra en Precio por Cantidad) y el envío va prorrateado — despachar ${(j.tiers||[]).map(t=>t.qty).join('/')} unidades juntas cuesta menos por unidad. <b>Por eso el precio puede bajar bastante</b>: te ahorrás la comisión fija y parte del envío, y ese ahorro es el que se traslada al precio. La <b>renta a 1 un.</b> sí incluye la fija: es una venta minorista común y tiene que coincidir con Margen → MELI.</div>`;
 }
 
