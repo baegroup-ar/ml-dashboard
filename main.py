@@ -9817,7 +9817,7 @@ def _wholesale_sim_context(user: dict, user_id: int, account_id: int) -> dict:
 
 
 def _wholesale_precio_iso_renta(renta_objetivo, costo_sin_iva, iva_rate, comvar,
-                                ccf, envio_unit, p, envio_conocido=True):
+                                ccf, envio_unit, p, envio_conocido=True, tope=None):
     """Precio (con IVA) al que vender N unidades deja la MISMA renta % que vender
     1 al PVP MELI. Se despeja de `margen_compute`, no se busca por iteración.
 
@@ -9846,16 +9846,24 @@ def _wholesale_precio_iso_renta(renta_objetivo, costo_sin_iva, iva_rate, comvar,
         return None          # renta inalcanzable: se la comen las comisiones
     th = float(p["envio_threshold"])
     envio = float(envio_unit) if envio_unit is not None else (p["envio_promedio"] / factor)
+    # La ecuación es DISCONTINUA en el umbral de envío gratis, así que puede
+    # tener dos soluciones y hay que quedarse con las autoconsistentes: la "con
+    # envío" solo vale si cae del lado en que se cobra envío, y viceversa.
+    cands = []
     con_envio = factor * (envio + costo) / den
-    if con_envio >= th:
-        # El precio de equilibrio cae en la franja de envío gratis: sin el costo
-        # real del paquete el número sería inventado, y este precio se aplica a
-        # ML. Mejor no devolver nada y que la pantalla pida simular.
-        return round(con_envio, 2) if envio_conocido else None
+    # Si el precio de equilibrio cae en la franja de envío gratis sin conocer el
+    # costo real del paquete, el número sería inventado — y esto se aplica a ML.
+    if con_envio >= th and envio_conocido:
+        cands.append(con_envio)
     sin_envio = factor * costo / den
     if sin_envio < th:
-        return round(sin_envio, 2)     # bajo el umbral el envío no interviene
-    return None
+        cands.append(sin_envio)
+    # Un mayorista más caro que la unidad suelta no existe: si una solución pasa
+    # el PVP se descarta (no se recorta, porque recortada ya no da la renta
+    # pedida y la otra rama sí puede darla exacta).
+    if tope is not None:
+        cands = [c for c in cands if c <= tope + 0.01]
+    return round(max(cands), 2) if cands else None
 
 
 def _wholesale_sim_one(ctx: dict, sku: str, tiers: list, analysis: dict, ml_tiers: dict) -> dict:
@@ -9930,12 +9938,11 @@ def _wholesale_sim_one(ctx: dict, sku: str, tiers: list, analysis: dict, ml_tier
         # publicación) y NO habilita a estimar.
         envio_ok = (ship_cost is not None) or (analysis.get("applies") is False)
         iso = _wholesale_precio_iso_renta(renta_base, costo, iva_rate, comvar,
-                                          ccf, envio_unit, p, envio_conocido=envio_ok)
+                                          ccf, envio_unit, p, envio_conocido=envio_ok,
+                                          tope=base_price)
         if iso is not None and base_price:
-            # No puede quedar por encima del PVP MELI (sería un "mayorista" más
-            # caro que la unidad suelta) y ML exige que el precio BAJE al subir la
-            # cantidad: se acumula el mínimo, igual que el techo de ML.
-            iso = min(iso, base_price)
+            # ML exige que el precio BAJE al subir la cantidad: se acumula el
+            # mínimo, igual que el techo. (El tope del PVP ya lo aplicó el helper.)
             running_iso = iso if running_iso is None else min(running_iso, iso)
             iso = running_iso
         target = iso
