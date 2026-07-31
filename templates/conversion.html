@@ -132,6 +132,7 @@
         <option value="todas">Todas</option>
         <option value="oportunidad">Visitas altas, no vende</option>
         <option value="sinvisitas">Sin visitas</option>
+        <option value="sindato">Sin dato de ML</option>
         <option value="convierte">Convierte bien</option>
       </select>
       <button class="btn-nav" onclick="loadAll(true)" title="Vuelve a pedir a Mercado Libre las visitas de cada publicación Y recompone las ventas del período (eso es lo que le pone el MLA a cada venta). Con muchas publicaciones tarda varios minutos.">↻ Recargar de ML</button>
@@ -171,30 +172,84 @@ const fmt = n => (n == null || isNaN(n)) ? '<span class="muted">—</span>' : '$
 const int = n => (n == null || isNaN(n)) ? '<span class="muted">—</span>' : Number(n).toLocaleString('es-AR');
 const pct = n => (n == null || isNaN(n)) ? '<span class="muted">—</span>' : (Number(n) * 100).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + '%';
 
+// Token de corte: si el usuario cambia de cuenta o de período mientras se están
+// bajando las visitas, la carga vieja tiene que dejar de pisar la pantalla.
+let CARGA = 0;
+// Mientras se bajan las visitas la etiqueta muestra el progreso en vez del
+// conteo de filas (renderTable corre en cada tanda y si no, lo pisaría).
+let PROGRESO = null;
+
+async function fetchData(aid, days, refresh) {
+  const r = await fetch(`/api/conversion/${aid}/data?days=${days}${refresh ? '&refresh=1' : ''}`);
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.detail || 'error');
+  return j;
+}
+
+function aplicar(j) {
+  ITEMS = j.items || [];
+  TOTALES = j.totales || {};
+  MIN_VISITAS = j.min_visitas || 30;
+  document.getElementById('min-visitas').textContent = MIN_VISITAS;
+  renderKpis();
+  renderThead();
+  renderTable();
+}
+
 async function loadAll(refresh) {
   const aid = document.getElementById('account-select').value;
   const days = document.getElementById('days-select').value;
   const lbl = document.getElementById('count-label');
-  // Mercado Libre no deja pedir las visitas en lote: es un request por
-  // publicación. La primera carga de cada período tarda; después sale de caché.
+  const mio = ++CARGA;
   lbl.textContent = refresh
-    ? 'Recargando de Mercado Libre (visitas + ventas del período)... puede tardar varios minutos.'
-    : 'Cargando... (la primera vez de cada período tarda: ML no permite pedir las visitas en lote)';
+    ? 'Recargando de Mercado Libre (visitas + ventas del período)...'
+    : 'Cargando...';
+  let j;
   try {
-    const r = await fetch(`/api/conversion/${aid}/data?days=${days}${refresh ? '&refresh=1' : ''}`);
-    const j = await r.json();
-    if (!r.ok) throw new Error(j.detail || 'error');
-    ITEMS = j.items || [];
-    TOTALES = j.totales || {};
-    MIN_VISITAS = j.min_visitas || 30;
-    document.getElementById('min-visitas').textContent = MIN_VISITAS;
+    j = await fetchData(aid, days, refresh);
   } catch (e) {
     ITEMS = []; TOTALES = {};
     lbl.textContent = 'Error: ' + e.message;
     return;
   }
-  renderKpis();
-  renderThead();
+  if (mio !== CARGA) return;
+  // Se muestra YA lo que hay cacheado y las visitas que falten se van trayendo
+  // por tandas: ML no deja pedirlas en lote (1 request por publicación) y son
+  // ~900, así que un request único se colgaba minutos y se perdía si se cortaba.
+  aplicar(j);
+  if (j.pendientes > 0) await bajarVisitas(aid, days, mio, j.pendientes);
+}
+
+async function bajarVisitas(aid, days, mio, pendientes) {
+  const lbl = document.getElementById('count-label');
+  const total = pendientes;
+  let offset = 0;      // fallos acumulados: los saltea para no girar en falso
+  let vueltas = 0;
+  const maxVueltas = Math.ceil(total / 20) + 10;
+  while (pendientes > 0 && vueltas++ < maxVueltas) {
+    if (mio !== CARGA) { PROGRESO = null; return; }
+    PROGRESO = `Trayendo visitas de Mercado Libre: ${total - pendientes} de ${total}...`;
+    lbl.textContent = PROGRESO;
+    let j;
+    try {
+      const r = await fetch(`/api/conversion/${aid}/visitas-lote?offset=${offset}`, { method: 'POST' });
+      j = await r.json();
+      if (!r.ok) throw new Error(j.detail || 'error');
+    } catch (e) {
+      PROGRESO = null;
+      if (mio !== CARGA) return;
+      lbl.textContent = 'Se cortó la descarga de visitas: ' + e.message + ' — reintentá con ↻ Recargar de ML.';
+      return;
+    }
+    if (!j.procesadas) break;
+    offset += (j.stats && j.stats.fallaron) || 0;
+    pendientes = j.pendientes;
+    if (mio !== CARGA) { PROGRESO = null; return; }
+    // Refrescar la tabla en cada tanda: los datos sirven a medida que llegan.
+    try { aplicar(await fetchData(aid, days, false)); } catch (e) { /* sigue el loop */ }
+  }
+  PROGRESO = null;
+  if (mio !== CARGA) return;
   renderTable();
 }
 
@@ -209,14 +264,22 @@ function renderKpis() {
   // El item_id en el snapshot de órdenes se guarda desde el 30/07/2026: las
   // ventas cacheadas antes de eso no se pueden atribuir a una publicación.
   const av = document.getElementById('aviso-sin-mla');
-  av.innerHTML = t.unidades_sin_mla
-    ? `⚠ ${int(t.unidades_sin_mla)} unidad(es) vendidas en el período no tienen la publicación identificada (se cachearon antes de que el panel guardara el MLA de cada venta), así que NO están contadas en la conversión de ninguna fila. Se corrigen con <b>↻ Recargar de ML</b>, que recompone las ventas del período — tarda varios minutos y hay que hacerlo una sola vez por período.`
-    : '';
+  const avisos = [];
+  if (t.sin_dato)
+    avisos.push(`⚠ ${int(t.sin_dato)} publicación(es) todavía sin visitas de Mercado Libre: no están contadas en las visitas ni en la conversión general, y figuran como <b>Sin dato</b> (que no es lo mismo que "sin visitas"). Si el número no baja solo, reintentá con <b>↻ Recargar de ML</b>.`);
+  if (t.unidades_sin_mla)
+    avisos.push(`⚠ ${int(t.unidades_sin_mla)} unidad(es) vendidas en el período no tienen la publicación identificada (se cachearon antes de que el panel guardara el MLA de cada venta), así que NO están contadas en la conversión de ninguna fila. Se corrigen con <b>↻ Recargar de ML</b>, que recompone las ventas del período — tarda varios minutos y hay que hacerlo una sola vez por período.`);
+  av.innerHTML = avisos.map(a => `<div>${a}</div>`).join('');
 }
 
 // Diagnóstico por fila. El orden importa: primero descartamos las que no se
 // pueden juzgar (sin visitas suficientes), recién después miramos si vende.
 function diagnostico(it) {
+  // "Sin dato" NO es "sin visitas": si ML no contestó, no sabemos nada de esa
+  // publicación. Mezclarlos hacía que una falla de la API se leyera como "nadie
+  // la miró", que es la conclusión opuesta y manda a tocar la publicación al pedo.
+  if (it.visitas == null) return { label: 'Sin dato', cls: 'gray', orden: 5,
+                                   tip: 'Mercado Libre todavía no devolvió las visitas de esta publicación. Reintentá con ↻ Recargar de ML.' };
   const v = it.visitas || 0;
   if (v === 0) return { label: 'Sin visitas', cls: 'bad', orden: 0,
                         tip: 'Nadie la vio en el período: es un problema de exposición, no de precio.' };
@@ -255,7 +318,8 @@ function filtered() {
   let rows = ITEMS;
   if (q) rows = rows.filter(it => (it.sku || '').toLowerCase().includes(q) || (it.titulo || '').toLowerCase().includes(q));
   if (f === 'oportunidad') rows = rows.filter(it => (it.visitas || 0) >= MIN_VISITAS && !it.unidades);
-  else if (f === 'sinvisitas') rows = rows.filter(it => !it.visitas);
+  else if (f === 'sinvisitas') rows = rows.filter(it => it.visitas === 0);
+  else if (f === 'sindato') rows = rows.filter(it => it.visitas == null);
   else if (f === 'convierte') rows = rows.filter(it => (it.conversion || 0) >= 0.01);
   const dir = SORT.dir;
   const val = it => {
@@ -291,7 +355,8 @@ function skuCell(it) {
 }
 function renderTable() {
   const rows = filtered();
-  document.getElementById('count-label').textContent = `${rows.length} de ${ITEMS.length} publicación(es)`;
+  document.getElementById('count-label').textContent =
+    PROGRESO || `${rows.length} de ${ITEMS.length} publicación(es)`;
   document.getElementById('tbody-items').innerHTML = rows.length ? rows.map(it => {
     const d = diagnostico(it);
     return `<tr>

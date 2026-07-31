@@ -488,8 +488,8 @@ def init_db():
             )
         """))
         # Visitas por publicación (Conversión). ML no permite pedirlas en lote:
-        # es 1 request por MLA (ver _fetch_item_visits), así que el resultado se
-        # persiste acá para no repetir ~800 requests en cada carga ni perderlos
+        # es 1 request por MLA (ver _fetch_visits_batch), así que el resultado se
+        # persiste acá para no repetir ~900 requests en cada carga ni perderlos
         # en cada deploy. `window_days` = ventana pedida (7/15/30/60/90).
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS item_visits_cache (
@@ -501,6 +501,12 @@ def init_db():
                 PRIMARY KEY (account_id, item_id, window_days)
             )
         """))
+        # `daily` = serie diaria {"YYYY-MM-DD": visitas} que ML ya devuelve en
+        # `results` del mismo request. Guardarla permite pedir UNA sola ventana
+        # grande (VISITS_FETCH_WINDOW) y derivar 7/30/90 días sumando, en vez de
+        # gastar ~900 requests por cada período que el usuario elige.
+        conn.execute(text(
+            "ALTER TABLE item_visits_cache ADD COLUMN IF NOT EXISTS daily TEXT"))
         # Mapeo manual: SKU componente (lo que se vende) → SKU original (el que
         # tiene stock) × cantidad. Sirve para variantes (cantidad 1) y combos
         # (cantidad N, o varias filas con el mismo componente para multi-producto).
@@ -10178,8 +10184,21 @@ async def _get_all_fotos(account_id: int, acc: dict, force_refresh: bool = False
 CONVERSION_VISITS_CACHE: dict = {}
 CONVERSION_VISITS_TTL_SECONDS = 1800
 # Las visitas de ML tienen granularidad diaria, así que revalidarlas seguido no
-# aporta nada y cuesta ~800 requests por cuenta (ver _fetch_item_visits).
+# aporta nada y cuesta ~900 requests por cuenta (ver _fetch_visits_batch).
 VISITS_DB_TTL_SECONDS = 6 * 3600
+# Se pide SIEMPRE esta ventana y los períodos más cortos se derivan sumando la
+# serie diaria que ML devuelve en el mismo request. Antes cada período (7/30/90)
+# era una tanda entera de ~900 requests contra ML y su propia fila de caché.
+VISITS_FETCH_WINDOW = 90
+# ML tira 429 con facilidad en este endpoint. Con 20 en paralelo y 3 intentos de
+# backoff corto se perdía el 92% de las publicaciones (medido en prod el
+# 2026-07-31: 824 de 898 sin dato). Pocas en paralelo y reintentos largos tardan
+# parecido —el rate limit manda, no la concurrencia— pero traen todo.
+VISITS_CONCURRENCY = 5
+VISITS_MAX_RETRIES = 6
+# Publicaciones por tanda del endpoint de lote: el front las encadena mostrando
+# progreso, así ningún request queda colgado minutos ni se pierde lo ya traído.
+VISITS_BATCH = 120
 # Debajo de estas visitas no se puede afirmar nada de la conversión: 0 ventas
 # sobre 12 visitas es ruido estadístico, no un problema de precio.
 CONVERSION_MIN_VISITS = 30
@@ -10220,9 +10239,71 @@ def _parse_visits_payload(data) -> dict:
     return out
 
 
-async def _fetch_item_visits(account_id: int, item_ids: list, days: int,
-                             force_refresh: bool = False) -> dict:
-    """{item_id: visitas de los últimos `days` días}.
+def _visits_daily_from_payload(data) -> dict:
+    """{'YYYY-MM-DD': visitas} a partir del `results` de `time_window`.
+
+    ML devuelve el detalle DÍA POR DÍA en el mismo request que el total, así
+    que guardándolo se puede pedir una sola ventana grande y derivar cualquier
+    período más corto sin volver a llamar a ML."""
+    out = {}
+    for r in ((data or {}).get("results") or []):
+        if not isinstance(r, dict):
+            continue
+        fecha = str(r.get("date") or "")[:10]
+        if len(fecha) != 10:
+            continue
+        try:
+            out[fecha] = out.get(fecha, 0) + int(r.get("total") or 0)
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+def _visits_sum(daily: dict, date_from: str, date_to: str) -> int:
+    """Visitas dentro del rango (inclusive), sumando la serie diaria. El rango
+    es el MISMO que se usa para las ventas, así ambas mitades de la conversión
+    miden exactamente el mismo período."""
+    return sum(v for f, v in (daily or {}).items() if date_from <= f <= date_to)
+
+
+def _visits_read_cache(account_id: int) -> dict:
+    """{item_id: {'daily': {...}, 'cached_at': dt}} — TODO lo cacheado, sin
+    filtrar por antigüedad. El TTL decide qué se vuelve a pedir (`_visits_pending`),
+    no qué se muestra: un dato de ayer es infinitamente mejor que un 'sin dato',
+    y las visitas de días ya cerrados no cambian."""
+    rows = db_fetchall(
+        "SELECT item_id, daily, cached_at FROM item_visits_cache"
+        " WHERE account_id=:a AND window_days=:d AND daily IS NOT NULL",
+        {"a": account_id, "d": VISITS_FETCH_WINDOW})
+    out = {}
+    for r in rows or []:
+        try:
+            out[r["item_id"]] = {"daily": json.loads(r["daily"] or "{}"),
+                                 "cached_at": r["cached_at"]}
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+def _visits_pending(account_id: int, item_ids: list, cache: dict = None) -> list:
+    """Publicaciones cuya serie diaria falta o venció el TTL."""
+    cache = _visits_read_cache(account_id) if cache is None else cache
+    corte = datetime.utcnow() - timedelta(seconds=VISITS_DB_TTL_SECONDS)
+    pend = []
+    for iid in item_ids:
+        e = cache.get(iid)
+        if not e:
+            pend.append(iid)
+            continue
+        ca = e.get("cached_at")
+        if not ca or (ca.replace(tzinfo=None) if getattr(ca, "tzinfo", None) else ca) < corte:
+            pend.append(iid)
+    return pend
+
+
+async def _fetch_visits_batch(account_id: int, item_ids: list) -> dict:
+    """Trae la ventana `VISITS_FETCH_WINDOW` de las publicaciones indicadas y la
+    persiste. Devuelve {'ok': n, 'fallaron': n, 'http': {code: n}}.
 
     **Es 1 request por publicación, no hay forma de batchear** (verificado
     contra ML el 2026-07-30):
@@ -10230,68 +10311,73 @@ async def _fetch_item_visits(account_id: int, item_ids: list, days: int,
       - `/visits/items?ids=...` → mismo tope de 1.
       - Cualquier `date_from/date_to` con HORA (ISO con Z u offset) → 400
         "unknown date format". Solo acepta `YYYY-MM-DD` a secas.
-      - `/items/{id}/visits/time_window?last=N&unit=day` → 200. Es el que se
-        usa. Tope de ventana: **150 días**.
-    Por eso el resultado se cachea en la BASE (`item_visits_cache`) además de
-    en memoria: son ~800 requests por cuenta y no pueden repetirse en cada
-    carga de la página ni perderse en cada deploy."""
-    days = max(1, min(150, int(days)))
-    key = (account_id, days)
-    cached = CONVERSION_VISITS_CACHE.get(key) if not force_refresh else None
-    if cached and (datetime.utcnow() - cached["at"]).total_seconds() < CONVERSION_VISITS_TTL_SECONDS:
-        return cached["by_item"]
+      - `/items/{id}/visits/time_window?last=N&unit=day` → 200. Es el que se usa.
 
-    by_item: dict = {}
-    if not force_refresh:
-        rows = db_fetchall(
-            "SELECT item_id, visits FROM item_visits_cache"
-            " WHERE account_id=:a AND window_days=:d"
-            "   AND cached_at > NOW() - (:ttl || ' seconds')::interval",
-            {"a": account_id, "d": days, "ttl": str(VISITS_DB_TTL_SECONDS)})
-        by_item = {r["item_id"]: int(r["visits"] or 0) for r in rows}
+    Los fallos se CUENTAN y se devuelven: antes se descartaban en silencio y la
+    publicación quedaba sin dato, que la UI mostraba como "0 visitas" — o sea,
+    un error de la API se leía como "nadie la vio", justo lo contrario."""
+    stats = {"ok": 0, "fallaron": 0, "http": {}}
+    if not item_ids:
+        return stats
+    token = await refresh_ml_token(account_id)
+    if not token:
+        raise HTTPException(502)
+    headers = {"Authorization": f"Bearer {token}"}
+    nuevos: dict = {}
+    sem = asyncio.Semaphore(VISITS_CONCURRENCY)
 
-    faltan = [i for i in item_ids if i not in by_item]
-    if faltan:
-        token = await refresh_ml_token(account_id)
-        if not token:
-            raise HTTPException(502)
-        headers = {"Authorization": f"Bearer {token}"}
-        nuevos: dict = {}
-        sem = asyncio.Semaphore(20)
-        async with httpx.AsyncClient(timeout=60) as client:
-            async def one(item_id):
-                async with sem:
-                    for attempt in range(3):
-                        try:
-                            r = await client.get(
-                                f"{ML_API_URL}/items/{item_id}/visits/time_window",
-                                headers=headers, params={"last": days, "unit": "day"})
-                        except Exception:
-                            if attempt < 2:
-                                await asyncio.sleep(0.4 * (2 ** attempt))
-                                continue
-                            return
-                        if r.status_code in (429, 500, 502, 503, 504) and attempt < 2:
-                            await asyncio.sleep(0.4 * (2 ** attempt))
-                            continue
-                        if r.status_code == 200:
-                            try:
-                                nuevos[item_id] = int((r.json() or {}).get("total_visits") or 0)
-                            except (TypeError, ValueError, AttributeError):
-                                pass
+    async def one(item_id):
+        async with sem:
+            ultimo = None
+            for attempt in range(VISITS_MAX_RETRIES):
+                espera = min(8.0, 0.6 * (2 ** attempt))
+                try:
+                    r = await client.get(
+                        f"{ML_API_URL}/items/{item_id}/visits/time_window",
+                        headers=headers,
+                        params={"last": VISITS_FETCH_WINDOW, "unit": "day"})
+                except Exception:
+                    ultimo = "timeout"
+                    if attempt < VISITS_MAX_RETRIES - 1:
+                        await asyncio.sleep(espera)
+                        continue
+                    break
+                ultimo = r.status_code
+                if r.status_code == 200:
+                    try:
+                        data = r.json() or {}
+                        nuevos[item_id] = _visits_daily_from_payload(data)
+                        stats["ok"] += 1
                         return
+                    except (TypeError, ValueError, AttributeError):
+                        ultimo = "parse"
+                        break
+                if r.status_code in (429, 500, 502, 503, 504) and attempt < VISITS_MAX_RETRIES - 1:
+                    # ML dice cuánto esperar cuando limita; respetarlo evita
+                    # quemar los reintentos en 2 segundos y perder la publicación.
+                    try:
+                        espera = max(espera, min(15.0, float(r.headers.get("Retry-After") or 0)))
+                    except (TypeError, ValueError):
+                        pass
+                    await asyncio.sleep(espera)
+                    continue
+                break
+            stats["fallaron"] += 1
+            k = str(ultimo)
+            stats["http"][k] = stats["http"].get(k, 0) + 1
 
-            await asyncio.gather(*[one(i) for i in faltan])
-        if nuevos:
-            db_executemany(
-                "INSERT INTO item_visits_cache (account_id, item_id, window_days, visits, cached_at)"
-                " VALUES (:a, :i, :d, :v, NOW()) ON CONFLICT (account_id, item_id, window_days)"
-                " DO UPDATE SET visits=EXCLUDED.visits, cached_at=NOW()",
-                [{"a": account_id, "i": k, "d": days, "v": v} for k, v in nuevos.items()])
-        by_item.update(nuevos)
+    async with httpx.AsyncClient(timeout=60) as client:
+        await asyncio.gather(*[one(i) for i in item_ids])
 
-    CONVERSION_VISITS_CACHE[key] = {"at": datetime.utcnow(), "by_item": by_item}
-    return by_item
+    if nuevos:
+        db_executemany(
+            "INSERT INTO item_visits_cache (account_id, item_id, window_days, visits, daily, cached_at)"
+            " VALUES (:a, :i, :d, :v, :j, NOW()) ON CONFLICT (account_id, item_id, window_days)"
+            " DO UPDATE SET visits=EXCLUDED.visits, daily=EXCLUDED.daily, cached_at=NOW()",
+            [{"a": account_id, "i": k, "d": VISITS_FETCH_WINDOW,
+              "v": sum(dd.values()), "j": json.dumps(dd)} for k, dd in nuevos.items()])
+    CONVERSION_VISITS_CACHE.pop(account_id, None)
+    return stats
 
 
 def _conversion_sales_by_mla(account_id: int, date_from: str, date_to: str) -> tuple:
@@ -10367,7 +10453,18 @@ async def api_conversion_data(request: Request, account_id: int):
     catalog = await _get_all_publicaciones(account_id, acc, force_refresh=refresh)
     sku_by_mla = _disc_sku_by_mla(account_id)
     item_ids = [it["item_id"] for it in catalog]
-    visits = await _fetch_item_visits(account_id, item_ids, days, force_refresh=refresh)
+    if refresh:
+        # Vencer lo cacheado en vez de borrarlo: si ML falla a mitad de camino,
+        # se sigue mostrando el dato viejo en lugar de un "sin dato".
+        db_execute("UPDATE item_visits_cache SET cached_at = NOW() - INTERVAL '10 years'"
+                   " WHERE account_id=:a", {"a": account_id})
+    # Las visitas NO se traen acá: son ~900 requests contra ML y colgarían este
+    # request varios minutos (y si se cortaba, se perdía todo). El front las pide
+    # por tandas con /visitas-lote y va mostrando el progreso.
+    vcache = _visits_read_cache(account_id)
+    pendientes = _visits_pending(account_id, item_ids, vcache)
+    visits = {iid: _visits_sum(e["daily"], date_from, date_to)
+              for iid, e in vcache.items()}
     if refresh:
         # Recomponer las ventas del período contra ML: los snapshots viejos no
         # guardan el `item_id` del ítem vendido (se agregó el 2026-07-30), y sin
@@ -10397,16 +10494,52 @@ async def api_conversion_data(request: Request, account_id: int):
     total_v = sum(i["visitas"] or 0 for i in items)
     total_u = sum(i["unidades"] for i in items)
     items.sort(key=lambda i: (-(i["visitas"] or 0), i["sku"] or ""))
+    # `sin_visitas` cuenta SOLO las que ML confirmó en cero. Las que todavía no
+    # tienen dato van aparte: mezclarlas fue el bug original (un 92% de fallos de
+    # la API se leía en pantalla como "840 publicaciones que nadie miró").
     return {
         "items": items,
         "period": {"days": days, "from": date_from, "to": date_to},
         "totales": {"visitas": total_v, "unidades": total_u,
                     "conversion": (total_u / total_v) if total_v else None,
                     "publicaciones": len(items),
-                    "sin_visitas": sum(1 for i in items if not i["visitas"]),
+                    "sin_visitas": sum(1 for i in items if i["visitas"] == 0),
+                    "sin_dato": sum(1 for i in items if i["visitas"] is None),
                     "unidades_sin_mla": sin_mla},
+        "pendientes": len(pendientes),
+        "batch": VISITS_BATCH,
         "min_visitas": CONVERSION_MIN_VISITS,
     }
+
+
+@app.post("/api/conversion/{account_id:int}/visitas-lote")
+async def api_conversion_visitas_lote(request: Request, account_id: int):
+    """Trae las visitas de UNA tanda de publicaciones y devuelve cuántas quedan.
+
+    El front encadena las tandas mostrando progreso. Partirlo así evita el
+    request de varios minutos que se cortaba a mitad (y perdía todo lo traído):
+    cada tanda se persiste apenas termina, así que si el usuario se va o el
+    deploy reinicia, lo ya bajado queda."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    acc = _account_for_user(account_id, user_id)
+    if not acc:
+        raise HTTPException(404)
+    try:
+        offset = max(0, int(request.query_params.get("offset") or 0))
+    except ValueError:
+        offset = 0
+    catalog = await _get_all_publicaciones(account_id, acc)
+    item_ids = [it["item_id"] for it in catalog]
+    pendientes = _visits_pending(account_id, item_ids)
+    # Las que se resuelven salen de la cola, así que sin offset una publicación
+    # que falla siempre (borrada, sin permisos) quedaría al frente para siempre y
+    # el front giraría en falso. El front pasa como offset los fallos acumulados.
+    tanda = pendientes[offset:offset + VISITS_BATCH]
+    stats = await _fetch_visits_batch(account_id, tanda) if tanda else {"ok": 0, "fallaron": 0, "http": {}}
+    return {"procesadas": len(tanda), "pendientes": max(0, len(pendientes) - stats["ok"]),
+            "total": len(item_ids), "stats": stats}
 
 
 @app.get("/fotos", response_class=HTMLResponse)
