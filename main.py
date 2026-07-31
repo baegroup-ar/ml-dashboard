@@ -487,6 +487,20 @@ def init_db():
                 PRIMARY KEY (account_id, item_id)
             )
         """))
+        # Visitas por publicación (Conversión). ML no permite pedirlas en lote:
+        # es 1 request por MLA (ver _fetch_item_visits), así que el resultado se
+        # persiste acá para no repetir ~800 requests en cada carga ni perderlos
+        # en cada deploy. `window_days` = ventana pedida (7/15/30/60/90).
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS item_visits_cache (
+                account_id INTEGER NOT NULL REFERENCES ml_accounts(id) ON DELETE CASCADE,
+                item_id TEXT NOT NULL,
+                window_days INTEGER NOT NULL,
+                visits INTEGER NOT NULL DEFAULT 0,
+                cached_at TIMESTAMP DEFAULT NOW(),
+                PRIMARY KEY (account_id, item_id, window_days)
+            )
+        """))
         # Mapeo manual: SKU componente (lo que se vende) → SKU original (el que
         # tiene stock) × cantidad. Sirve para variantes (cantidad 1) y combos
         # (cantidad N, o varias filas con el mismo componente para multi-producto).
@@ -10163,6 +10177,9 @@ async def _get_all_fotos(account_id: int, acc: dict, force_refresh: bool = False
 # pocas ventas = problema de oferta (precio, fotos, envío, reputación).
 CONVERSION_VISITS_CACHE: dict = {}
 CONVERSION_VISITS_TTL_SECONDS = 1800
+# Las visitas de ML tienen granularidad diaria, así que revalidarlas seguido no
+# aporta nada y cuesta ~800 requests por cuenta (ver _fetch_item_visits).
+VISITS_DB_TTL_SECONDS = 6 * 3600
 # Debajo de estas visitas no se puede afirmar nada de la conversión: 0 ventas
 # sobre 12 visitas es ruido estadístico, no un problema de precio.
 CONVERSION_MIN_VISITS = 30
@@ -10203,58 +10220,76 @@ def _parse_visits_payload(data) -> dict:
     return out
 
 
-async def _fetch_item_visits(account_id: int, item_ids: list, date_from: str, date_to: str,
+async def _fetch_item_visits(account_id: int, item_ids: list, days: int,
                              force_refresh: bool = False) -> dict:
-    """{item_id: visitas del período}. Primero el multiget
-    `/items/visits?ids=` (50 por request); si ML lo rechaza, cae al endpoint
-    por ítem. Cacheado por (cuenta, período) con TTL: las visitas se mueven
-    lento y son muchísimos requests."""
-    key = (account_id, date_from, date_to)
+    """{item_id: visitas de los últimos `days` días}.
+
+    **Es 1 request por publicación, no hay forma de batchear** (verificado
+    contra ML el 2026-07-30):
+      - `/items/visits?ids=...` → 400 "maximum amount of items to query is 1".
+      - `/visits/items?ids=...` → mismo tope de 1.
+      - Cualquier `date_from/date_to` con HORA (ISO con Z u offset) → 400
+        "unknown date format". Solo acepta `YYYY-MM-DD` a secas.
+      - `/items/{id}/visits/time_window?last=N&unit=day` → 200. Es el que se
+        usa. Tope de ventana: **150 días**.
+    Por eso el resultado se cachea en la BASE (`item_visits_cache`) además de
+    en memoria: son ~800 requests por cuenta y no pueden repetirse en cada
+    carga de la página ni perderse en cada deploy."""
+    days = max(1, min(150, int(days)))
+    key = (account_id, days)
     cached = CONVERSION_VISITS_CACHE.get(key) if not force_refresh else None
     if cached and (datetime.utcnow() - cached["at"]).total_seconds() < CONVERSION_VISITS_TTL_SECONDS:
         return cached["by_item"]
-    token = await refresh_ml_token(account_id)
-    if not token:
-        raise HTTPException(502)
-    headers = {"Authorization": f"Bearer {token}"}
-    # ML espera el rango como datetime ISO con offset.
-    df = f"{date_from}T00:00:00.000-00:00"
-    dt = f"{date_to}T23:59:59.999-00:00"
+
     by_item: dict = {}
-    async with httpx.AsyncClient(timeout=60) as client:
-        async def multi(chunk):
-            try:
-                r = await client.get(f"{ML_API_URL}/items/visits", headers=headers,
-                                     params={"ids": ",".join(chunk), "date_from": df, "date_to": dt})
-                if r.status_code == 200:
-                    by_item.update(_parse_visits_payload(r.json()))
-                    return True
-            except Exception:
-                pass
-            return False
+    if not force_refresh:
+        rows = db_fetchall(
+            "SELECT item_id, visits FROM item_visits_cache"
+            " WHERE account_id=:a AND window_days=:d"
+            "   AND cached_at > NOW() - (:ttl || ' seconds')::interval",
+            {"a": account_id, "d": days, "ttl": str(VISITS_DB_TTL_SECONDS)})
+        by_item = {r["item_id"]: int(r["visits"] or 0) for r in rows}
 
-        chunks = [item_ids[i:i + 50] for i in range(0, len(item_ids), 50)]
-        oks = await asyncio.gather(*[multi(c) for c in chunks])
-        # Fallback por ítem SOLO para los que el multiget no resolvió (si ML
-        # cambió el endpoint, esto sigue devolviendo el dato aunque más lento).
-        faltan = [i for i in item_ids if i not in by_item]
-        if faltan and not all(oks):
-            sem = asyncio.Semaphore(15)
-
+    faltan = [i for i in item_ids if i not in by_item]
+    if faltan:
+        token = await refresh_ml_token(account_id)
+        if not token:
+            raise HTTPException(502)
+        headers = {"Authorization": f"Bearer {token}"}
+        nuevos: dict = {}
+        sem = asyncio.Semaphore(20)
+        async with httpx.AsyncClient(timeout=60) as client:
             async def one(item_id):
                 async with sem:
-                    try:
-                        r = await client.get(f"{ML_API_URL}/items/{item_id}/visits", headers=headers,
-                                             params={"date_from": df, "date_to": dt})
+                    for attempt in range(3):
+                        try:
+                            r = await client.get(
+                                f"{ML_API_URL}/items/{item_id}/visits/time_window",
+                                headers=headers, params={"last": days, "unit": "day"})
+                        except Exception:
+                            if attempt < 2:
+                                await asyncio.sleep(0.4 * (2 ** attempt))
+                                continue
+                            return
+                        if r.status_code in (429, 500, 502, 503, 504) and attempt < 2:
+                            await asyncio.sleep(0.4 * (2 ** attempt))
+                            continue
                         if r.status_code == 200:
-                            d = r.json()
-                            v = d.get("total_visits") if isinstance(d, dict) else None
-                            if v is not None:
-                                by_item[item_id] = int(v)
-                    except Exception:
-                        pass
+                            try:
+                                nuevos[item_id] = int((r.json() or {}).get("total_visits") or 0)
+                            except (TypeError, ValueError, AttributeError):
+                                pass
+                        return
 
             await asyncio.gather(*[one(i) for i in faltan])
+        if nuevos:
+            db_executemany(
+                "INSERT INTO item_visits_cache (account_id, item_id, window_days, visits, cached_at)"
+                " VALUES (:a, :i, :d, :v, NOW()) ON CONFLICT (account_id, item_id, window_days)"
+                " DO UPDATE SET visits=EXCLUDED.visits, cached_at=NOW()",
+                [{"a": account_id, "i": k, "d": days, "v": v} for k, v in nuevos.items()])
+        by_item.update(nuevos)
+
     CONVERSION_VISITS_CACHE[key] = {"at": datetime.utcnow(), "by_item": by_item}
     return by_item
 
@@ -10323,6 +10358,8 @@ async def api_conversion_data(request: Request, account_id: int):
     except ValueError:
         days = 30
     refresh = (request.query_params.get("refresh") in ("1", "true", "yes"))
+    # La ventana de visitas de ML (`time_window?last=N`) cierra HOY, así que el
+    # rango de ventas se calcula igual para que las dos mitades comparen lo mismo.
     hoy = (datetime.utcnow() - timedelta(hours=3)).date()
     date_from = str(hoy - timedelta(days=days - 1))
     date_to = str(hoy)
@@ -10330,7 +10367,17 @@ async def api_conversion_data(request: Request, account_id: int):
     catalog = await _get_all_publicaciones(account_id, acc, force_refresh=refresh)
     sku_by_mla = _disc_sku_by_mla(account_id)
     item_ids = [it["item_id"] for it in catalog]
-    visits = await _fetch_item_visits(account_id, item_ids, date_from, date_to, force_refresh=refresh)
+    visits = await _fetch_item_visits(account_id, item_ids, days, force_refresh=refresh)
+    if refresh:
+        # Recomponer las ventas del período contra ML: los snapshots viejos no
+        # guardan el `item_id` del ítem vendido (se agregó el 2026-07-30), y sin
+        # eso las unidades no se pueden atribuir a ninguna publicación. Recargar
+        # las reescribe con el MLA. Tolerante a fallos: si ML falla, se sigue con
+        # lo cacheado y el aviso de "sin publicación identificada" lo delata.
+        try:
+            await _api_orders_impl(request, account_id, date_from, date_to, refresh=True)
+        except Exception:
+            pass
     sales, sin_mla = _conversion_sales_by_mla(account_id, date_from, date_to)
 
     items = []

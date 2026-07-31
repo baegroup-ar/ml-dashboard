@@ -134,7 +134,7 @@
         <option value="sinvisitas">Sin visitas</option>
         <option value="convierte">Convierte bien</option>
       </select>
-      <button class="btn-nav" onclick="loadAll(true)" title="Vuelve a pedir a Mercado Libre el catálogo y las visitas.">↻ Recargar de ML</button>
+      <button class="btn-nav" onclick="loadAll(true)" title="Vuelve a pedir a Mercado Libre las visitas de cada publicación Y recompone las ventas del período (eso es lo que le pone el MLA a cada venta). Con muchas publicaciones tarda varios minutos.">↻ Recargar de ML</button>
       <span id="count-label" style="font-size:12px;color:#888;"></span>
     </div>
   </div>
@@ -175,7 +175,11 @@ async function loadAll(refresh) {
   const aid = document.getElementById('account-select').value;
   const days = document.getElementById('days-select').value;
   const lbl = document.getElementById('count-label');
-  lbl.textContent = refresh ? 'Recargando de Mercado Libre...' : 'Cargando...';
+  // Mercado Libre no deja pedir las visitas en lote: es un request por
+  // publicación. La primera carga de cada período tarda; después sale de caché.
+  lbl.textContent = refresh
+    ? 'Recargando de Mercado Libre (visitas + ventas del período)... puede tardar varios minutos.'
+    : 'Cargando... (la primera vez de cada período tarda: ML no permite pedir las visitas en lote)';
   try {
     const r = await fetch(`/api/conversion/${aid}/data?days=${days}${refresh ? '&refresh=1' : ''}`);
     const j = await r.json();
@@ -206,7 +210,7 @@ function renderKpis() {
   // ventas cacheadas antes de eso no se pueden atribuir a una publicación.
   const av = document.getElementById('aviso-sin-mla');
   av.innerHTML = t.unidades_sin_mla
-    ? `⚠ ${int(t.unidades_sin_mla)} unidad(es) vendidas en el período no tienen la publicación identificada (se cachearon antes de que el panel guardara el MLA de cada venta), así que NO están contadas en la conversión de ninguna fila. Se corrigen recargando las ventas del período desde el Dashboard.`
+    ? `⚠ ${int(t.unidades_sin_mla)} unidad(es) vendidas en el período no tienen la publicación identificada (se cachearon antes de que el panel guardara el MLA de cada venta), así que NO están contadas en la conversión de ninguna fila. Se corrigen con <b>↻ Recargar de ML</b>, que recompone las ventas del período — tarda varios minutos y hay que hacerlo una sola vez por período.`
     : '';
 }
 
