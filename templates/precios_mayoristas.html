@@ -344,12 +344,16 @@ async function calcularPrecios(mio, pendientes) {
     offset += Math.max(0, j.procesadas - j.ok);
     pendientes = j.pendientes;
     if (mio !== CARGA) { PROGRESO = null; return; }
-    // Refrescar en cada tanda: los precios sirven a medida que se calculan.
-    try { aplicarData(await fetchData(false)); } catch (e) { /* sigue el loop */ }
+    // Refrescar cada tantas tandas, no en cada una: recalcular la lista entera
+    // cuesta segundos y hacerlo 38 veces seguidas apila requests y frena todo.
+    if (vueltas % 5 === 0 || pendientes <= 0) {
+      try { aplicarData(await fetchData(false)); } catch (e) { /* sigue el loop */ }
+    }
   }
+  if (mio !== CARGA) { PROGRESO = null; return; }
   PROGRESO = null;
-  if (mio !== CARGA) return;
-  renderTable();
+  // Refresco final: la última tanda puede no haber caído en el múltiplo de 5.
+  try { aplicarData(await fetchData(false)); } catch (e) { renderTable(); }
 }
 
 // ── Parámetros: escala de tramos ──

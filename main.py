@@ -10082,15 +10082,23 @@ def _wholesale_sim_one(ctx: dict, sku: str, tiers: list, analysis: dict, ml_tier
     exigencia no puede "exceder" nada."""
     sku_u = (sku or "").strip().upper()
     p = ctx["p"]
-    own = ctx["row_by_sku_u"].get(sku_u)
-    base_price = _margen_pvp_meli(
-        float(own["price"]) if own and own["price"] is not None else None,
-        float(own["desc_meli"]) if own and own["desc_meli"] is not None else None) if own else None
-    costo, iva_rate = _margen_resolve_cost(
-        sku_u, ctx["manual_map_u"], ctx["versioned"], ctx["today_iso"], ctx["variant_map_u"])
-    comvar = _margen_resolve_comvar(sku_u, ctx["comvar_map_u"], ctx["variant_map_u"])
-    tipo = _margen_tipo_resolve(sku_u, own["tipo_publicacion"] if own else None)
-    ccf = _margen_com_cuotas_frac(tipo, p)
+    # Todo esto depende SOLO del SKU (no de la publicación) y los resolvers de
+    # costo/comisión son recursivos: memoizarlo evita repetirlos por cada una de
+    # las ~900 publicaciones, muchas de las cuales comparten SKU.
+    memo = ctx.setdefault("_memo", {})
+    if sku_u in memo:
+        base_price, costo, iva_rate, comvar, tipo, ccf = memo[sku_u]
+    else:
+        own = ctx["row_by_sku_u"].get(sku_u)
+        base_price = _margen_pvp_meli(
+            float(own["price"]) if own and own["price"] is not None else None,
+            float(own["desc_meli"]) if own and own["desc_meli"] is not None else None) if own else None
+        costo, iva_rate = _margen_resolve_cost(
+            sku_u, ctx["manual_map_u"], ctx["versioned"], ctx["today_iso"], ctx["variant_map_u"])
+        comvar = _margen_resolve_comvar(sku_u, ctx["comvar_map_u"], ctx["variant_map_u"])
+        tipo = _margen_tipo_resolve(sku_u, own["tipo_publicacion"] if own else None)
+        ccf = _margen_com_cuotas_frac(tipo, p)
+        memo[sku_u] = (base_price, costo, iva_rate, comvar, tipo, ccf)
 
     # Renta de referencia: 1 unidad al PVP MELI con el envío de 1 unidad. Va CON
     # comisión fija porque es una venta minorista común (tiene que coincidir con
@@ -10214,7 +10222,9 @@ def _wholesale_sim_one(ctx: dict, sku: str, tiers: list, analysis: dict, ml_tier
                        or target <= running_max + 0.01),
             "cargado_en_ml": ml_tiers.get(t["qty"]),
             "renta_escala": _renta(target),
-            "renta_max_ml": _renta(running_max),
+            # Solo las que se muestran: sobre ~900 publicaciones, cada renta de
+            # más son miles de `margen_compute` que nadie mira.
+            "renta_max_ml": _renta(running_max) if running_max is not None else None,
             "renta_cargado": _renta(ml_tiers.get(t["qty"])),
         })
     return {
