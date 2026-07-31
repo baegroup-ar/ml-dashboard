@@ -285,6 +285,10 @@ function simGap(t) {
 // Estado de un tramo: si ML no exige nada no se dice nada (no hay techo que
 // respetar). Si exige, "OK" cuando tu precio entra, o cuánto falta bajar.
 function simEstado(t) {
+  if (t.sin_costo) return { label: 'Sin costo', cls: 'mid' };
+  // Un descuento enorme casi siempre sale de un costo mal cargado: se avisa y
+  // no se aplica a ML hasta que alguien lo mire.
+  if (t.desc_sospechoso) return { label: '⚠ Revisar costo', cls: 'neg' };
   if (t.sin_dato) return { label: 'Sin dato', cls: 'mid' };
   if (!t.exige) return { label: '', cls: 'muted' };
   const gap = simGap(t);

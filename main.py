@@ -9816,6 +9816,18 @@ def _wholesale_sim_context(user: dict, user_id: int, account_id: int) -> dict:
     }
 
 
+# Piso de cordura del costo, como fracción del PVP MELI: por debajo de esto se
+# toma como "sin costo" en vez de calcular un precio mayorista irrisorio.
+WHOLESALE_COSTO_MIN_FRAC = 0.01
+# Descuento máximo que se acepta APLICAR a ML sin intervención. La cuenta puede
+# dar descuentos enormes de forma legítima cuando el costo es muy bajo: con
+# costo casi nulo la renta sin comisión fija es casi constante, la ecuación se
+# degenera y el precio de renta igualada se desploma. Un precio así en ML es
+# irreversible en la práctica (alguien compra), así que se muestra pero no se
+# aplica solo: el usuario decide caso por caso.
+WHOLESALE_DESC_MAX_APLICABLE = 0.60
+
+
 def _wholesale_precio_iso_renta(renta_objetivo, costo_sin_iva, iva_rate, comvar,
                                 ccf, envio_unit, p, envio_conocido=True, tope=None):
     """Precio (con IVA) al que vender N unidades deja la MISMA renta % que vender
@@ -9838,6 +9850,12 @@ def _wholesale_precio_iso_renta(renta_objetivo, costo_sin_iva, iva_rate, comvar,
     # Sin costo cargado no hay renta que igualar: devolver un precio acá sería
     # inventarlo, y este número termina aplicándose a ML.
     if costo <= 0:
+        return None
+    # Un costo por debajo del 1% del PVP no es un costo, es un placeholder (visto
+    # en prod: EXTENSOR-40X40 con $0,01 cargado daba un precio mayorista de
+    # $0,05 sobre un PVP de $5.499 — y como no excede ningún techo, se habría
+    # aplicado a ML sin chistar). Ante un costo así, no hay precio.
+    if tope and costo < tope * WHOLESALE_COSTO_MIN_FRAC:
         return None
     factor = 1 + (float(iva_rate or 0) / 100.0)
     cv = float(comvar if comvar is not None else p["comision_var_default"])
@@ -9904,6 +9922,8 @@ def _wholesale_sim_one(ctx: dict, sku: str, tiers: list, analysis: dict, ml_tier
             and base_price >= p["envio_threshold"]):
         renta_base = None
 
+    costo_confiable = bool(costo and costo > 0 and
+                           (not base_price or costo >= base_price * WHOLESALE_COSTO_MIN_FRAC))
     rows = []
     running_max = None
     running_iso = None
@@ -9960,6 +9980,11 @@ def _wholesale_sim_one(ctx: dict, sku: str, tiers: list, analysis: dict, ml_tier
             "iso_recortado": iso_recortado,
             "pct_resultante": (round((1 - target / base_price) * 100, 2)
                                if (base_price and target) else None),
+            # Descuento sospechosamente grande: se muestra igual, pero /apply lo
+            # frena para que nadie escriba en ML un precio salido de un costo mal
+            # cargado (ver WHOLESALE_DESC_MAX_APLICABLE).
+            "desc_sospechoso": bool(base_price and target
+                                    and (1 - target / base_price) > WHOLESALE_DESC_MAX_APLICABLE),
             "ship_cost": ship_cost,
             "ship_cost_unit": round(ship_cost / t["qty"], 2) if ship_cost else None,
             "saving_per_unit": saving,
@@ -9973,9 +9998,11 @@ def _wholesale_sim_one(ctx: dict, sku: str, tiers: list, analysis: dict, ml_tier
             # pudo obtener el costo del paquete de N: es "falta el dato", no
             # "no hay exigencia" — distinguirlo evita leerlo como vía libre.
             "sin_dato": bool(analysis.get("applies")) and ship_cost is None,
-            # Sin costo cargado no hay precio que calcular: es "falta el dato",
+            # Sin costo confiable no hay precio que calcular: es "falta el dato",
             # no "excede" (un tramo sin precio no puede pasarse de ningún techo).
-            "sin_costo": target is None,
+            # Se distingue de los otros motivos por los que puede faltar el
+            # precio (envío sin consultar) para no rotular mal la celda.
+            "sin_costo": not costo_confiable,
             "cumple": (running_max is None or target is None
                        or target <= running_max + 0.01),
             "cargado_en_ml": ml_tiers.get(t["qty"]),
@@ -10281,6 +10308,15 @@ async def api_precios_mayoristas_apply(request: Request, account_id: int):
                         problema = (f"El precio que iguala la renta en {tr['qty']}+ un. "
                                     f"(${precio:,.0f}) supera el máximo que ML acepta "
                                     f"(${(tr.get('precio_max_acumulado') or 0):,.0f}).")
+                        break
+                    # Freno de mano: un descuento enorme casi siempre viene de un
+                    # costo mal cargado. Se muestra en la simulación, pero no se
+                    # escribe en ML sin que alguien lo mire.
+                    if (tr.get("pct_resultante") or 0) > WHOLESALE_DESC_MAX_APLICABLE * 100:
+                        problema = (f"El precio calculado para {tr['qty']}+ un. (${precio:,.0f}) es un "
+                                    f"{tr['pct_resultante']:.1f}% menos que el PVP MELI. Revisá el costo "
+                                    f"del SKU en Costos CMV: un descuento así casi siempre es un costo mal "
+                                    f"cargado. No se aplicó nada en esta publicación.")
                         break
                     target_tiers[tr["qty"]] = precio
                 if problema:
