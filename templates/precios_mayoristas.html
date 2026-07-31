@@ -310,9 +310,12 @@ function renderSim(j) {
       <td class="num ${simEstado(t).cls}"><b>${simEstado(t).label}</b></td>
       <td class="num">${t.cargado_en_ml != null ? priceRenta(t.cargado_en_ml, t.renta_cargado) : '<span class="muted">—</span>'}</td>
     </tr>`).join('');
-  const maxPct = Math.max(...(j.tiers || []).map(t => t.pct_necesario || 0));
-  const sugerencia = j.shipping.applies && isFinite(maxPct) && maxPct > 0
-    ? `<div class="param-hint" style="margin-top:10px;">Para que <b>todos</b> los tramos pasen, el descuento del último tramo tendría que ser de al menos <b>${maxPct.toFixed(2)}%</b>.</div>`
+  // Solo cuando el precio calculado NO entra en lo que ML acepta: si entra (el
+  // caso normal), no hay nada que sugerir — el precio ya sale del margen.
+  const excede = (j.tiers || []).filter(t => t.exige && !t.cumple);
+  const maxPct = Math.max(...excede.map(t => t.pct_necesario || 0));
+  const sugerencia = excede.length && isFinite(maxPct)
+    ? `<div class="param-hint" style="margin-top:10px;">⚠ En ${excede.length === 1 ? 'un tramo' : `${excede.length} tramos`} el precio que iguala la renta queda <b>por encima del techo de ML</b>: ahí hay que bajar hasta el techo (descuento de al menos <b>${maxPct.toFixed(2)}%</b>) y ese tramo va a rendir <b>menos</b> que vender de a 1.</div>`
     : '';
   const realNote = (j.pvp_real != null && j.base_price && Math.abs(j.pvp_real - j.base_price) > 1)
     ? ` · <span class="mid">PVP Real en ML: ${fmt(j.pvp_real)}</span> <span class="muted">(campaña con aporte de ML — no se usa de base)</span>` : '';
