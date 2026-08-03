@@ -641,6 +641,41 @@ def init_db():
         """))
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_clientes_owner ON clientes(owner_user_id)"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_clientes_razon ON clientes(owner_user_id, razon_social)"))
+        # Alta de Publicaciones: checklist de en qué tienda/canal ya se publicó
+        # cada SKU. Compartida por DUEÑO (owner_user_id) igual que clientes. El
+        # PVP NO se guarda acá: se lee en vivo de product_sale_prices.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS alta_publicaciones (
+                id SERIAL PRIMARY KEY,
+                owner_user_id INTEGER NOT NULL,
+                sku TEXT NOT NULL,
+                ch_bae BOOLEAN NOT NULL DEFAULT FALSE,
+                ch_egipto BOOLEAN NOT NULL DEFAULT FALSE,
+                ch_sarasa BOOLEAN NOT NULL DEFAULT FALSE,
+                ch_bt BOOLEAN NOT NULL DEFAULT FALSE,
+                ch_lamus BOOLEAN NOT NULL DEFAULT FALSE,
+                comentarios TEXT,
+                links TEXT,
+                estado TEXT NOT NULL DEFAULT 'pendiente',
+                ok_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT NOW(),
+                UNIQUE (owner_user_id, sku)
+            )
+        """))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_alta_pub_owner ON alta_publicaciones(owner_user_id, estado)"))
+        # Historial de cambios de estado (cada vez que se pone en OK, y también
+        # cuando se vuelve a pendiente: así queda la traza completa).
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS alta_publicaciones_hist (
+                id SERIAL PRIMARY KEY,
+                item_id INTEGER NOT NULL,
+                estado TEXT NOT NULL,
+                changed_by TEXT,
+                changed_at TIMESTAMP DEFAULT NOW()
+            )
+        """))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_alta_pub_hist_item ON alta_publicaciones_hist(item_id, changed_at)"))
         # Migrar iva_included → iva_rate UNA VEZ (controlado por app_meta).
         iva_migrated = conn.execute(text(
             "SELECT 1 FROM app_meta WHERE key='iva_rate_migrated'"
@@ -1686,6 +1721,7 @@ PAGE_ROUTES = {
     "ponderado_envios": "/ponderado-envios",
     "precios_mayoristas": "/precios-mayoristas",
     "conversion": "/conversion",
+    "alta_publicaciones": "/alta-publicaciones",
 }
 
 
@@ -10989,6 +11025,241 @@ async def api_conversion_visitas_lote(request: Request, account_id: int):
             "total": len(item_ids), "stats": stats}
 
 
+# ─────────────────────── Alta de Publicaciones (checklist) ───────────────────
+# Lista de trabajo para dar de alta un SKU en cada tienda/canal. El SKU se carga
+# a mano; el PVP NO se guarda: se lee EN VIVO de la base de PVP
+# (product_sale_prices) para que siga al día si el precio cambia. Esa base es
+# POR CUENTA y esta pantalla no tiene selector, así que la cuenta se resuelve
+# con _margen_account_id (misma regla que Precios Mayoristas y el import de
+# Descuentos: leer la base de PVP/Margen con la cuenta de la pantalla fue el bug
+# 0949e16).
+ALTA_PUB_CANALES = [
+    ("bae", "BAE"), ("egipto", "EGIPTO"), ("sarasa", "SARASA"),
+    ("bt", "BT"), ("lamus", "LAMUS"),
+]
+ALTA_PUB_CHECK_FIELDS = tuple(f"ch_{k}" for k, _ in ALTA_PUB_CANALES)
+ALTA_PUB_ESTADOS = ("pendiente", "ok")
+
+
+def _alta_pub_owner_id(user: dict) -> int:
+    """La lista es compartida por DUEÑO (todas sus cuentas ML), como Clientes."""
+    return _accounts_owner_id(user, user["id"])
+
+
+def _alta_pub_fmt_dt(v) -> str:
+    """Timestamp del server (UTC naive) → 'DD/MM/YYYY HH:MM' en hora argentina."""
+    if not v:
+        return ""
+    d = v if isinstance(v, datetime) else None
+    if d is None:
+        try:
+            d = datetime.fromisoformat(str(v))
+        except ValueError:
+            return str(v)
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=timezone.utc)
+    return d.astimezone(AR_TZ).strftime("%d/%m/%Y %H:%M")
+
+
+def _alta_pub_pvp_map(user_id: int, user: dict) -> dict:
+    """Base de PVP (SKU → precio) en MAYÚSCULAS, de la cuenta de Margen."""
+    aid = _margen_account_id(get_visible_accounts(user_id, user))
+    if not aid:
+        return {}
+    rows = db_fetchall(
+        "SELECT sku, price FROM product_sale_prices WHERE account_id=:a", {"a": aid})
+    out = {}
+    for r in rows:
+        s = str(r.get("sku") or "").strip().upper()
+        if s:
+            out[s] = float(r.get("price") or 0)
+    return out
+
+
+def _alta_pub_pvp(sku: str, pvp_map: dict):
+    """PVP del SKU. Si no está cargado prueba el SKU base (sufijos de cuotas),
+    igual que los costos: SOP78-446-3C hereda el PVP de SOP78-446."""
+    s = (sku or "").strip().upper()
+    if s in pvp_map:
+        return pvp_map[s]
+    for base in _sku_fallbacks(s):
+        if base in pvp_map:
+            return pvp_map[base]
+    return None
+
+
+def _alta_pub_hist_map(owner: int) -> dict:
+    """{item_id: [{estado, fecha}, ...]} más reciente primero."""
+    rows = db_fetchall(
+        "SELECT h.item_id, h.estado, h.changed_at, h.changed_by"
+        " FROM alta_publicaciones_hist h"
+        " JOIN alta_publicaciones i ON i.id = h.item_id"
+        " WHERE i.owner_user_id = :o"
+        " ORDER BY h.changed_at DESC, h.id DESC", {"o": owner})
+    out: dict = {}
+    for r in rows:
+        out.setdefault(r["item_id"], []).append({
+            "estado": r["estado"],
+            "fecha": _alta_pub_fmt_dt(r["changed_at"]),
+            "usuario": r.get("changed_by") or "",
+        })
+    return out
+
+
+def _alta_pub_row(r: dict, pvp_map: dict, hist: dict) -> dict:
+    out = {
+        "id": r["id"],
+        "sku": r["sku"],
+        "pvp": _alta_pub_pvp(r["sku"], pvp_map),
+        "comentarios": r.get("comentarios") or "",
+        "links": r.get("links") or "",
+        "estado": r.get("estado") or "pendiente",
+        "ok_at": _alta_pub_fmt_dt(r.get("ok_at")),
+        "historial": hist.get(r["id"], []),
+    }
+    for f in ALTA_PUB_CHECK_FIELDS:
+        out[f] = bool(r.get(f))
+    return out
+
+
+_ALTA_PUB_COLS = (
+    "id, sku, " + ", ".join(ALTA_PUB_CHECK_FIELDS) +
+    ", comentarios, links, estado, ok_at, created_at"
+)
+
+
+@app.get("/alta-publicaciones", response_class=HTMLResponse)
+async def alta_publicaciones_page(request: Request):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse("/")
+    user = get_user(user_id)
+    _r = _page_redirect(user, "alta_publicaciones")
+    if _r:
+        return _r
+    return templates.TemplateResponse("alta_publicaciones.html", {
+        "request": request, "user": user, "perms": user_permissions(user),
+        "canales": ALTA_PUB_CANALES,
+    })
+
+
+@app.get("/api/alta-publicaciones")
+async def api_alta_pub_list(request: Request):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    user = get_user(user_id)
+    owner = _alta_pub_owner_id(user)
+    rows = db_fetchall(
+        f"SELECT {_ALTA_PUB_COLS} FROM alta_publicaciones WHERE owner_user_id=:o"
+        " ORDER BY COALESCE(ok_at, created_at) DESC, id DESC", {"o": owner})
+    pvp_map = _alta_pub_pvp_map(user_id, user)
+    hist = _alta_pub_hist_map(owner)
+    return {
+        "items": [_alta_pub_row(r, pvp_map, hist) for r in rows],
+        "canales": [{"key": k, "label": lb} for k, lb in ALTA_PUB_CANALES],
+    }
+
+
+@app.post("/api/alta-publicaciones")
+async def api_alta_pub_add(request: Request):
+    """Alta manual de un SKU en la lista (arranca en 'pendiente')."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    user = get_user(user_id)
+    owner = _alta_pub_owner_id(user)
+    body = await request.json()
+    # SKU siempre en mayúsculas: el text-transform del input es SOLO visual y
+    # guardar en minúscula rompe el cruce con la base de PVP (fix 490dfeb).
+    sku = str(body.get("sku") or "").strip().upper()
+    if not sku:
+        raise HTTPException(400, "Cargá un SKU.")
+    with engine.begin() as conn:
+        row = conn.execute(text(
+            "INSERT INTO alta_publicaciones (owner_user_id, sku, comentarios, links)"
+            " VALUES (:o, :s, '', '')"
+            " ON CONFLICT (owner_user_id, sku) DO NOTHING"
+            " RETURNING id"), {"o": owner, "s": sku}).fetchone()
+    if not row:
+        raise HTTPException(400, f"El SKU {sku} ya está en la lista.")
+    pvp_map = _alta_pub_pvp_map(user_id, user)
+    return {"ok": True, "id": row[0], "sku": sku, "pvp": _alta_pub_pvp(sku, pvp_map)}
+
+
+@app.patch("/api/alta-publicaciones/{item_id:int}")
+async def api_alta_pub_patch(request: Request, item_id: int):
+    """Edición inline: checkboxes por canal, comentarios, links y estado.
+    Al pasar a OK se sella `ok_at` y se agrega una entrada al historial (y otra
+    si se vuelve a pendiente, para que la traza quede completa)."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    user = get_user(user_id)
+    owner = _alta_pub_owner_id(user)
+    cur = db_fetchone(
+        "SELECT id, estado FROM alta_publicaciones WHERE id=:id AND owner_user_id=:o",
+        {"id": item_id, "o": owner})
+    if not cur:
+        raise HTTPException(404, "No encontré ese renglón.")
+    body = await request.json()
+    sets, params = [], {"id": item_id, "o": owner}
+    for f in ALTA_PUB_CHECK_FIELDS:
+        if f in body:
+            sets.append(f"{f} = :{f}")
+            params[f] = bool(body[f])
+    for f in ("comentarios", "links"):
+        if f in body:
+            sets.append(f"{f} = :{f}")
+            params[f] = str(body[f] or "").strip()
+    nuevo_estado = None
+    if "estado" in body:
+        e = str(body.get("estado") or "").strip().lower()
+        if e not in ALTA_PUB_ESTADOS:
+            raise HTTPException(400, "Estado inválido.")
+        if e != (cur.get("estado") or "pendiente"):
+            nuevo_estado = e
+            sets.append("estado = :estado")
+            params["estado"] = e
+            sets.append("ok_at = " + ("NOW()" if e == "ok" else "NULL"))
+    if not sets:
+        return {"ok": True, "sin_cambios": True}
+    sets.append("updated_at = NOW()")
+    with engine.begin() as conn:
+        conn.execute(text(
+            f"UPDATE alta_publicaciones SET {', '.join(sets)}"
+            " WHERE id=:id AND owner_user_id=:o"), params)
+        if nuevo_estado:
+            conn.execute(text(
+                "INSERT INTO alta_publicaciones_hist (item_id, estado, changed_by)"
+                " VALUES (:i, :e, :u)"),
+                {"i": item_id, "e": nuevo_estado, "u": (user.get("name") or "")[:80]})
+    out = {"ok": True, "estado": nuevo_estado}
+    if nuevo_estado:
+        r = db_fetchone("SELECT ok_at FROM alta_publicaciones WHERE id=:id", {"id": item_id})
+        out["ok_at"] = _alta_pub_fmt_dt((r or {}).get("ok_at"))
+        out["historial"] = _alta_pub_hist_map(owner).get(item_id, [])
+    return out
+
+
+@app.delete("/api/alta-publicaciones/{item_id:int}")
+async def api_alta_pub_delete(request: Request, item_id: int):
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    owner = _alta_pub_owner_id(get_user(user_id))
+    with engine.begin() as conn:
+        row = conn.execute(text(
+            "DELETE FROM alta_publicaciones WHERE id=:id AND owner_user_id=:o"
+            " RETURNING id"), {"id": item_id, "o": owner}).fetchone()
+        if row:
+            conn.execute(text("DELETE FROM alta_publicaciones_hist WHERE item_id=:i"),
+                         {"i": item_id})
+    if not row:
+        raise HTTPException(404, "No encontré ese renglón.")
+    return {"ok": True}
+
+
 @app.get("/fotos", response_class=HTMLResponse)
 async def fotos_page(request: Request):
     user_id = get_session_user_id(request)
@@ -13495,6 +13766,7 @@ PAGES = [
     ("fotos", "Fotos"),
     ("precios_mayoristas", "Precios Mayoristas"),
     ("conversion", "Conversión"),
+    ("alta_publicaciones", "Alta Publicaciones"),
 ]
 PAGE_KEYS = {k for k, _ in PAGES}
 

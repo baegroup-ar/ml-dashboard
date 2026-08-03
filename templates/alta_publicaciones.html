@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Alta Publicaciones · Panel BAE</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Cantarell:ital,wght@0,400;0,700;1,400&amp;display=swap" rel="stylesheet"><link rel="icon" type="image/png" href="/static/bae-favicon.png">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Cantarell', 'Inter', system-ui, sans-serif; background: #fff; color: #111; }
+    nav { background: #fff; border-bottom: 1px solid #e5e5e3; padding: 0 1.5rem; height: 56px; display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 40; }
+    .nav-brand { font-weight: 600; font-size: 15px; display: flex; align-items: center; gap: 8px; }
+    .nav-right { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+    .btn-nav { padding: 6px 14px; border: 1px solid #ddd; border-radius: 8px; background: #fff; font-size: 13px; cursor: pointer; text-decoration: none; color: #111; }
+    .btn-nav.active { color: #005CFF; font-weight: 500; border-color: #005CFF; }
+    .nav-dropdown { position: relative; display: inline-block; }
+    .nav-dropdown .dropdown-trigger.active { color: #005CFF; font-weight: 500; border-color: #005CFF; }
+    .nav-dropdown .dropdown-menu { display: none; position: absolute; top: calc(100% + 4px); left: 0; background: #fff; border: 1px solid #ddd; border-radius: 8px; min-width: 170px; z-index: 100; box-shadow: 0 6px 16px rgba(0,0,0,0.10); padding: 6px; flex-direction: column; }
+    .nav-dropdown:hover .dropdown-menu { display: flex; }
+    .dropdown-menu a.dropdown-item, .dropdown-menu span.dropdown-item { display: block; padding: 8px 10px; font-size: 13px; color: #111; text-decoration: none; border-radius: 6px; white-space: nowrap; cursor: pointer; }
+    .dropdown-menu a.dropdown-item:hover { background: #f5f5f3; }
+    .dropdown-menu span.dropdown-item.active { color: #005CFF; font-weight: 500; background: #EAF1FF; cursor: default; }
+    main { max-width: 1850px; margin: 0 auto; padding: 1.5rem 0.75rem; }
+    h1 { font-size: 20px; font-weight: 600; margin-bottom: 6px; }
+    p.lead { font-size: 13px; color: #888; margin-bottom: 1.25rem; }
+    .card { background: #fff; border: 1px solid #e5e5e3; border-radius: 12px; padding: 1.25rem; margin-bottom: 1.25rem; }
+    .card h3 { font-size: 14px; font-weight: 600; color: #444; margin-bottom: 12px; }
+    .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .row label { font-size: 13px; color: #666; }
+    .row input, .row select { padding: 7px 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 13px; font-family: 'Inter', sans-serif; }
+    button.primary { padding: 8px 16px; border: none; border-radius: 8px; background: #005CFF; color: #fff; font-size: 13px; cursor: pointer; }
+    button:disabled { background: #ccc !important; cursor: not-allowed; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 12px; }
+    th { padding: 7px 8px; text-align: left; color: #888; font-weight: 500; border-bottom: 1px solid #eee; font-size: 11px; background: #fff; position: sticky; top: 0; z-index: 2; white-space: nowrap; }
+    th.num, td.num { text-align: right; }
+    th.ch, td.ch { text-align: center; }
+    td { padding: 6px 8px; border-bottom: 1px solid #f0f0ee; color: #333; }
+    tbody tr:hover { background: #fafaf8; }
+    .empty { padding: 2rem; text-align: center; color: #aaa; font-size: 13px; }
+    .muted { color: #bbb; }
+    .tabs { display: flex; gap: 6px; margin-bottom: 6px; position: sticky; top: 56px; z-index: 30; background: #fff; padding: 10px 0 8px; }
+    .tab-btn { padding: 8px 18px; border: 1px solid #ddd; border-radius: 8px; background: #fff; font-size: 13px; cursor: pointer; color: #444; }
+    .tab-btn.active { background: #005CFF; color: #fff; border-color: #005CFF; font-weight: 500; }
+    .cell-in { width: 100%; min-width: 140px; padding: 5px 7px; border: 1px solid #e5e5e3; border-radius: 6px; font-size: 12px; font-family: 'Inter', sans-serif; background: #fff; }
+    .cell-in:focus { border-color: #005CFF; outline: none; }
+    .estado-sel { padding: 4px 8px; border: 1px solid #ddd; border-radius: 6px; font-size: 12px; background: #fff; cursor: pointer; }
+    .estado-sel.ok { border-color: #1a8a5a; color: #1a8a5a; background: #e6f5ee; font-weight: 500; }
+    .estado-sel.pend { border-color: #c47a1e; color: #c47a1e; background: #fef0e6; }
+    input[type=checkbox].ch-box { width: 16px; height: 16px; cursor: pointer; accent-color: #005CFF; }
+    .link-out { color: #005CFF; text-decoration: none; font-size: 12px; margin-left: 4px; }
+    .btn-mini { padding: 2px 8px; border: 1px solid #ddd; border-radius: 6px; background: #fff; font-size: 11px; cursor: pointer; color: #666; }
+    .btn-delete { color: #c0392b; background: none; border: none; cursor: pointer; font-size: 12px; }
+    .hist-row td { background: #f9fbff; font-size: 11px; color: #555; }
+    .hist-row ul { margin: 2px 0 2px 18px; }
+    .fecha-ok { color: #1a8a5a; white-space: nowrap; }
+    .no-accounts { text-align: center; padding: 4rem; color: #888; font-size: 14px; }
+  </style>
+</head>
+<body>
+<nav>
+  <div class="nav-brand">
+    <img src="/static/bae-icon.png" alt="Tienda Bae" style="height:32px;width:auto;display:block;" />
+    Tienda Bae App
+  </div>
+  <div class="nav-right">
+    {% if 'dashboard' in perms or 'reputacion' in perms or 'descuentos' in perms or 'ranking' in perms or 'etiquetas' in perms or 'publicaciones' in perms or 'fotos' in perms or 'precios_mayoristas' in perms or 'conversion' in perms %}
+    <div class="nav-dropdown">
+      <span class="btn-nav dropdown-trigger">Mercadolibre ▾</span>
+      <div class="dropdown-menu">
+        {% if 'dashboard' in perms %}<a href="/dashboard" class="dropdown-item">Dashboard</a>{% endif %}
+        {% if 'reputacion' in perms %}<a href="/reputacion" class="dropdown-item">Reputación</a>{% endif %}
+        {% if 'descuentos' in perms %}<a href="/descuentos" class="dropdown-item">Descuentos</a>{% endif %}
+        {% if 'ranking' in perms %}<a href="/ranking" class="dropdown-item">Ranking</a>{% endif %}
+        {% if 'etiquetas' in perms %}<a href="/etiquetas" class="dropdown-item">Etiquetas</a>{% endif %}
+        {% if 'publicaciones' in perms %}<a href="/publicaciones" class="dropdown-item">Publicaciones</a>{% endif %}
+        {% if 'fotos' in perms %}<a href="/fotos" class="dropdown-item">Fotos</a>{% endif %}
+        {% if 'precios_mayoristas' in perms %}<a href="/precios-mayoristas" class="dropdown-item">Precios Mayoristas</a>{% endif %}
+        {% if 'conversion' in perms %}<a href="/conversion" class="dropdown-item">Conversión</a>{% endif %}
+      </div>
+    </div>
+    {% endif %}
+    {% if 'pvp' in perms or 'clientes' in perms or 'base_sku' in perms or 'envios_flex' in perms %}
+    <div class="nav-dropdown">
+      <span class="btn-nav dropdown-trigger">Base de Datos ▾</span>
+      <div class="dropdown-menu">
+        {% if 'pvp' in perms %}<a href="/pvp" class="dropdown-item">PVP</a>{% endif %}
+        {% if 'clientes' in perms %}<a href="/clientes" class="dropdown-item">Clientes</a>{% endif %}
+        {% if 'base_sku' in perms %}<a href="/base-sku" class="dropdown-item">SKUs</a>{% endif %}
+        {% if 'envios_flex' in perms %}<a href="/costos/envios-flex" class="dropdown-item">Envíos Flex</a>{% endif %}
+      </div>
+    </div>
+    {% endif %}
+    {% if 'stock' in perms %}<a href="/stock" class="btn-nav">Stock valorizado</a>{% endif %}
+    {% if 'compras' in perms or 'costos' in perms %}<a href="/compras" class="btn-nav">Compras</a>{% endif %}
+    {% if 'margen' in perms %}<a href="/margen" class="btn-nav">Margen</a>{% endif %}
+    {% if 'ponderado_envios' in perms %}<a href="/ponderado-envios" class="btn-nav">Ponderado Envíos</a>{% endif %}
+    <span class="btn-nav active">Alta Publicaciones</span>
+    <span style="color:#888;">{{ user.name }}</span>
+    {% if user.is_admin %}<a href="/admin" style="font-size:12px;color:#005CFF;text-decoration:none;">Admin</a>{% endif %}
+    <a href="/logout" class="btn-nav">Salir</a>
+  </div>
+</nav>
+
+<main>
+  <h1>Alta Publicaciones</h1>
+  <p class="lead">
+    Checklist de alta de cada SKU en las distintas tiendas. El <b>SKU</b> se carga a mano y el <b>PVP</b> se trae solo
+    de la base de <b>PVP</b> (si el SKU no está cargado ahí, aparece “—”). Tildá cada tienda a medida que la publicación
+    esté hecha, dejá comentarios y links de referencia, y cuando el alta esté completa pasá el <b>estado a OK</b>:
+    el renglón se mueve a <b>Publicado</b> y queda registrada la fecha en el historial.
+  </p>
+
+  <div class="card">
+    <h3>Agregar SKU</h3>
+    <div class="row">
+      <input type="text" id="m-sku" placeholder="SKU" style="width:240px;text-transform:uppercase;"
+             onkeydown="if(event.key==='Enter')addOne()" />
+      <button class="primary" onclick="addOne()" id="btn-add">Agregar</button>
+      <span id="msg" style="font-size:12px;color:#888;"></span>
+    </div>
+  </div>
+
+  <div class="tabs">
+    <button class="tab-btn active" id="tab-pend" onclick="setTab('pendiente')">Sin Publicar (0)</button>
+    <button class="tab-btn" id="tab-ok" onclick="setTab('ok')">Publicado (0)</button>
+  </div>
+
+  <div class="card">
+    <div class="row" style="margin-bottom:4px;">
+      <input type="text" id="search" placeholder="Buscar SKU o comentario..." oninput="renderTable()" style="width:280px;" />
+      <span id="count-label" style="font-size:12px;color:#888;"></span>
+      <span id="save-msg" style="font-size:12px;color:#1a8a5a;"></span>
+    </div>
+    <div style="overflow:auto;max-height:70vh;">
+      <table>
+        <thead><tr>
+          <th>SKU</th>
+          <th class="num">PVP</th>
+          {% for key, label in canales %}<th class="ch">{{ label }}</th>{% endfor %}
+          <th style="min-width:220px;">Comentarios</th>
+          <th style="min-width:220px;">Links</th>
+          <th>Estado</th>
+          <th class="col-fecha">Fecha OK</th>
+          <th style="text-align:right;">Acción</th>
+        </tr></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+  </div>
+</main>
+
+<script>
+const CANALES = [{% for key, label in canales %}{ key: 'ch_{{ key }}', label: '{{ label }}' }{% if not loop.last %}, {% endif %}{% endfor %}];
+let ITEMS = [];
+let TAB = 'pendiente';
+let HIST_OPEN = new Set();
+const timers = {};
+
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+const fmt = n => '$' + Number(n || 0).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+async function loadList() {
+  try {
+    const r = await fetch('/api/alta-publicaciones');
+    ITEMS = (await r.json()).items || [];
+  } catch (e) { ITEMS = []; }
+  renderTable();
+}
+
+function setTab(t) {
+  TAB = t;
+  document.getElementById('tab-pend').classList.toggle('active', t === 'pendiente');
+  document.getElementById('tab-ok').classList.toggle('active', t === 'ok');
+  renderTable();
+}
+
+function filteredRows() {
+  const q = (document.getElementById('search').value || '').trim().toLowerCase();
+  return ITEMS.filter(it => {
+    if ((it.estado || 'pendiente') !== TAB) return false;
+    if (!q) return true;
+    return (it.sku || '').toLowerCase().includes(q) || (it.comentarios || '').toLowerCase().includes(q);
+  });
+}
+
+// Los links pegados en la celda se muestran también como ↗ para abrirlos.
+function linkIcons(value) {
+  const urls = String(value || '').match(/https?:\/\/[^\s,;]+/g) || [];
+  return urls.slice(0, 4).map((u, i) =>
+    `<a class="link-out" href="${esc(u)}" target="_blank" rel="noopener" title="${esc(u)}">↗${urls.length > 1 ? (i + 1) : ''}</a>`
+  ).join('');
+}
+
+function renderTable() {
+  const pend = ITEMS.filter(i => (i.estado || 'pendiente') === 'pendiente').length;
+  const ok = ITEMS.filter(i => i.estado === 'ok').length;
+  document.getElementById('tab-pend').textContent = `Sin Publicar (${pend})`;
+  document.getElementById('tab-ok').textContent = `Publicado (${ok})`;
+  document.querySelectorAll('.col-fecha').forEach(el => { el.style.display = TAB === 'ok' ? '' : 'none'; });
+
+  const rows = filteredRows();
+  document.getElementById('count-label').textContent = `${rows.length} SKU`;
+  const tb = document.getElementById('tbody');
+  if (!rows.length) {
+    tb.innerHTML = `<tr><td colspan="${CANALES.length + 7}" class="empty">${TAB === 'pendiente' ? 'No hay SKU pendientes de publicar.' : 'Todavía no hay SKU publicados.'}</td></tr>`;
+    return;
+  }
+  tb.innerHTML = rows.map(it => {
+    const checks = CANALES.map(c =>
+      `<td class="ch"><input type="checkbox" class="ch-box" ${it[c.key] ? 'checked' : ''}
+        title="${esc(c.label)}" onchange="onCheck(${it.id}, '${c.key}', this)" /></td>`).join('');
+    const hist = (it.historial || []);
+    const histBtn = hist.length
+      ? `<button class="btn-mini" onclick="toggleHist(${it.id})" title="Ver historial de estados">🕘 ${hist.length}</button>`
+      : '';
+    const main = `<tr>
+      <td><b>${esc(it.sku)}</b></td>
+      <td class="num">${it.pvp == null ? '<span class="muted" title="El SKU no está cargado en la base de PVP">—</span>' : fmt(it.pvp)}</td>
+      ${checks}
+      <td><input type="text" class="cell-in" value="${esc(it.comentarios)}" placeholder="Comentario..."
+            oninput="onText(${it.id}, 'comentarios', this)" /></td>
+      <td style="white-space:nowrap;">
+        <input type="text" class="cell-in" style="width:200px;" value="${esc(it.links)}" placeholder="Pegá links de referencia..."
+          oninput="onText(${it.id}, 'links', this)" />${linkIcons(it.links)}
+      </td>
+      <td>
+        <select class="estado-sel ${it.estado === 'ok' ? 'ok' : 'pend'}" onchange="onEstado(${it.id}, this)">
+          <option value="pendiente" ${it.estado === 'ok' ? '' : 'selected'}>Pendiente</option>
+          <option value="ok" ${it.estado === 'ok' ? 'selected' : ''}>OK</option>
+        </select>
+      </td>
+      <td class="col-fecha fecha-ok" style="${TAB === 'ok' ? '' : 'display:none;'}">${esc(it.ok_at) || '—'}</td>
+      <td style="text-align:right;white-space:nowrap;">
+        ${histBtn}
+        <button class="btn-delete" onclick="delOne(${it.id}, '${esc(it.sku)}')">Eliminar</button>
+      </td>
+    </tr>`;
+    if (!HIST_OPEN.has(it.id) || !hist.length) return main;
+    const li = hist.map(h => `<li>${esc(h.fecha)} — <b>${h.estado === 'ok' ? 'OK' : 'Pendiente'}</b>${h.usuario ? ' · ' + esc(h.usuario) : ''}</li>`).join('');
+    return main + `<tr class="hist-row"><td colspan="${CANALES.length + 7}"><b>Historial de estados</b><ul>${li}</ul></td></tr>`;
+  }).join('');
+}
+
+function toggleHist(id) {
+  if (HIST_OPEN.has(id)) HIST_OPEN.delete(id); else HIST_OPEN.add(id);
+  renderTable();
+}
+
+function flash(txt) {
+  const el = document.getElementById('save-msg');
+  el.textContent = txt;
+  setTimeout(() => { if (el.textContent === txt) el.textContent = ''; }, 1500);
+}
+
+async function patchItem(id, body) {
+  const r = await fetch(`/api/alta-publicaciones/${id}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body) });
+  if (!r.ok) {
+    const j = await r.json().catch(() => ({}));
+    throw new Error(j.detail || 'No se pudo guardar');
+  }
+  return r.json();
+}
+
+async function onCheck(id, field, el) {
+  const it = ITEMS.find(i => i.id === id);
+  const prev = it ? it[field] : false;
+  if (it) it[field] = el.checked;
+  try { await patchItem(id, { [field]: el.checked }); flash('Guardado'); }
+  catch (e) { if (it) it[field] = prev; el.checked = prev; alert('Error: ' + e.message); }
+}
+
+// Comentarios y links se guardan con debounce (mismo criterio que Compras).
+function onText(id, field, el) {
+  const it = ITEMS.find(i => i.id === id);
+  if (it) it[field] = el.value;
+  const k = `${id}:${field}`;
+  clearTimeout(timers[k]);
+  timers[k] = setTimeout(async () => {
+    try { await patchItem(id, { [field]: el.value }); flash('Guardado'); }
+    catch (e) { alert('Error: ' + e.message); }
+  }, 600);
+}
+
+async function onEstado(id, el) {
+  const it = ITEMS.find(i => i.id === id);
+  const prev = it ? (it.estado || 'pendiente') : 'pendiente';
+  const nuevo = el.value;
+  try {
+    const j = await patchItem(id, { estado: nuevo });
+    if (it) {
+      it.estado = nuevo;
+      it.ok_at = j.ok_at || '';
+      if (j.historial) it.historial = j.historial;
+    }
+    flash(nuevo === 'ok' ? 'Publicado ✓' : 'Vuelto a pendiente');
+    renderTable();
+  } catch (e) { el.value = prev; alert('Error: ' + e.message); }
+}
+
+async function addOne() {
+  const input = document.getElementById('m-sku');
+  const sku = (input.value || '').trim().toUpperCase();
+  const msg = document.getElementById('msg');
+  if (!sku) { msg.textContent = 'Cargá un SKU.'; return; }
+  const btn = document.getElementById('btn-add'); btn.disabled = true;
+  try {
+    const r = await fetch('/api/alta-publicaciones', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sku }) });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.detail || 'error');
+    msg.textContent = j.pvp == null
+      ? `${sku} agregado (sin PVP cargado en la base de PVP).`
+      : `${sku} agregado.`;
+    input.value = '';
+    setTab('pendiente');
+    await loadList();
+  } catch (e) { msg.textContent = 'Error: ' + e.message; }
+  finally { btn.disabled = false; input.focus(); }
+}
+
+async function delOne(id, sku) {
+  if (!confirm(`¿Eliminar ${sku} de la lista? Se borra también su historial.`)) return;
+  try {
+    const r = await fetch(`/api/alta-publicaciones/${id}`, { method: 'DELETE' });
+    if (!r.ok) throw new Error('No se pudo eliminar');
+    ITEMS = ITEMS.filter(i => i.id !== id);
+    renderTable();
+  } catch (e) { alert('Error: ' + e.message); }
+}
+
+loadList();
+</script>
+</body>
+</html>
