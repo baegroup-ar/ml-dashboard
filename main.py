@@ -11187,6 +11187,186 @@ async def api_alta_pub_add(request: Request):
     return {"ok": True, "id": row[0], "sku": sku, "pvp": _alta_pub_pvp(sku, pvp_map)}
 
 
+# Encabezados a ignorar cuando el archivo NO trae una columna "SKU" y hay que
+# caer a la primera columna: si la planilla es una lista pelada de SKU, su
+# primera fila suele ser igual un título.
+_ALTA_PUB_HEADER_WORDS = {
+    "sku", "skus", "codigo", "código", "cod", "producto", "productos",
+    "articulo", "artículo", "item", "items",
+}
+ALTA_PUB_MAX_UPLOAD_ROWS = 5000
+
+
+def _alta_pub_parse_upload(content: bytes, filename: str) -> tuple:
+    """Devuelve ([{sku, comentarios, links}, ...], uso_primera_columna).
+
+    Acepta xlsx/xlsm y csv. La única columna obligatoria es SKU; Comentarios y
+    Links son opcionales. Si el archivo no tiene encabezado con "SKU" se usa la
+    **primera columna** (caso típico: una lista de SKU pegada sin título),
+    salteando la primera fila si es un encabezado conocido.
+    """
+    name = (filename or "").lower()
+    if name.endswith(".xlsx") or name.endswith(".xlsm"):
+        import io
+        from openpyxl import load_workbook
+        wb = load_workbook(io.BytesIO(content), data_only=True, read_only=True)
+        ws = wb.active
+        rows = [list(r) for r in ws.iter_rows(values_only=True)]
+    else:
+        import csv, io
+        text_content = content.decode("utf-8-sig", errors="ignore")
+        sample = text_content[:2048]
+        sep = ";" if sample.count(";") > sample.count(",") else ","
+        rows = [list(r) for r in csv.reader(io.StringIO(text_content), delimiter=sep)]
+    if not rows:
+        return [], False
+
+    header = None
+    data_start = 0
+    for idx, row in enumerate(rows[:5]):
+        if not row:
+            continue
+        normalized = [str(c).strip().lower() if c is not None else "" for c in row]
+        if any("sku" in n for n in normalized):
+            header = normalized
+            data_start = idx + 1
+            break
+
+    if header is not None:
+        sku_idx = _find_col(header, ["sku"])
+        com_idx = _find_col(header, ["comentario", "observacion", "observación", "nota"])
+        links_idx = _find_col(header, ["link", "url"])
+        primera_col = False
+    else:
+        # Lista pelada: primera columna, sin encabezado reconocible.
+        sku_idx, com_idx, links_idx = 0, None, None
+        primera_col = True
+        first = rows[0][0] if rows[0] else None
+        if str(first or "").strip().lower() in _ALTA_PUB_HEADER_WORDS:
+            data_start = 1
+
+    def _cell(row, idx):
+        if idx is None or idx >= len(row):
+            return ""
+        v = row[idx]
+        return str(v).strip() if v is not None else ""
+
+    out, vistos = [], set()
+    for row in rows[data_start:]:
+        if not row or sku_idx >= len(row):
+            continue
+        # SKU en MAYÚSCULAS: el text-transform de la UI es solo visual y guardar
+        # en minúscula rompe el cruce con la base de PVP (fix 490dfeb).
+        sku = _cell(row, sku_idx).upper()
+        if not sku or sku in vistos:
+            continue
+        vistos.add(sku)
+        out.append({
+            "sku": sku,
+            "comentarios": _cell(row, com_idx),
+            "links": _cell(row, links_idx),
+        })
+        if len(out) >= ALTA_PUB_MAX_UPLOAD_ROWS:
+            break
+    return out, primera_col
+
+
+@app.get("/api/alta-publicaciones/template")
+async def api_alta_pub_template(request: Request):
+    """Excel modelo para la carga masiva de SKU."""
+    if not get_session_user_id(request):
+        raise HTTPException(401)
+    import io
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from fastapi.responses import StreamingResponse
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Alta Publicaciones"
+    headers = ["SKU", "Comentarios", "Links"]
+    ws.append(headers)
+    for col_idx, _ in enumerate(headers, start=1):
+        cell = ws.cell(row=1, column=col_idx)
+        cell.fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
+        cell.font = Font(bold=True, color="000000")
+        cell.alignment = Alignment(horizontal="center")
+    ws.append(["BAE-7030-AURORA", "Falta foto principal", "https://articulo.mercadolibre.com.ar/MLA-123"])
+    ws.append(["SOP78-446", "", ""])
+    ws.append(["SOP68-443-3C", "Variante en 3 cuotas", ""])
+    ws.column_dimensions["A"].width = 24
+    ws.column_dimensions["B"].width = 40
+    ws.column_dimensions["C"].width = 46
+
+    ws2 = wb.create_sheet("Instrucciones")
+    for line in [
+        ["Carga masiva de SKU — Alta Publicaciones"],
+        [""],
+        ["SKU: obligatorio. Se guarda siempre en MAYÚSCULAS."],
+        ["Comentarios y Links: opcionales."],
+        ["Los SKU repetidos (en el archivo o ya cargados) se ignoran, no se duplican."],
+        ["Todos los renglones entran como Pendientes, con las tiendas sin tildar."],
+        ["El PVP no se carga acá: sale solo de la base de PVP."],
+        [f"Máximo por archivo: {ALTA_PUB_MAX_UPLOAD_ROWS} filas."],
+        [""],
+        ["También se acepta un archivo con una sola columna de SKU, sin encabezado."],
+    ]:
+        ws2.append(line)
+    ws2.column_dimensions["A"].width = 90
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="plantilla_alta_publicaciones.xlsx"'})
+
+
+@app.post("/api/alta-publicaciones/upload")
+async def api_alta_pub_upload(request: Request):
+    """Carga masiva de SKU desde Excel/CSV. Los que ya están en la lista se
+    ignoran (no se pisan sus tildes, comentarios ni estado)."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    user = get_user(user_id)
+    owner = _alta_pub_owner_id(user)
+    form = await request.form()
+    upload = form.get("file")
+    if upload is None or not hasattr(upload, "read"):
+        raise HTTPException(400, "Falta el archivo.")
+    content = await upload.read()
+    filename = getattr(upload, "filename", "") or ""
+    try:
+        items, primera_col = _alta_pub_parse_upload(content, filename)
+    except Exception as e:
+        raise HTTPException(400, f"No pude leer el archivo: {e}")
+    if not items:
+        raise HTTPException(400, "No encontré ningún SKU en el archivo.")
+
+    existentes = {
+        str(r["sku"] or "").upper()
+        for r in db_fetchall(
+            "SELECT sku FROM alta_publicaciones WHERE owner_user_id=:o", {"o": owner})
+    }
+    nuevos = [i for i in items if i["sku"] not in existentes]
+    if nuevos:
+        db_executemany(
+            "INSERT INTO alta_publicaciones (owner_user_id, sku, comentarios, links)"
+            " VALUES (:o, :s, :c, :l)"
+            " ON CONFLICT (owner_user_id, sku) DO NOTHING",
+            [{"o": owner, "s": i["sku"], "c": i["comentarios"], "l": i["links"]}
+             for i in nuevos])
+    return {
+        "ok": True,
+        "agregados": len(nuevos),
+        "duplicados": len(items) - len(nuevos),
+        "filas": len(items),
+        "primera_columna": primera_col,
+    }
+
+
 @app.patch("/api/alta-publicaciones/{item_id:int}")
 async def api_alta_pub_patch(request: Request, item_id: int):
     """Edición inline: checkboxes por canal, comentarios, links y estado.

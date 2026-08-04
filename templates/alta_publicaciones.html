@@ -117,7 +117,15 @@
       <input type="text" id="m-sku" placeholder="SKU" style="width:240px;text-transform:uppercase;"
              onkeydown="if(event.key==='Enter')addOne()" />
       <button class="primary" onclick="addOne()" id="btn-add">Agregar</button>
+      <span style="color:#ddd;">|</span>
+      <input type="file" id="file-in" accept=".xlsx,.xlsm,.csv" style="display:none;" onchange="uploadFile(this)" />
+      <button class="btn-nav" id="btn-upload" onclick="document.getElementById('file-in').click()">Importar Excel/CSV</button>
+      <a class="btn-nav" href="/api/alta-publicaciones/template">Descargar plantilla</a>
       <span id="msg" style="font-size:12px;color:#888;"></span>
+    </div>
+    <div style="font-size:11px;color:#aaa;margin-top:8px;">
+      Para la carga masiva alcanza con una columna <b>SKU</b> (opcionalmente <b>Comentarios</b> y <b>Links</b>);
+      también sirve una lista pegada en una sola columna. Los SKU que ya están en la lista se ignoran.
     </div>
   </div>
 
@@ -304,6 +312,7 @@ async function addOne() {
   const input = document.getElementById('m-sku');
   const sku = (input.value || '').trim().toUpperCase();
   const msg = document.getElementById('msg');
+  msg.style.color = '#888';
   if (!sku) { msg.textContent = 'Cargá un SKU.'; return; }
   const btn = document.getElementById('btn-add'); btn.disabled = true;
   try {
@@ -320,6 +329,37 @@ async function addOne() {
     await loadList();
   } catch (e) { msg.textContent = 'Error: ' + e.message; }
   finally { btn.disabled = false; input.focus(); }
+}
+
+// Carga masiva: el archivo se manda como multipart y la lista se recarga sola.
+async function uploadFile(input) {
+  const f = input.files && input.files[0];
+  if (!f) return;
+  const msg = document.getElementById('msg');
+  const btn = document.getElementById('btn-upload');
+  btn.disabled = true;
+  msg.style.color = '#888';
+  msg.textContent = `Importando ${f.name}...`;
+  const fd = new FormData();
+  fd.append('file', f);
+  try {
+    const r = await fetch('/api/alta-publicaciones/upload', { method: 'POST', body: fd });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.detail || 'error');
+    const partes = [`${j.agregados} SKU agregados`];
+    if (j.duplicados) partes.push(`${j.duplicados} ya estaban en la lista`);
+    if (j.primera_columna) partes.push('se usó la primera columna del archivo');
+    msg.style.color = j.agregados ? '#1a8a5a' : '#c47a1e';
+    msg.textContent = partes.join(' · ') + '.';
+    setTab('pendiente');
+    await loadList();
+  } catch (e) {
+    msg.style.color = '#c0392b';
+    msg.textContent = 'Error: ' + e.message;
+  } finally {
+    btn.disabled = false;
+    input.value = '';  // permite volver a subir el mismo archivo
+  }
 }
 
 async function delOne(id, sku) {
