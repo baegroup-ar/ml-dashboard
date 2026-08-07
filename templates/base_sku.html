@@ -92,9 +92,9 @@
 <main>
   <h1>Base SKU</h1>
   <p class="lead">
-    Asociá cada <b>SKU componente</b> (lo que se vende) con su <b>SKU original</b> (el que tiene stock) y una <b>cantidad</b>.
-    Variante → cantidad 1. Combo x2/x3 → cantidad N. Combo de varios productos → varias filas con el mismo componente.
-    En Stock valorizado, cuando se vende un componente, su venta se suma al original × la cantidad.
+    Asociá cada <b>SKU original</b> (lo que se vende) con su <b>SKU componente</b> (el que tiene stock) y una <b>cantidad</b>.
+    Variante → cantidad 1. Combo x2/x3 → cantidad N. Combo de varios productos → varias filas con el mismo original.
+    En Stock valorizado, cuando se vende un original, su venta se suma al componente × la cantidad.
   </p>
 
   {% if accounts %}
@@ -120,11 +120,11 @@
       <a href="#" onclick="downloadExport(event)" style="padding:8px 14px;border:1px solid #1a8a5a;border-radius:8px;background:#fff;color:#1a8a5a;font-size:13px;text-decoration:none;">⬇ Descargar cargados</a>
       <a href="/api/base-sku/template" download="plantilla_base_sku.xlsx" style="padding:8px 14px;border:1px solid #005CFF;border-radius:8px;background:#fff;color:#005CFF;font-size:13px;text-decoration:none;">Descargar plantilla</a>
     </div>
-    <div class="help-box">Columnas: <code>SKU componente</code>, <code>SKU original</code>, <code>Cantidad</code>. Cuando se vende el <b>componente</b>, suma <b>cantidad × unidades</b> al <b>original</b>. Variante → cantidad <b>1</b>. Combo x2/x3 → cantidad <b>N</b>. Combo de varios productos → varias filas con el mismo componente. Subir actualiza/agrega.</div>
+    <div class="help-box">Columnas: <code>SKU original</code>, <code>SKU componente</code>, <code>Cantidad</code>. Cuando se vende el <b>original</b>, suma <b>cantidad × unidades</b> al <b>componente</b>. Variante → cantidad <b>1</b>. Combo x2/x3 → cantidad <b>N</b>. Combo de varios productos → varias filas con el mismo original. Subir actualiza/agrega.</div>
     <div class="row" style="margin-top:12px;">
-      <input type="text" id="m-variant" placeholder="SKU componente" style="width:200px;text-transform:uppercase;" />
+      <input type="text" id="m-variant" placeholder="SKU original" style="width:200px;text-transform:uppercase;" />
       <span style="color:#888;">→</span>
-      <input type="text" id="m-original" placeholder="SKU original" style="width:200px;text-transform:uppercase;" />
+      <input type="text" id="m-original" placeholder="SKU componente" style="width:200px;text-transform:uppercase;" />
       <span style="color:#888;">×</span>
       <input type="number" id="m-qty" placeholder="Cant." value="1" min="0.01" step="0.01" style="width:80px;" />
       <button class="primary" onclick="addOne()">Agregar / actualizar</button>
@@ -144,7 +144,7 @@
       <table>
         <thead><tr>
           <th style="width:30px;"><input type="checkbox" id="check-all" onchange="toggleAll(this)" /></th>
-          <th>SKU componente</th><th>SKU original</th><th class="num">Cantidad</th><th style="text-align:right;">Acción</th>
+          <th>SKU original</th><th>SKU componente</th><th class="num">Cantidad</th><th style="text-align:right;">Acción</th>
         </tr></thead>
         <tbody id="tbody"></tbody>
       </table>

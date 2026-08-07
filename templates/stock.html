@@ -184,7 +184,7 @@
       <table>
         <thead><tr>
           <th>SKU</th><th class="num">Stock ML</th><th class="num">Stock Full</th>
-          <th class="num" title="Stock en camino a Full. Carga manual: clic para editar.">En camino</th>
+          <th class="num" title="Stock en camino. El número editable es la carga manual (o el Reporte de Planificación de ML); el +N verde son las compras marcadas como Pagadas en Posible Compra, que salen al confirmar el Ingreso.">En camino</th>
           <th class="num">Stock total</th>
           <th class="num">Precio venta</th><th class="num">Valorizado</th>
           <th>Última compra</th><th class="num">Aging</th>
@@ -289,7 +289,8 @@ function renderTable() {
   if (fActivas && !fSinStock) rows = rows.filter(r => r._total > 0);
   else if (fSinStock && !fActivas) rows = rows.filter(r => r._total === 0);
   if (fFull) rows = rows.filter(r => (r.stock_full || 0) > 0);
-  if (fCamino) rows = rows.filter(r => (r.stock_en_camino || 0) > 0);
+  // "En camino" = manual/Reporte de ML + compras pagadas sin ingresar.
+  if (fCamino) rows = rows.filter(r => ((r.stock_en_camino || 0) + (r.stock_en_camino_compras || 0)) > 0);
   // Filtro por aging (días desde la última compra). Los SKU sin fecha de
   // compra (aging null) quedan fuera cuando hay un filtro de aging activo.
   if (agingOp && agingVal != null && !isNaN(agingVal)) {
@@ -342,6 +343,12 @@ function renderTable() {
   document.getElementById('total-estimado-compra').textContent = fmt(totalEstCompra);
   body.innerHTML = rows.map(r => {
     const cob = r._cob == null ? '—' : (r._cob + ' d');
+    // Unidades en camino que vienen de Compras (renglones marcados "Pagado" en
+    // Posible Compra). Van al lado del input porque ese input edita SOLO el
+    // en camino manual; el total del SKU es la suma de los dos.
+    const compraTag = (it) => (it.stock_en_camino_compras || 0) > 0
+      ? ` <span class="badge" style="background:#e6f5ee;color:#1a8a5a;" title="${it.stock_en_camino_compras} u. de compras pagadas sin ingresar (Posible Compra). Salen del en camino al confirmar el Ingreso.">+${it.stock_en_camino_compras}</span>`
+      : '';
     const repBadge = r._sug > 0
       ? `<span class="badge rep">${r._sug}</span>`
       : (r._total > 0 ? '<span class="badge ok">OK</span>' : '<span class="badge warn">0</span>');
@@ -361,7 +368,7 @@ function renderTable() {
       <td>${caret}<b>${esc(r.sku)}</b>${varTag}</td>
       <td class="num">${r.stock}</td>
       <td class="num">${full > 0 ? full : '—'}</td>
-      <td class="num"><input type="number" min="0" step="1" value="${r.stock_en_camino || 0}" title="Stock en camino a Full (manual)" style="width:50px;text-align:right;border:1px solid #ddd;border-radius:4px;padding:2px 4px;font-size:12px;" onchange="saveInbound('${esc(r.sku)}', this)"></td>
+      <td class="num"><input type="number" min="0" step="1" value="${r.stock_en_camino || 0}" title="Stock en camino a Full (manual)" style="width:50px;text-align:right;border:1px solid #ddd;border-radius:4px;padding:2px 4px;font-size:12px;" onchange="saveInbound('${esc(r.sku)}', this)">${compraTag(r)}</td>
       <td class="num"><b>${r._total}</b></td>
       <td class="num">${r.price != null ? fmt(r.price) : '—'}</td>
       <td class="num">${r.valor_venta != null ? fmt(r.valor_venta) : '—'}</td>
@@ -474,7 +481,8 @@ async function saveInbound(sku, inputEl) {
     const it = (DATA.items || []).find(x => x.sku === sku);
     if (it) {
       it.stock_en_camino = qty;
-      it.stock_total = (it.stock || 0) + (it.stock_full || 0) + qty;
+      it.stock_total = (it.stock || 0) + (it.stock_full || 0) + qty
+                       + (it.stock_en_camino_compras || 0);
       it.valor_venta = (it.price != null) ? Math.round(it.stock_total * it.price * 100) / 100 : null;
     }
     renderTable();   // recalcula total, valorizado, cobertura, reposición y los totales del header

@@ -348,6 +348,13 @@ def init_db():
         # Orden manual (drag & drop) de los renglones pendientes. NULL = todavía
         # sin ordenar (renglones nuevos) → van al final por created_at.
         conn.execute(text("ALTER TABLE purchase_items ADD COLUMN IF NOT EXISTS position INTEGER"))
+        # Estado del renglón: 'pendiente' (todavía no se pagó) o 'pagado' (ya se
+        # pagó y la mercadería está viniendo). Los 'pagado' se muestran como
+        # stock EN CAMINO en Stock valorizado; al confirmar el Ingreso el
+        # renglón se borra de esta tabla y por eso deja de contar como en camino.
+        conn.execute(text(
+            "ALTER TABLE purchase_items ADD COLUMN IF NOT EXISTS estado TEXT"
+            " NOT NULL DEFAULT 'pendiente'"))
         # Tabla de tarifas Flex (costo real que el vendedor paga a la
         # mensajería, por zona de entrega y con fecha de vigencia).
         conn.execute(text("""
@@ -715,6 +722,16 @@ def init_db():
             )
         """))
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_alta_pub_owner ON alta_publicaciones(owner_user_id, estado)"))
+        # Un canal = una columna ch_<key>. Se crean solas a partir de
+        # ALTA_PUB_CANALES (la lista es la única fuente de verdad: la usan el
+        # template, la API y esto), así que sumar una tienda nueva es agregar la
+        # tupla y nada más. Los keys son constantes del código, no input.
+        for _ch_key, _ in ALTA_PUB_CANALES:
+            if not _ch_key.isalnum():
+                raise ValueError(f"Canal de alta inválido: {_ch_key!r}")
+            conn.execute(text(
+                f"ALTER TABLE alta_publicaciones ADD COLUMN IF NOT EXISTS ch_{_ch_key}"
+                " BOOLEAN NOT NULL DEFAULT FALSE"))
         # Historial de cambios de estado (cada vez que se pone en OK, y también
         # cuando se vuelve a pendiente: así queda la traza completa).
         conn.execute(text("""
@@ -3056,7 +3073,7 @@ async def api_compras_list(request: Request, account_id: int):
     user = get_user(user_id)
     cost_aid = _cost_account_id_for(user, account_id)
     rows = db_fetchall(
-        "SELECT id, sku, qty, cost, iva_rate, proveedor, created_at FROM purchase_items"
+        "SELECT id, sku, qty, cost, iva_rate, proveedor, estado, created_at FROM purchase_items"
         " WHERE account_id=:aid ORDER BY position ASC NULLS LAST, created_at, id",
         {"aid": cost_aid},
     )
@@ -3069,6 +3086,7 @@ async def api_compras_list(request: Request, account_id: int):
                 "cost": float(r["cost"]),
                 "iva_rate": float(r["iva_rate"] if r["iva_rate"] is not None else 21),
                 "proveedor": r.get("proveedor") or "",
+                "estado": r.get("estado") or "pendiente",
                 "created_at": r["created_at"].isoformat() if r.get("created_at") else None,
             }
             for r in rows
@@ -3150,6 +3168,36 @@ async def api_compras_edit(
          "proveedor": (proveedor or "").strip(), "id": item_id, "aid": cost_aid},
     )
     return {"ok": True}
+
+
+PURCHASE_ESTADOS = ("pendiente", "pagado")
+
+
+@app.post("/api/compras/{account_id}/{item_id}/estado")
+async def api_compras_estado(request: Request, account_id: int, item_id: int):
+    """Cambia el estado de un renglón pendiente: 'pendiente' ↔ 'pagado'.
+
+    'pagado' = ya se pagó la compra y la mercadería está viniendo, así que esas
+    unidades se muestran como stock EN CAMINO en Stock valorizado
+    (`_purchases_inbound_by_sku`). No se copia nada a ningún lado: el en camino
+    se calcula al leer, así que cuando el renglón se va de esta tabla (al
+    confirmar el Ingreso) deja de contar solo."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(401)
+    if not _account_for_user(account_id, user_id):
+        raise HTTPException(404)
+    body = await request.json()
+    estado = str(body.get("estado") or "").strip().lower()
+    if estado not in PURCHASE_ESTADOS:
+        raise HTTPException(400, "Estado inválido (pendiente|pagado).")
+    user = get_user(user_id)
+    cost_aid = _cost_account_id_for(user, account_id)
+    db_execute(
+        "UPDATE purchase_items SET estado=:e WHERE id=:id AND account_id=:aid",
+        {"e": estado, "id": item_id, "aid": cost_aid},
+    )
+    return {"ok": True, "estado": estado}
 
 
 def _in_placeholders(ids: list, prefix: str = "i"):
@@ -3539,6 +3587,30 @@ def _last_purchase_by_sku(cost_aid) -> dict:
     return out
 
 
+def _purchases_inbound_by_sku(cost_aid) -> dict:
+    """{SKU: unidades} de las compras marcadas como PAGADAS y todavía no
+    ingresadas (`purchase_items.estado='pagado'`). Son mercadería ya pagada que
+    está viniendo, así que Stock valorizado las suma como stock EN CAMINO.
+
+    Se calcula al LEER, no se copia a `product_sale_prices.stock_en_camino` (que
+    sigue siendo la carga manual / el Reporte de Planificación de ML): así el
+    Ingreso, que borra el renglón de esta tabla, lo saca del en camino solo, sin
+    tener que descontar nada a mano. El cruce es por SKU exacto — ambos lados
+    están normalizados a mayúscula desde b72912d."""
+    rows = db_fetchall(
+        "SELECT sku, SUM(qty) AS u FROM purchase_items"
+        " WHERE account_id=:a AND estado='pagado' GROUP BY sku",
+        {"a": cost_aid},
+    )
+    out = {}
+    for r in rows:
+        sku = str(r["sku"] or "").strip().upper()
+        if not sku:
+            continue
+        out[sku] = out.get(sku, 0) + int(float(r["u"] or 0))
+    return out
+
+
 def _coerce_price(v):
     if v is None:
         return None
@@ -3655,8 +3727,12 @@ def _parse_variants(content: bytes, filename: str) -> list:
         comp = str(row[0] or "").strip()
         original = str(row[1] or "").strip() if len(row) > 1 else ""
         qty_raw = row[2] if len(row) > 2 else None
-        if i == 0 and ("original" in original.lower()
-                       or "componente" in comp.lower() or "variante" in comp.lower()):
+        # Header: se busca en las DOS celdas porque los rótulos se invirtieron
+        # (antes col A "SKU componente" / col B "SKU original", ahora al revés).
+        # Las columnas siguen siendo posicionales, así que un Excel viejo se
+        # sigue subiendo igual; lo único que cambia es cómo se llaman.
+        if i == 0 and any(w in f"{comp} {original}".lower()
+                          for w in ("original", "componente", "variante")):
             continue  # header
         if not comp or not original or comp == original:
             continue
@@ -3714,7 +3790,7 @@ async def api_base_sku_template(request: Request):
     wb = Workbook()
     ws = wb.active
     ws.title = "Base SKU"
-    ws.append(["SKU componente", "SKU original", "Cantidad"])
+    ws.append(["SKU original", "SKU componente", "Cantidad"])
     fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
     for col in (1, 2, 3):
         c = ws.cell(row=1, column=col)
@@ -3920,7 +3996,7 @@ async def api_base_sku_export(request: Request, account_id: int):
     wb = Workbook()
     ws = wb.active
     ws.title = "Base SKU"
-    ws.append(["SKU componente", "SKU original", "Cantidad"])
+    ws.append(["SKU original", "SKU componente", "Cantidad"])
     fill = PatternFill(start_color="FFE600", end_color="FFE600", fill_type="solid")
     for col in (1, 2, 3):
         c = ws.cell(row=1, column=col)
@@ -4362,6 +4438,10 @@ async def _build_stock_payload(account_id, acc, token, user, target_days,
     # Stock EN CAMINO a Full (carga manual por SKU). 0/None = sin en camino.
     en_camino_map = {r["sku"]: int(float(r["stock_en_camino"]))
                      for r in price_rows if r.get("stock_en_camino")}
+    # Compras ya PAGADAS y sin ingresar: también son mercadería en camino. Van
+    # aparte del manual porque el input de la columna edita SOLO el manual; el
+    # total del SKU es la suma de los dos.
+    compras_camino = _purchases_inbound_by_sku(cost_aid)
     # {componente: [(original, qty), ...]} — variantes (qty 1) y combos (qty N o
     # varios originales). Compartida por usuario.
     variant_map = _get_variant_map(cost_aid)
@@ -4403,7 +4483,8 @@ async def _build_stock_payload(account_id, acc, token, user, target_days,
             if q == 1:
                 st_full += int((stock.get(comp) or {}).get("full", 0))
         st_camino = int(en_camino_map.get(original, 0))   # en camino a Full (manual)
-        st_total = st_propio + st_full + st_camino
+        st_compras = int(compras_camino.get(original, 0))  # compras pagadas sin ingresar
+        st_total = st_propio + st_full + st_camino + st_compras
         price = prices.get(original)
         valor = round(st_total * price, 2) if price is not None else None
         if valor is not None:
@@ -4437,7 +4518,8 @@ async def _build_stock_payload(account_id, acc, token, user, target_days,
             "sku": original,
             "stock": st_propio,
             "stock_full": st_full,
-            "stock_en_camino": st_camino,
+            "stock_en_camino": st_camino,          # manual / Reporte de ML (editable)
+            "stock_en_camino_compras": st_compras,  # compras pagadas (calculado)
             "stock_total": st_total,
             "price": price,
             "valor_venta": valor,
@@ -4528,7 +4610,8 @@ async def api_stock_export(request: Request, account_id: int, target_days: int =
             it["sku"],
             it["stock"],
             it["stock_full"] if it.get("stock_full") else 0,
-            it.get("stock_en_camino") or 0,
+            # En camino = manual/Reporte de ML + compras pagadas sin ingresar
+            (it.get("stock_en_camino") or 0) + (it.get("stock_en_camino_compras") or 0),
             it["stock_total"],
             it["price"] if it.get("price") is not None else "",
             it["valor_venta"] if it.get("valor_venta") is not None else "",
@@ -11106,7 +11189,7 @@ async def api_conversion_visitas_lote(request: Request, account_id: int):
 # 0949e16).
 ALTA_PUB_CANALES = [
     ("bae", "BAE"), ("egipto", "EGIPTO"), ("sarasa", "SARASA"),
-    ("bt", "BT"), ("lamus", "LAMUS"),
+    ("bt", "BT"), ("lamus", "LAMUS"), ("tn", "TN"),
 ]
 ALTA_PUB_CHECK_FIELDS = tuple(f"ch_{k}" for k, _ in ALTA_PUB_CANALES)
 ALTA_PUB_ESTADOS = ("pendiente", "ok")
