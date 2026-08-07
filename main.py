@@ -613,6 +613,57 @@ def init_db():
             conn.execute(text(
                 "INSERT INTO app_meta (key, value) VALUES ('sku_variants_upper_norm','1')"
                 " ON CONFLICT (key) DO NOTHING"))
+        # Mismo saneamiento que sku_variants, para las bases que escriben /pvp y
+        # /compras: product_sale_prices (PVP/Margen), product_costs (CMV) y
+        # purchase_items (Posible Compra). Ahí también los inputs tienen
+        # text-transform:uppercase (solo visual) y el guardado no normalizaba, así
+        # que pudo entrar un SKU en minúscula que se ve igual pero no cruza.
+        # Ahora los tres puntos de escritura normalizan; esto limpia lo viejo.
+        _sku_upper = conn.execute(text(
+            "SELECT 1 FROM app_meta WHERE key='sku_upper_norm_prices_costs'")).fetchone()
+        if not _sku_upper:
+            # Paso 1: sacar las filas sucias que colisionarían al normalizar
+            # (misma PK). Gana la que ya está en mayúscula; si las dos están
+            # sucias, la de updated_at más reciente. Sin esto el UPDATE de abajo
+            # choca contra la PK y tumba el arranque.
+            conn.execute(text("""
+                DELETE FROM product_sale_prices p
+                 WHERE p.sku <> UPPER(TRIM(p.sku))
+                   AND EXISTS (SELECT 1 FROM product_sale_prices q
+                                WHERE q.account_id = p.account_id
+                                  AND UPPER(TRIM(q.sku)) = UPPER(TRIM(p.sku))
+                                  AND (q.sku = UPPER(TRIM(q.sku))
+                                       OR COALESCE(q.updated_at, 'epoch') > COALESCE(p.updated_at, 'epoch')
+                                       OR (COALESCE(q.updated_at, 'epoch') = COALESCE(p.updated_at, 'epoch')
+                                           AND q.ctid > p.ctid)))
+            """))
+            conn.execute(text(
+                "UPDATE product_sale_prices SET sku = UPPER(TRIM(sku))"
+                " WHERE sku <> UPPER(TRIM(sku))"))
+            # product_costs: mismo criterio, la PK incluye valid_from (los costos
+            # son versionados, cada fecha es una fila aparte).
+            conn.execute(text("""
+                DELETE FROM product_costs p
+                 WHERE p.sku <> UPPER(TRIM(p.sku))
+                   AND EXISTS (SELECT 1 FROM product_costs q
+                                WHERE q.account_id = p.account_id
+                                  AND q.valid_from = p.valid_from
+                                  AND UPPER(TRIM(q.sku)) = UPPER(TRIM(p.sku))
+                                  AND (q.sku = UPPER(TRIM(q.sku))
+                                       OR COALESCE(q.updated_at, 'epoch') > COALESCE(p.updated_at, 'epoch')
+                                       OR (COALESCE(q.updated_at, 'epoch') = COALESCE(p.updated_at, 'epoch')
+                                           AND q.ctid > p.ctid)))
+            """))
+            conn.execute(text(
+                "UPDATE product_costs SET sku = UPPER(TRIM(sku))"
+                " WHERE sku <> UPPER(TRIM(sku))"))
+            # purchase_items no tiene UNIQUE (PK es un serial), no hay colisión.
+            conn.execute(text(
+                "UPDATE purchase_items SET sku = UPPER(TRIM(sku))"
+                " WHERE sku <> UPPER(TRIM(sku))"))
+            conn.execute(text(
+                "INSERT INTO app_meta (key, value) VALUES ('sku_upper_norm_prices_costs','1')"
+                " ON CONFLICT (key) DO NOTHING"))
         # Base de clientes (módulo facturación/ERP). Compartida por DUEÑO
         # (owner_user_id): un cliente es el mismo para todas las cuentas ML del
         # dueño. Único por CUIT dentro del dueño. condicion_iva_id = código ARCA
@@ -2084,7 +2135,10 @@ def db_save_product_costs(account_id: int, items: list):
     params = []
     today_iso = datetime.utcnow().date().isoformat()
     for it in items:
-        sku = (it.get("sku") or "").strip()
+        # MAYÚSCULA por el mismo motivo que db_save_sale_prices: el costo se
+        # cruza por SKU exacto (find_cost_for_date, Margen, Stock) y el
+        # text-transform de los inputs de Costos es solo visual (bug 490dfeb).
+        sku = (it.get("sku") or "").strip().upper()
         if not sku:
             continue
         try:
@@ -2668,10 +2722,11 @@ async def api_costos_edit(
         qty_val = float(qty) if qty is not None and qty != "" else None
     except ValueError:
         qty_val = None
-    # Borrar entry vieja
+    # Borrar entry vieja (case-insensitive: puede haber quedado en minúscula de
+    # antes de que el guardado normalizara)
     db_execute(
-        "DELETE FROM product_costs WHERE account_id=:aid AND sku=:sku AND valid_from=:vf",
-        {"aid": cost_aid, "sku": old_sku, "vf": old_valid_from},
+        "DELETE FROM product_costs WHERE account_id=:aid AND UPPER(TRIM(sku))=:sku AND valid_from=:vf",
+        {"aid": cost_aid, "sku": str(old_sku or "").strip().upper(), "vf": old_valid_from},
     )
     # Insertar entry nueva
     saved = db_save_product_costs(cost_aid, [{
@@ -2693,16 +2748,17 @@ async def api_costos_delete(request: Request, account_id: int, sku: str, valid_f
         raise HTTPException(404)
     user = get_user(user_id)
     cost_aid = _cost_account_id_for(user, account_id)
+    sku_u = str(sku or "").strip().upper()
     if valid_from:
         db_execute(
-            "DELETE FROM product_costs WHERE account_id=:aid AND sku=:sku AND valid_from=:vf",
-            {"aid": cost_aid, "sku": sku, "vf": valid_from},
+            "DELETE FROM product_costs WHERE account_id=:aid AND UPPER(TRIM(sku))=:sku AND valid_from=:vf",
+            {"aid": cost_aid, "sku": sku_u, "vf": valid_from},
         )
     else:
         # Sin fecha: borra TODAS las versiones de ese SKU
         db_execute(
-            "DELETE FROM product_costs WHERE account_id=:aid AND sku=:sku",
-            {"aid": cost_aid, "sku": sku},
+            "DELETE FROM product_costs WHERE account_id=:aid AND UPPER(TRIM(sku))=:sku",
+            {"aid": cost_aid, "sku": sku_u},
         )
     _invalidate_all_user_accounts_cache(user, account_id)
     return {"ok": True}
@@ -2930,7 +2986,7 @@ async def api_compras_upload(request: Request, account_id: int):
         raise HTTPException(400, f"No pude leer el archivo: {e}")
     saved = 0
     for it in items:
-        sku = (it.get("sku") or "").strip()
+        sku = (it.get("sku") or "").strip().upper()
         try:
             qty = float(it.get("qty") or 0)
             cost = float(it.get("cost") or 0)
@@ -3035,7 +3091,9 @@ async def api_compras_add(
     acc = _account_for_user(account_id, user_id)
     if not acc:
         raise HTTPException(404)
-    sku = (sku or "").strip()
+    # .upper(): el renglón termina volcado a Costos CMV en el Ingreso y de ahí
+    # se cruza por SKU exacto; el text-transform del input es solo visual.
+    sku = (sku or "").strip().upper()
     if not sku or qty <= 0 or cost <= 0:
         raise HTTPException(400, "SKU, cantidad y costo son obligatorios")
     user = get_user(user_id)
@@ -3076,7 +3134,7 @@ async def api_compras_edit(
     acc = _account_for_user(account_id, user_id)
     if not acc:
         raise HTTPException(404)
-    sku = (sku or "").strip()
+    sku = (sku or "").strip().upper()
     if not sku or qty <= 0 or cost <= 0:
         raise HTTPException(400, "SKU, cantidad y costo son obligatorios")
     user = get_user(user_id)
@@ -3527,9 +3585,15 @@ def _parse_sale_prices(content: bytes, filename: str) -> list:
 
 
 def db_save_sale_prices(account_id, items) -> int:
+    """Único punto de escritura de la base PVP. Normaliza el SKU a MAYÚSCULA:
+    el `text-transform:uppercase` de los inputs de /pvp es SOLO visual y el
+    value que llega al backend conserva lo que se tipeó, así que un SKU cargado
+    en minúscula se ve idéntico en pantalla pero NO cruza contra Stock / Margen
+    / base SKU (todos hacen lookup exacto de dict). Mismo criterio que
+    db_save_variants (bug 490dfeb)."""
     saved = 0
     for it in items:
-        sku = str(it.get("sku") or "").strip()
+        sku = str(it.get("sku") or "").strip().upper()
         price = it.get("price")
         if not sku or price is None:
             continue
@@ -4585,7 +4649,7 @@ def _parse_inbound_report(content: bytes) -> dict:
     for row in rows[header_idx + 1:]:
         if sku_col >= len(row) or camino_col >= len(row):
             continue
-        sku = str(row[sku_col] or "").strip()
+        sku = str(row[sku_col] or "").strip().upper()
         if not sku:
             continue
         digits = "".join(ch for ch in str(row[camino_col] or "") if ch.isdigit())
@@ -4650,7 +4714,7 @@ async def api_stock_inbound_set(request: Request, account_id: int):
     if not _account_for_user(account_id, user_id):
         raise HTTPException(404)
     body = await request.json()
-    sku = str(body.get("sku") or "").strip()
+    sku = str(body.get("sku") or "").strip().upper()
     if not sku:
         raise HTTPException(400, "SKU es obligatorio.")
     try:
@@ -4674,8 +4738,10 @@ async def api_stock_prices_delete(request: Request, account_id: int, sku: str):
         raise HTTPException(401)
     if not _account_for_user(account_id, user_id):
         raise HTTPException(404)
-    db_execute("DELETE FROM product_sale_prices WHERE account_id=:a AND sku=:s",
-               {"a": account_id, "s": sku})
+    # Case-insensitive: si quedó alguna fila vieja en minúscula (antes de que el
+    # guardado normalizara), el borrado desde la UI la agarra igual.
+    db_execute("DELETE FROM product_sale_prices WHERE account_id=:a AND UPPER(TRIM(sku))=:s",
+               {"a": account_id, "s": sku.strip().upper()})
     return {"ok": True}
 
 
@@ -4691,12 +4757,12 @@ async def api_stock_prices_delete_bulk(request: Request, account_id: int):
     if body.get("all"):
         db_execute("DELETE FROM product_sale_prices WHERE account_id=:a", {"a": account_id})
         return {"ok": True, "deleted": "all"}
-    skus = [str(s).strip() for s in (body.get("skus") or []) if str(s).strip()]
+    skus = [str(s).strip().upper() for s in (body.get("skus") or []) if str(s).strip()]
     if not skus:
         raise HTTPException(400, "No se indicaron SKU para borrar.")
     deleted = 0
     for s in skus:
-        db_execute("DELETE FROM product_sale_prices WHERE account_id=:a AND sku=:s",
+        db_execute("DELETE FROM product_sale_prices WHERE account_id=:a AND UPPER(TRIM(sku))=:s",
                    {"a": account_id, "s": s})
         deleted += 1
     return {"ok": True, "deleted": deleted}
@@ -5540,6 +5606,11 @@ def _margen_norm_pct(v):
 def _margen_apply_bulk(account_id: int, field: str, pairs: list) -> int:
     """Aplica en masa desc_meli, comision_var, desc_tn o tipo_publicacion.
     pairs = [(sku, valor)] (fracción para desc/comision/desc_tn; string para tipo)."""
+    # El SKU puede venir tipeado a mano (Excel de carga masiva) y en la base
+    # está siempre en MAYÚSCULA: sin normalizar, el UPDATE no matchea ninguna
+    # fila y como acá se cuentan PARES (no filas afectadas) la pantalla
+    # informaría "N actualizados" sin haber cambiado nada.
+    pairs = [(str(sku or "").strip().upper(), val) for sku, val in pairs]
     if field == "desc_tn":
         n = 0
         for sku, val in pairs:
@@ -14304,48 +14375,6 @@ async def reset_password_submit(
 
 # ── Debug ───────────────────────────────────────────────────────
 
-@app.get("/api/debug/item-full/{account_ref}")
-async def debug_item_full(request: Request, account_ref: str):
-    """Devuelve el JSON crudo del primer item activo para inspeccionar
-    qué campos tiene (offers, discounts, marketplace_campaigns, etc.).
-    Sirve para identificar dónde ML expone realmente las promos."""
-    user_id = get_session_user_id(request)
-    if not user_id:
-        raise HTTPException(401)
-    acc = db_fetchone(
-        "SELECT * FROM ml_accounts WHERE user_id=:uid AND (CAST(id AS TEXT)=:ref OR ml_user_id=:ref)",
-        {"uid": user_id, "ref": account_ref},
-    )
-    if not acc:
-        raise HTTPException(404)
-    token = await refresh_ml_token(acc["id"])
-    if not token:
-        raise HTTPException(502)
-    headers = {"Authorization": f"Bearer {token}"}
-    seller_id = acc["ml_user_id"]
-    async with httpx.AsyncClient(timeout=30) as client:
-        # Tomar el primer item activo
-        r = await client.get(
-            f"{ML_API_URL}/users/{seller_id}/items/search",
-            headers=headers,
-            params={"status": "active", "limit": 1},
-        )
-        if r.status_code != 200:
-            return {"step": "items/search", "status": r.status_code, "body": r.text[:500]}
-        results = r.json().get("results") or []
-        if not results:
-            return {"step": "items/search", "status": 200, "body": "no results"}
-        item_id = results[0]
-        # Pedir el item completo SIN filtros para ver todos los campos
-        r2 = await client.get(f"{ML_API_URL}/items/{item_id}", headers=headers)
-        return {
-            "item_id": item_id,
-            "status": r2.status_code,
-            "available_fields": sorted(list(r2.json().keys())) if r2.status_code == 200 else None,
-            "full_item": r2.json() if r2.status_code == 200 else r2.text[:2000],
-        }
-
-
 @app.get("/api/debug/visits-probe/{account_ref}/{item_id}")
 async def debug_visits_probe(request: Request, account_ref: str, item_id: str):
     """Muestra el crudo de las variantes de visitas de ML para un MLA: el
@@ -14393,101 +14422,6 @@ async def debug_visits_probe(request: Request, account_ref: str, item_id: str):
                         out[nombre]["parseado_error"] = str(e)[:200]
             except Exception as e:
                 out[nombre] = {"error": str(e)[:200]}
-    return out
-
-
-@app.get("/api/debug/wholesale-probe/{account_ref}/{item_id}")
-async def debug_wholesale_probe(request: Request, account_ref: str, item_id: str):
-    """Prueba los caminos de LECTURA de Precio por Cantidad que aparecieron en
-    la doc de "Precios netos por cantidad" (temporal, debug):
-      1. GET /items/{id}/prices con header `show-all-prices: true` — el default
-         (sin header) NO devuelve los tramos PxQ, que es lo que veníamos viendo.
-      2. GET /items/{id}/sale_price?...&quantity=N — precio efectivo para esa
-         cantidad; si ML rechazó el tramo debería devolver el precio normal.
-    """
-    user_id = get_session_user_id(request)
-    if not user_id:
-        raise HTTPException(401)
-    acc = db_fetchone(
-        "SELECT * FROM ml_accounts WHERE user_id=:uid AND (CAST(id AS TEXT)=:ref OR ml_user_id=:ref)",
-        {"uid": user_id, "ref": account_ref},
-    )
-    if not acc:
-        raise HTTPException(404)
-    token = await refresh_ml_token(acc["id"])
-    if not token:
-        raise HTTPException(502)
-    headers = {"Authorization": f"Bearer {token}"}
-    out = {"item_id": item_id}
-    async with httpx.AsyncClient(timeout=30) as client:
-        # 1) /prices con y sin el header show-all-prices
-        for label, extra in (("prices_plain", {}), ("prices_show_all", {"show-all-prices": "true"})):
-            r = await client.get(f"{ML_API_URL}/items/{item_id}/prices",
-                                 headers={**headers, **extra})
-            out[label] = {"status": r.status_code,
-                          "body": r.json() if r.status_code == 200 else r.text[:800]}
-        # 2) sale_price por cantidad (1 = referencia, resto = tramos típicos)
-        sale_prices = {}
-        for qty in (1, 2, 3, 5, 10, 15):
-            rs = await client.get(
-                f"{ML_API_URL}/items/{item_id}/sale_price", headers=headers,
-                params={"context": "channel_marketplace,user_type_business", "quantity": qty})
-            sale_prices[qty] = {"status": rs.status_code,
-                                "body": rs.json() if rs.status_code == 200 else rs.text[:400]}
-        out["sale_price_by_quantity"] = sale_prices
-
-        # 3) ¿De dónde saca ML el peso? `shipping.dimensions` vino null, pero ML
-        # igual calcula el ahorro de envío por cantidad. Buscamos el dato en los
-        # atributos del ítem (PACKAGE_*) y probamos si algún endpoint de envío
-        # acepta cantidad directamente.
-        ri = await client.get(f"{ML_API_URL}/items/{item_id}", headers=headers)
-        item = ri.json() if ri.status_code == 200 else {}
-        shp = item.get("shipping") or {}
-        pkg_attrs = {a.get("id"): (a.get("value_name") or a.get("value_struct"))
-                     for a in (item.get("attributes") or [])
-                     if isinstance(a, dict) and a.get("id") and (
-                         "PACKAGE" in a["id"] or "WEIGHT" in a["id"] or "DIMENSION" in a["id"]
-                         or a["id"] in ("HEIGHT", "WIDTH", "LENGTH", "DEPTH"))}
-        out["item_shipping"] = {
-            "dimensions": shp.get("dimensions"), "logistic_type": shp.get("logistic_type"),
-            "free_shipping": shp.get("free_shipping"), "tags": shp.get("tags"),
-            "mode": shp.get("mode"),
-            "price": item.get("price"), "listing_type_id": item.get("listing_type_id"),
-            "category_id": item.get("category_id"), "package_attributes": pkg_attrs,
-            "user_product_id": item.get("user_product_id"),
-        }
-        # b) Análisis de envío con la MISMA función que va a usar la simulación
-        # real, y comparación contra los tramos que ML tiene cargados hoy.
-        qtys = [t["qty"] for t in wholesale_get_config(acc["id"])]
-        analysis = await wholesale_shipping_analysis(
-            client, headers, acc["ml_user_id"], item, qtys)
-        out["shipping_analysis"] = analysis
-        # PVP vigente = el precio de venta actual de 1 unidad (con promo si la hay)
-        pvp = None
-        try:
-            pvp = float(sale_prices[1]["body"]["amount"])
-        except (KeyError, TypeError, ValueError):
-            pass
-        ml_now = _wholesale_parse_prices(out["prices_show_all"]["body"]).get("tiers") or {}
-        comparison = {}
-        if analysis.get("applies") and pvp:
-            for qty in qtys:
-                info = (analysis.get("tiers") or {}).get(qty) or {}
-                saving = info.get("saving_per_unit")
-                if saving is None:
-                    continue
-                max_price = round(pvp - saving, 2)
-                actual = ml_now.get(qty)
-                comparison[qty] = {
-                    "costo_envio_paquete": info.get("ship_cost"),
-                    "ahorro_por_unidad": saving,
-                    "precio_maximo_ml": max_price,
-                    "precio_cargado_hoy": actual,
-                    "cumple": (actual is not None and actual <= max_price + 0.01),
-                    "desc_necesario_pct": round((1 - max_price / pvp) * 100, 2) if pvp else None,
-                }
-        out["pvp_vigente"] = pvp
-        out["comparacion_vs_ml"] = comparison
     return out
 
 
