@@ -98,11 +98,29 @@
     #items-tbody tr.dragging { opacity: 0.4; }
     #items-tbody tr.drop-before td { box-shadow: inset 0 2px 0 0 #005CFF; }
     #items-tbody tr.drop-after td { box-shadow: inset 0 -2px 0 0 #005CFF; }
-    /* Métricas: las 3 tablas del Excel. En pantalla angosta caen una debajo de
-       otra; la de mes/semana ocupa el ancho completo porque tiene 5 columnas. */
-    .metrics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(430px, 1fr)); gap: 16px; align-items: start; }
-    .metrics-card { margin: 0; }
-    .metrics-card-wide { grid-column: 1 / -1; }
+    /* Métricas: las 3 tablas del Excel, una al lado de la otra. La de mes/semana
+       tiene 5 columnas, así que se lleva algo más de ancho que las otras dos.
+       Las tarjetas estiran a la misma altura y el scroll queda DENTRO de cada
+       tabla, así las tres arrancan y terminan a la misma altura. */
+    .metrics-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.3fr); gap: 14px; align-items: stretch; }
+    .metrics-card { margin: 0; min-width: 0; display: flex; flex-direction: column; padding: 14px 16px; }
+    .metrics-card h3 { margin-bottom: 8px; }
+    .metrics-scroll { overflow: auto; flex: 1; max-height: 460px; }
+    /* Compacta: con 5 columnas y montos largos, la tipografía de la tabla
+       general no entra en un tercio de pantalla. */
+    .metrics-card table { font-size: 12px; }
+    .metrics-card th { padding: 7px 6px; font-size: 11px; line-height: 1.25; white-space: normal; }
+    .metrics-card td { padding: 5px 6px; }
+    .metrics-card td.num { white-space: nowrap; }
+    .metrics-card .tree-label-3 { padding-left: 22px; }
+    /* 2 columnas: la de mes/semana pasa abajo ocupando el ancho completo. */
+    @media (max-width: 1500px) {
+      .metrics-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+      .metrics-card-wide { grid-column: 1 / -1; }
+    }
+    @media (max-width: 900px) {
+      .metrics-grid { grid-template-columns: minmax(0, 1fr); }
+    }
     .pivot-filters { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
     .pivot-filters label { font-size: 12px; color: #888; }
     .pivot-filters select { padding: 6px 8px; border: 1px solid #ddd; border-radius: 8px; font-size: 13px; font-family: 'Inter', sans-serif; background: #fff; }
@@ -193,7 +211,7 @@
           <label>Año</label>
           <select id="m1-year" onchange="renderM1()"></select>
         </div>
-        <div style="overflow:auto;max-height:60vh;">
+        <div class="metrics-scroll">
           <table>
             <thead><tr>
               <th>Etiquetas de fila</th>
@@ -216,7 +234,7 @@
         <div class="search-row">
           <input type="text" id="metrics-filter-sku" placeholder="Buscar por SKU..." oninput="renderM2()" />
         </div>
-        <div style="overflow:auto;max-height:60vh;">
+        <div class="metrics-scroll">
           <table>
             <thead><tr>
               <th>Etiquetas de fila</th>
@@ -235,7 +253,7 @@
           <label>Año</label>
           <select id="m3-year" onchange="renderM3()"></select>
         </div>
-        <div style="overflow:auto;max-height:60vh;">
+        <div class="metrics-scroll">
           <table>
             <thead><tr>
               <th>Mes</th><th class="num">Semana</th>
