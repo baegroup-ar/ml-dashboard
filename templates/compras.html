@@ -98,6 +98,17 @@
     #items-tbody tr.dragging { opacity: 0.4; }
     #items-tbody tr.drop-before td { box-shadow: inset 0 2px 0 0 #005CFF; }
     #items-tbody tr.drop-after td { box-shadow: inset 0 -2px 0 0 #005CFF; }
+    /* Métricas: las 3 tablas del Excel. En pantalla angosta caen una debajo de
+       otra; la de mes/semana ocupa el ancho completo porque tiene 5 columnas. */
+    .metrics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(430px, 1fr)); gap: 16px; align-items: start; }
+    .metrics-card { margin: 0; }
+    .metrics-card-wide { grid-column: 1 / -1; }
+    .pivot-filters { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+    .pivot-filters label { font-size: 12px; color: #888; }
+    .pivot-filters select { padding: 6px 8px; border: 1px solid #ddd; border-radius: 8px; font-size: 13px; font-family: 'Inter', sans-serif; background: #fff; }
+    /* Fila de total (Total MES / Total general), como el pivot del Excel. */
+    tr.pivot-total td { font-weight: 600; border-top: 1px solid #e5e5e5; }
+    tr.pivot-grand td { background: #f7f7f6; font-weight: 700; border-top: 2px solid #ddd; }
     tr.subtotal-row td { background: #f2f7ff; color: #005CFF; font-weight: 600; border-top: 1px solid #d8e4ff; border-bottom: 1px solid #d8e4ff; }
     tr.subtotal-row td:last-child { border-bottom: 1px solid #d8e4ff; }
   </style>
@@ -171,19 +182,70 @@
         y no aparece acá. La semana es "comercial": lunes a sábado, arranca el primer día hábil del mes y
         la última semana cierra el último día hábil.
       </p>
-      <div class="search-row">
-        <input type="text" id="metrics-filter-sku" placeholder="Buscar por SKU..." oninput="renderMetricsTree()" />
-        <span class="count" id="metrics-count-label"></span>
+      <span class="count" id="metrics-count-label"></span>
+    </div>
+
+    <div class="metrics-grid">
+      <!-- Tabla 1: resumen por mes (replica la tabla A:C del Excel) -->
+      <div class="card metrics-card">
+        <h3>Resumen por mes</h3>
+        <div class="pivot-filters">
+          <label>Año</label>
+          <select id="m1-year" onchange="renderM1()"></select>
+        </div>
+        <div style="overflow:auto;max-height:60vh;">
+          <table>
+            <thead><tr>
+              <th>Etiquetas de fila</th>
+              <th class="num">Suma de TOTAL SIN IVA</th>
+              <th class="num">Suma de Cantidad</th>
+            </tr></thead>
+            <tbody id="m1-tbody"><tr><td colspan="3" class="empty">Cargando...</td></tr></tbody>
+          </table>
+        </div>
       </div>
-      <div style="overflow:auto;max-height:65vh;">
-        <table>
-          <thead><tr>
-            <th>Año / Mes / Semana / SKU</th><th class="num">Cantidad</th><th class="num">Total sin IVA</th><th class="num">Total con IVA</th>
-          </tr></thead>
-          <tbody id="metrics-tbody">
-            <tr><td colspan="4" class="empty">Cargando...</td></tr>
-          </tbody>
-        </table>
+
+      <!-- Tabla 2: detalle por SKU del período elegido (tabla F:I del Excel) -->
+      <div class="card metrics-card">
+        <h3>Detalle por SKU</h3>
+        <div class="pivot-filters">
+          <label>Año</label><select id="m2-year" onchange="onM2YearChange()"></select>
+          <label>Mes</label><select id="m2-month" onchange="onM2MonthChange()"></select>
+          <label>Semana</label><select id="m2-week" onchange="renderM2()"></select>
+        </div>
+        <div class="search-row">
+          <input type="text" id="metrics-filter-sku" placeholder="Buscar por SKU..." oninput="renderM2()" />
+        </div>
+        <div style="overflow:auto;max-height:60vh;">
+          <table>
+            <thead><tr>
+              <th>Etiquetas de fila</th>
+              <th class="num">Suma de Cantidad</th>
+              <th class="num">Suma de TOTAL SIN IVA</th>
+            </tr></thead>
+            <tbody id="m2-tbody"><tr><td colspan="3" class="empty">Cargando...</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Tabla 3: mes / semana con las 3 medidas (tabla M:Q del Excel) -->
+      <div class="card metrics-card metrics-card-wide">
+        <h3>Mes y semana</h3>
+        <div class="pivot-filters">
+          <label>Año</label>
+          <select id="m3-year" onchange="renderM3()"></select>
+        </div>
+        <div style="overflow:auto;max-height:60vh;">
+          <table>
+            <thead><tr>
+              <th>Mes</th><th class="num">Semana</th>
+              <th class="num">Suma de Cantidad</th>
+              <th class="num">Suma de TOTAL SIN IVA</th>
+              <th class="num">Suma de TOTAL C/IVA</th>
+            </tr></thead>
+            <tbody id="m3-tbody"><tr><td colspan="5" class="empty">Cargando...</td></tr></tbody>
+          </table>
+        </div>
       </div>
     </div>
   </div>
@@ -1110,105 +1172,240 @@
   async function loadMetrics() {
     if (!ACCOUNT_ID) return;
     metricsLoaded = true;
-    const tbody = document.getElementById('metrics-tbody');
-    tbody.innerHTML = '<tr><td colspan="4" class="empty">Cargando...</td></tr>';
     try {
       const r = await fetch(`/api/costos/${ACCOUNT_ID}/metrics`);
       if (!r.ok) throw new Error('Error al cargar');
       const data = await r.json();
       metricsItems = data.items || [];
-      renderMetricsTree();
+      initMetricsFilters();
+      renderAllMetrics();
     } catch (e) {
-      tbody.innerHTML = `<tr><td colspan="4" class="empty">Error: ${e.message}</td></tr>`;
-    }
-  }
-
-  function buildMetricsTree(items) {
-    // year -> month -> week -> sku -> {qty, sinIva, conIva}
-    const tree = {};
-    for (const it of items) {
-      const y = tree[it.year] || (tree[it.year] = {});
-      const m = y[it.month] || (y[it.month] = {});
-      const w = m[it.week] || (m[it.week] = {});
-      const s = w[it.sku] || (w[it.sku] = { qty: 0, sinIva: 0, conIva: 0 });
-      s.qty += it.qty;
-      s.sinIva += it.total_sin_iva;
-      s.conIva += it.total_con_iva;
-    }
-    return tree;
-  }
-
-  function sumLeaves(node, hops) {
-    // hops = niveles de diccionario que faltan bajar hasta llegar a la hoja
-    // {qty,sinIva,conIva}: 3 desde un año (mes->semana->sku->hoja), 2 desde
-    // un mes (semana->sku->hoja), 1 desde una semana (sku->hoja).
-    if (hops === 0) return node;
-    let qty = 0, sinIva = 0, conIva = 0;
-    for (const k in node) {
-      const child = sumLeaves(node[k], hops - 1);
-      qty += child.qty; sinIva += child.sinIva; conIva += child.conIva;
-    }
-    return { qty, sinIva, conIva };
-  }
-
-  function renderMetricsTree() {
-    const tbody = document.getElementById('metrics-tbody');
-    if (!metricsItems) return;
-    const filter = (document.getElementById('metrics-filter-sku').value || '').trim().toUpperCase();
-    const items = filter ? metricsItems.filter(it => it.sku.toUpperCase().includes(filter)) : metricsItems;
-    document.getElementById('metrics-count-label').textContent =
-      `${metricsItems.length} entrada${metricsItems.length === 1 ? '' : 's'} de compra`;
-    if (!items.length) {
-      tbody.innerHTML = `<tr><td colspan="4" class="empty">${filter ? 'Sin resultados.' : 'Todavía no hay costos con cantidad cargada.'}</td></tr>`;
-      return;
-    }
-    const tree = buildMetricsTree(items);
-    const rows = [];
-    const years = Object.keys(tree).sort((a, b) => b - a);
-    for (const y of years) {
-      const yKey = `${y}`;
-      const yTot = sumLeaves(tree[y], 3);
-      rows.push(treeRow(1, yKey, y, yTot, years.length));
-      if (!METRICS_OPEN.has(yKey)) continue;
-      const months = Object.keys(tree[y]).sort((a, b) => a - b);
-      for (const m of months) {
-        const mKey = `${y}|${m}`;
-        const mTot = sumLeaves(tree[y][m], 2);
-        rows.push(treeRow(2, mKey, MONTH_NAMES[m - 1], mTot));
-        if (!METRICS_OPEN.has(mKey)) continue;
-        const weeks = Object.keys(tree[y][m]).sort((a, b) => a - b);
-        for (const w of weeks) {
-          const wKey = `${y}|${m}|${w}`;
-          const wTot = sumLeaves(tree[y][m][w], 1);
-          rows.push(treeRow(3, wKey, `Semana ${w}`, wTot));
-          if (!METRICS_OPEN.has(wKey)) continue;
-          const skus = Object.keys(tree[y][m][w]).sort();
-          for (const sku of skus) {
-            rows.push(treeRow(4, null, sku, tree[y][m][w][sku]));
-          }
-        }
+      for (const id of ['m1-tbody', 'm2-tbody', 'm3-tbody']) {
+        document.getElementById(id).innerHTML =
+          `<tr><td colspan="5" class="empty">Error: ${e.message}</td></tr>`;
       }
     }
+  }
+
+  // ── Pivots: las 3 tablas del Excel "RESMEN COMPRA" ──
+  // Todas salen del mismo array plano que devuelve /api/costos/{id}/metrics
+  // (una fila por entrada de CMV con cantidad, ya tagueada con año/mes/semana
+  // comercial), igual que las 3 tablas dinámicas del Excel salen de una sola
+  // hoja de datos.
+  const EMPTY_TOT = () => ({ qty: 0, sinIva: 0, conIva: 0 });
+
+  function addTot(acc, it) {
+    acc.qty += it.qty; acc.sinIva += it.total_sin_iva; acc.conIva += it.total_con_iva;
+    return acc;
+  }
+
+  // Agrupa por la clave que devuelva keyFn. Map conserva el orden de inserción,
+  // pero igual se ordena explícito en cada tabla.
+  function groupBy(items, keyFn) {
+    const out = new Map();
+    for (const it of items) {
+      const k = keyFn(it);
+      if (!out.has(k)) out.set(k, EMPTY_TOT());
+      addTot(out.get(k), it);
+    }
+    return out;
+  }
+
+  const metricsYears = () =>
+    [...new Set((metricsItems || []).map(it => it.year))].sort((a, b) => b - a);
+
+  function fillSelect(sel, values, labelFn, todos) {
+    const previo = sel.value;
+    sel.innerHTML = (todos ? `<option value="">(Todos)</option>` : '') +
+      values.map(v => `<option value="${v}">${labelFn(v)}</option>`).join('');
+    // Mantener la elección si sigue existiendo (p.ej. al cambiar de año).
+    if (previo !== '' && values.some(v => String(v) === previo)) sel.value = previo;
+    else if (!todos && values.length) sel.value = String(values[0]);
+  }
+
+  function initMetricsFilters() {
+    const years = metricsYears();
+    for (const id of ['m1-year', 'm2-year', 'm3-year']) {
+      fillSelect(document.getElementById(id), years, y => y, false);
+    }
+    refreshM2MonthWeek();
+  }
+
+  // Mes y Semana de la tabla 2 dependen de lo que exista en el año/mes elegido.
+  function refreshM2MonthWeek() {
+    const y = Number(document.getElementById('m2-year').value);
+    const delAnio = (metricsItems || []).filter(it => it.year === y);
+    const meses = [...new Set(delAnio.map(it => it.month))].sort((a, b) => a - b);
+    fillSelect(document.getElementById('m2-month'), meses, m => MONTH_NAMES[m - 1].toUpperCase(), true);
+    const m = document.getElementById('m2-month').value;
+    const delMes = m ? delAnio.filter(it => it.month === Number(m)) : delAnio;
+    const semanas = [...new Set(delMes.map(it => it.week))].sort((a, b) => a - b);
+    fillSelect(document.getElementById('m2-week'), semanas, w => w, true);
+  }
+
+  function onM2YearChange() { refreshM2MonthWeek(); renderM2(); }
+  function onM2MonthChange() { refreshM2MonthWeek(); renderM2(); }
+
+  function renderAllMetrics() {
+    document.getElementById('metrics-count-label').textContent =
+      `${(metricsItems || []).length} entrada${(metricsItems || []).length === 1 ? '' : 's'} de compra`;
+    renderM1(); renderM2(); renderM3();
+  }
+
+  const qtyFmt = q => Math.round(q).toLocaleString('es-AR');
+
+  // ── Tabla 1: resumen por mes. El ▶ abre el detalle por SKU de ese mes (en el
+  // Excel es el ⊞ del campo de fila). ──
+  function renderM1() {
+    const tbody = document.getElementById('m1-tbody');
+    const y = Number(document.getElementById('m1-year').value);
+    const items = (metricsItems || []).filter(it => it.year === y);
+    if (!items.length) {
+      tbody.innerHTML = '<tr><td colspan="3" class="empty">Sin compras en ese año.</td></tr>';
+      return;
+    }
+    const porMes = groupBy(items, it => it.month);
+    const meses = [...porMes.keys()].sort((a, b) => a - b);
+    const rows = [];
+    const gran = EMPTY_TOT();
+    for (const m of meses) {
+      const t = porMes.get(m);
+      gran.qty += t.qty; gran.sinIva += t.sinIva; gran.conIva += t.conIva;
+      const key = `m1|${y}|${m}`;
+      const open = METRICS_OPEN.has(key);
+      rows.push(`
+        <tr class="tree-row" onclick="toggleMetricsNode('${key}')">
+          <td class="tree-label-1"><span class="tree-toggle">${open ? '▼' : '▶'}</span>${MONTH_NAMES[m - 1].toUpperCase()}</td>
+          <td class="num">${fmt(t.sinIva)}</td>
+          <td class="num">${qtyFmt(t.qty)}</td>
+        </tr>`);
+      if (!open) continue;
+      const porSku = groupBy(items.filter(it => it.month === m), it => it.sku);
+      const skus = [...porSku.keys()].sort((a, b) => porSku.get(b).sinIva - porSku.get(a).sinIva);
+      for (const sku of skus) {
+        const s = porSku.get(sku);
+        rows.push(`
+          <tr class="tree-row leaf">
+            <td class="tree-label-3">${escHtml(sku)}</td>
+            <td class="num">${fmt(s.sinIva)}</td>
+            <td class="num">${qtyFmt(s.qty)}</td>
+          </tr>`);
+      }
+    }
+    rows.push(`
+      <tr class="pivot-grand">
+        <td>Total general</td>
+        <td class="num">${fmt(gran.sinIva)}</td>
+        <td class="num">${qtyFmt(gran.qty)}</td>
+      </tr>`);
     tbody.innerHTML = rows.join('');
   }
 
-  function treeRow(level, key, label, tot) {
-    const isLeaf = level === 4;
-    const open = key && METRICS_OPEN.has(key);
-    const toggle = isLeaf ? '' : `<span class="tree-toggle">${open ? '▼' : '▶'}</span>`;
-    const onclick = isLeaf ? '' : `onclick="toggleMetricsNode('${key}')"`;
-    return `
-      <tr class="tree-row ${isLeaf ? 'leaf' : ''}" ${onclick}>
-        <td class="tree-label-${level}">${toggle}${escHtml(String(label))}</td>
-        <td class="num">${Math.round(tot.qty).toLocaleString('es-AR')}</td>
-        <td class="num">${fmt(tot.sinIva)}</td>
-        <td class="num">${fmt(tot.conIva)}</td>
-      </tr>`;
+  // ── Tabla 2: SKU del período elegido, de mayor a menor por total sin IVA ──
+  function renderM2() {
+    const tbody = document.getElementById('m2-tbody');
+    const y = Number(document.getElementById('m2-year').value);
+    const m = document.getElementById('m2-month').value;
+    const w = document.getElementById('m2-week').value;
+    const filtro = (document.getElementById('metrics-filter-sku').value || '').trim().toUpperCase();
+    let items = (metricsItems || []).filter(it => it.year === y);
+    if (m) items = items.filter(it => it.month === Number(m));
+    if (w) items = items.filter(it => it.week === Number(w));
+    if (filtro) items = items.filter(it => it.sku.toUpperCase().includes(filtro));
+    if (!items.length) {
+      tbody.innerHTML = '<tr><td colspan="3" class="empty">Sin compras con esos filtros.</td></tr>';
+      return;
+    }
+    const porSku = groupBy(items, it => it.sku);
+    const skus = [...porSku.keys()].sort((a, b) => porSku.get(b).sinIva - porSku.get(a).sinIva);
+    const gran = EMPTY_TOT();
+    const rows = skus.map(sku => {
+      const t = porSku.get(sku);
+      gran.qty += t.qty; gran.sinIva += t.sinIva;
+      return `
+        <tr class="tree-row leaf">
+          <td>${escHtml(sku)}</td>
+          <td class="num">${qtyFmt(t.qty)}</td>
+          <td class="num">${fmt(t.sinIva)}</td>
+        </tr>`;
+    });
+    rows.push(`
+      <tr class="pivot-grand">
+        <td>Total general</td>
+        <td class="num">${qtyFmt(gran.qty)}</td>
+        <td class="num">${fmt(gran.sinIva)}</td>
+      </tr>`);
+    tbody.innerHTML = rows.join('');
   }
 
+  // ── Tabla 3: mes → semana con las 3 medidas. Mes cerrado = una fila con su
+  // total; abierto = una fila por semana + "Total MES" (igual que el pivot). ──
+  function renderM3() {
+    const tbody = document.getElementById('m3-tbody');
+    const y = Number(document.getElementById('m3-year').value);
+    const items = (metricsItems || []).filter(it => it.year === y);
+    if (!items.length) {
+      tbody.innerHTML = '<tr><td colspan="5" class="empty">Sin compras en ese año.</td></tr>';
+      return;
+    }
+    const porMes = groupBy(items, it => it.month);
+    const meses = [...porMes.keys()].sort((a, b) => a - b);
+    const rows = [];
+    const gran = EMPTY_TOT();
+    for (const m of meses) {
+      const t = porMes.get(m);
+      gran.qty += t.qty; gran.sinIva += t.sinIva; gran.conIva += t.conIva;
+      const nombre = MONTH_NAMES[m - 1].toUpperCase();
+      const key = `m3|${y}|${m}`;
+      const open = METRICS_OPEN.has(key);
+      rows.push(`
+        <tr class="tree-row" onclick="toggleMetricsNode('${key}')">
+          <td class="tree-label-1"><span class="tree-toggle">${open ? '▼' : '▶'}</span>${nombre}</td>
+          <td></td>
+          <td class="num">${open ? '' : qtyFmt(t.qty)}</td>
+          <td class="num">${open ? '' : fmt(t.sinIva)}</td>
+          <td class="num">${open ? '' : fmt(t.conIva)}</td>
+        </tr>`);
+      if (!open) continue;
+      const porSemana = groupBy(items.filter(it => it.month === m), it => it.week);
+      const semanas = [...porSemana.keys()].sort((a, b) => a - b);
+      for (const s of semanas) {
+        const ts = porSemana.get(s);
+        rows.push(`
+          <tr class="tree-row leaf">
+            <td></td>
+            <td class="num">${s}</td>
+            <td class="num">${qtyFmt(ts.qty)}</td>
+            <td class="num">${fmt(ts.sinIva)}</td>
+            <td class="num">${fmt(ts.conIva)}</td>
+          </tr>`);
+      }
+      rows.push(`
+        <tr class="pivot-total">
+          <td>Total ${nombre}</td>
+          <td></td>
+          <td class="num">${qtyFmt(t.qty)}</td>
+          <td class="num">${fmt(t.sinIva)}</td>
+          <td class="num">${fmt(t.conIva)}</td>
+        </tr>`);
+    }
+    rows.push(`
+      <tr class="pivot-grand">
+        <td>Total general</td>
+        <td></td>
+        <td class="num">${qtyFmt(gran.qty)}</td>
+        <td class="num">${fmt(gran.sinIva)}</td>
+        <td class="num">${fmt(gran.conIva)}</td>
+      </tr>`);
+    tbody.innerHTML = rows.join('');
+  }
+
+  // Las claves llevan prefijo de tabla ("m1|año|mes", "m3|año|mes") para que
+  // abrir un mes en una no abra el mismo mes en la otra.
   function toggleMetricsNode(key) {
     if (METRICS_OPEN.has(key)) METRICS_OPEN.delete(key); else METRICS_OPEN.add(key);
-    renderMetricsTree();
+    if (key.startsWith('m1|')) renderM1();
+    else if (key.startsWith('m3|')) renderM3();
   }
 
   function escHtml(s) {
