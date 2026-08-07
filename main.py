@@ -3590,7 +3590,9 @@ def _last_purchase_by_sku(cost_aid) -> dict:
 def _purchases_inbound_by_sku(cost_aid) -> dict:
     """{SKU: unidades} de las compras marcadas como PAGADAS y todavía no
     ingresadas (`purchase_items.estado='pagado'`). Son mercadería ya pagada que
-    está viniendo, así que Stock valorizado las suma como stock EN CAMINO.
+    está viniendo: Stock valorizado las muestra en la columna INGRESOS (aparte
+    del "Tránsito Full", que es el en camino a Full manual/importado) y las suma
+    al stock total.
 
     Se calcula al LEER, no se copia a `product_sale_prices.stock_en_camino` (que
     sigue siendo la carga manual / el Reporte de Planificación de ML): así el
@@ -4438,9 +4440,9 @@ async def _build_stock_payload(account_id, acc, token, user, target_days,
     # Stock EN CAMINO a Full (carga manual por SKU). 0/None = sin en camino.
     en_camino_map = {r["sku"]: int(float(r["stock_en_camino"]))
                      for r in price_rows if r.get("stock_en_camino")}
-    # Compras ya PAGADAS y sin ingresar: también son mercadería en camino. Van
-    # aparte del manual porque el input de la columna edita SOLO el manual; el
-    # total del SKU es la suma de los dos.
+    # Compras ya PAGADAS y sin ingresar: van en su propia columna (Ingresos),
+    # separadas del tránsito a Full manual —que es lo único editable— porque son
+    # dos cosas distintas. El stock total suma las dos.
     compras_camino = _purchases_inbound_by_sku(cost_aid)
     # {componente: [(original, qty), ...]} — variantes (qty 1) y combos (qty N o
     # varios originales). Compartida por usuario.
@@ -4482,8 +4484,8 @@ async def _build_stock_payload(account_id, acc, token, user, target_days,
         for (comp, q) in contrib_to.get(original, []):
             if q == 1:
                 st_full += int((stock.get(comp) or {}).get("full", 0))
-        st_camino = int(en_camino_map.get(original, 0))   # en camino a Full (manual)
-        st_compras = int(compras_camino.get(original, 0))  # compras pagadas sin ingresar
+        st_camino = int(en_camino_map.get(original, 0))    # Tránsito Full (manual)
+        st_compras = int(compras_camino.get(original, 0))  # Ingresos (compras pagadas)
         st_total = st_propio + st_full + st_camino + st_compras
         price = prices.get(original)
         valor = round(st_total * price, 2) if price is not None else None
@@ -4518,8 +4520,8 @@ async def _build_stock_payload(account_id, acc, token, user, target_days,
             "sku": original,
             "stock": st_propio,
             "stock_full": st_full,
-            "stock_en_camino": st_camino,          # manual / Reporte de ML (editable)
-            "stock_en_camino_compras": st_compras,  # compras pagadas (calculado)
+            "stock_en_camino": st_camino,           # col. Tránsito Full (editable)
+            "stock_en_camino_compras": st_compras,  # col. Ingresos (calculado)
             "stock_total": st_total,
             "price": price,
             "valor_venta": valor,
@@ -4593,7 +4595,7 @@ async def api_stock_export(request: Request, account_id: int, target_days: int =
     wb = Workbook()
     ws = wb.active
     ws.title = "Stock valorizado"
-    headers = ["SKU", "Stock ML", "Stock Full", "En camino", "Stock total", "Precio venta",
+    headers = ["SKU", "Stock ML", "Stock Full", "Tránsito Full", "Ingresos", "Stock total", "Precio venta",
                "Valorizado", "Última compra", "Aging (días)", f"Ventas {sd}d",
                "Prom/día", "Días Stock", "Reposición sug.", "Costo c/IVA", "Estimado Compra"]
     ws.append(headers)
@@ -4610,8 +4612,8 @@ async def api_stock_export(request: Request, account_id: int, target_days: int =
             it["sku"],
             it["stock"],
             it["stock_full"] if it.get("stock_full") else 0,
-            # En camino = manual/Reporte de ML + compras pagadas sin ingresar
-            (it.get("stock_en_camino") or 0) + (it.get("stock_en_camino_compras") or 0),
+            it.get("stock_en_camino") or 0,           # Tránsito Full (manual / Reporte de ML)
+            it.get("stock_en_camino_compras") or 0,   # Ingresos (compras pagadas sin ingresar)
             it["stock_total"],
             it["price"] if it.get("price") is not None else "",
             it["valor_venta"] if it.get("valor_venta") is not None else "",
@@ -4625,10 +4627,12 @@ async def api_stock_export(request: Request, account_id: int, target_days: int =
             estimado_compra,
         ])
         # Variantes agrupadas: una fila por variante (solo SKU, stock y ventas).
+        # Las celdas vacías son POSICIONALES: si se agrega una columna a la
+        # tabla hay que correrlas o el dato queda bajo el encabezado equivocado.
         for v in (it.get("variantes") or []):
-            ws.append([f"   ↳ {v['sku']}", "", "", "", v.get("stock_total", ""), "",
-                       "", "", "", v.get("ventas", ""), "", "", "", "", ""])
-    widths = [28, 10, 10, 10, 11, 14, 16, 14, 12, 10, 10, 14, 14, 13, 15]
+            ws.append([f"   ↳ {v['sku']}", "", "", "", "", v.get("stock_total", ""),
+                       "", "", "", "", v.get("ventas", ""), "", "", "", "", ""])
+    widths = [28, 10, 10, 12, 11, 11, 14, 16, 14, 12, 10, 10, 14, 14, 13, 15]
     for i, w in enumerate(widths, start=1):
         ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = w
     buf = io.BytesIO()

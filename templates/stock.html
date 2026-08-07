@@ -161,7 +161,7 @@
       </div>
       <div class="row" style="gap:8px;">
         <input type="file" id="inbound-file" accept=".xlsx" style="display:none;" onchange="uploadInbound(this)" />
-        <button class="ghost" onclick="document.getElementById('inbound-file').click()" title="Importá el 'en camino' a Full desde el Reporte de Planificación de envíos que bajás de ML">⬆ Importar en camino (Excel de ML)</button>
+        <button class="ghost" onclick="document.getElementById('inbound-file').click()" title="Importá el tránsito a Full desde el Reporte de Planificación de envíos que bajás de ML">⬆ Importar tránsito Full (Excel de ML)</button>
         <button class="green" onclick="downloadStockExcel()" title="Descarga el listado completo en Excel">⬇ Descargar Excel</button>
       </div>
     </div>
@@ -171,7 +171,7 @@
       <label style="font-size:12px;"><input type="checkbox" id="f-sinstock" onchange="renderTable()" style="vertical-align:-2px;"> Sin stock</label>
       <label style="font-size:12px;"><input type="checkbox" id="only-rep" onchange="renderTable()" style="vertical-align:-2px;"> Con reposición</label>
       <label style="font-size:12px;"><input type="checkbox" id="f-full" onchange="renderTable()" style="vertical-align:-2px;"> Con stock en Full</label>
-      <label style="font-size:12px;"><input type="checkbox" id="f-camino" onchange="renderTable()" style="vertical-align:-2px;"> Con stock en camino</label>
+      <label style="font-size:12px;"><input type="checkbox" id="f-camino" onchange="renderTable()" style="vertical-align:-2px;"> Con tránsito o ingresos</label>
     </div>
     <div class="summary" style="margin-top:12px;">
       <span><span class="lbl">SKUs</span><b id="sum-skus">0</b></span>
@@ -184,7 +184,8 @@
       <table>
         <thead><tr>
           <th>SKU</th><th class="num">Stock ML</th><th class="num">Stock Full</th>
-          <th class="num" title="Stock en camino. El número editable es la carga manual (o el Reporte de Planificación de ML); el +N verde son las compras marcadas como Pagadas en Posible Compra, que salen al confirmar el Ingreso.">En camino</th>
+          <th class="num" title="Stock en tránsito a Full. Carga manual (o el Reporte de Planificación de ML): clic para editar.">Tránsito Full</th>
+          <th class="num" title="Unidades de compras marcadas como Pagadas en Posible Compra (mercadería paga que está viniendo). Salen solas al confirmar el Ingreso.">Ingresos</th>
           <th class="num">Stock total</th>
           <th class="num">Precio venta</th><th class="num">Valorizado</th>
           <th>Última compra</th><th class="num">Aging</th>
@@ -196,7 +197,7 @@
         <tbody id="stock-body"></tbody>
         <tfoot id="stock-tfoot" style="display:none;">
           <tr style="font-weight:600;">
-            <td colspan="13" style="text-align:right;">Total</td>
+            <td colspan="14" style="text-align:right;">Total</td>
             <td></td>
             <td class="num" id="total-estimado-compra"></td>
           </tr>
@@ -289,7 +290,8 @@ function renderTable() {
   if (fActivas && !fSinStock) rows = rows.filter(r => r._total > 0);
   else if (fSinStock && !fActivas) rows = rows.filter(r => r._total === 0);
   if (fFull) rows = rows.filter(r => (r.stock_full || 0) > 0);
-  // "En camino" = manual/Reporte de ML + compras pagadas sin ingresar.
+  // Tránsito Full e Ingresos son columnas distintas, pero el filtro es uno solo:
+  // deja las que tienen mercadería viniendo por cualquiera de las dos vías.
   if (fCamino) rows = rows.filter(r => ((r.stock_en_camino || 0) + (r.stock_en_camino_compras || 0)) > 0);
   // Filtro por aging (días desde la última compra). Los SKU sin fecha de
   // compra (aging null) quedan fuera cuando hay un filtro de aging activo.
@@ -334,7 +336,7 @@ function renderTable() {
   const body = document.getElementById('stock-body');
   const tfoot = document.getElementById('stock-tfoot');
   if (!rows.length) {
-    body.innerHTML = '<tr><td colspan="15" class="empty">Sin datos.</td></tr>';
+    body.innerHTML = '<tr><td colspan="16" class="empty">Sin datos.</td></tr>';
     tfoot.style.display = 'none';
     return;
   }
@@ -343,12 +345,13 @@ function renderTable() {
   document.getElementById('total-estimado-compra').textContent = fmt(totalEstCompra);
   body.innerHTML = rows.map(r => {
     const cob = r._cob == null ? '—' : (r._cob + ' d');
-    // Unidades en camino que vienen de Compras (renglones marcados "Pagado" en
-    // Posible Compra). Van al lado del input porque ese input edita SOLO el
-    // en camino manual; el total del SKU es la suma de los dos.
-    const compraTag = (it) => (it.stock_en_camino_compras || 0) > 0
-      ? ` <span class="badge" style="background:#e6f5ee;color:#1a8a5a;" title="${it.stock_en_camino_compras} u. de compras pagadas sin ingresar (Posible Compra). Salen del en camino al confirmar el Ingreso.">+${it.stock_en_camino_compras}</span>`
-      : '';
+    // Ingresos = unidades de compras marcadas "Pagado" en Posible Compra
+    // (mercadería paga que está viniendo). Columna propia y de solo lectura:
+    // se calcula en el backend y se va sola al confirmar el Ingreso. El
+    // Tránsito Full, en cambio, es la carga manual editable.
+    const ingresosCell = (it) => (it.stock_en_camino_compras || 0) > 0
+      ? `<span class="badge" style="background:#e6f5ee;color:#1a8a5a;" title="${it.stock_en_camino_compras} u. de compras pagadas sin ingresar (Posible Compra).">${it.stock_en_camino_compras}</span>`
+      : '—';
     const repBadge = r._sug > 0
       ? `<span class="badge rep">${r._sug}</span>`
       : (r._total > 0 ? '<span class="badge ok">OK</span>' : '<span class="badge warn">0</span>');
@@ -368,7 +371,8 @@ function renderTable() {
       <td>${caret}<b>${esc(r.sku)}</b>${varTag}</td>
       <td class="num">${r.stock}</td>
       <td class="num">${full > 0 ? full : '—'}</td>
-      <td class="num"><input type="number" min="0" step="1" value="${r.stock_en_camino || 0}" title="Stock en camino a Full (manual)" style="width:50px;text-align:right;border:1px solid #ddd;border-radius:4px;padding:2px 4px;font-size:12px;" onchange="saveInbound('${esc(r.sku)}', this)">${compraTag(r)}</td>
+      <td class="num"><input type="number" min="0" step="1" value="${r.stock_en_camino || 0}" title="Stock en tránsito a Full (manual)" style="width:50px;text-align:right;border:1px solid #ddd;border-radius:4px;padding:2px 4px;font-size:12px;" onchange="saveInbound('${esc(r.sku)}', this)"></td>
+      <td class="num">${ingresosCell(r)}</td>
       <td class="num"><b>${r._total}</b></td>
       <td class="num">${r.price != null ? fmt(r.price) : '—'}</td>
       <td class="num">${r.valor_venta != null ? fmt(r.valor_venta) : '—'}</td>
@@ -387,7 +391,7 @@ function renderTable() {
         const vv = (v.ventas != null ? v.ventas : (v.ventas_7d || 0));
         html += `<tr style="background:#fcfcfb;">
           <td style="padding-left:32px;color:#777;">↳ ${esc(v.sku)}${qtyTag}</td>
-          <td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td>
+          <td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td>
           <td class="num" style="color:#777;" title="${v.ventas_raw != null ? v.ventas_raw + ' vendidos × ' + (v.qty||1) : ''}">${vv}</td>
           <td></td><td></td><td></td><td></td><td></td>
         </tr>`;
@@ -424,7 +428,7 @@ async function uploadInbound(input) {
     const j = await r.json();
     if (!r.ok) throw new Error(j.detail || 'error');
     msg.style.color = '#1a8a5a';
-    msg.textContent = `Listo: ${j.actualizados} SKU(s) actualizados (${j.total_unidades} u. en camino en el reporte).` +
+    msg.textContent = `Listo: ${j.actualizados} SKU(s) actualizados (${j.total_unidades} u. en tránsito en el reporte).` +
       (j.no_en_base ? ` ${j.no_en_base} SKU(s) del reporte no están en tu base de precios.` : '');
     if (DATA) loadStock();
   } catch (e) {
@@ -467,7 +471,7 @@ async function addPrice() {
   } catch (e) { msg.textContent = 'Error: ' + e.message; }
 }
 
-// ── Stock en camino (carga manual, edición inline) ──
+// ── Tránsito Full (carga manual, edición inline) ──
 async function saveInbound(sku, inputEl) {
   let qty = parseInt(inputEl.value);
   if (isNaN(qty) || qty < 0) { qty = 0; inputEl.value = 0; }
@@ -477,7 +481,7 @@ async function saveInbound(sku, inputEl) {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sku, qty }) });
     if (!r.ok) throw new Error('HTTP ' + r.status);
-    // Actualizamos el item localmente: total = ML + Full + en camino, y revalorizamos.
+    // Actualizamos el item localmente: total = ML + Full + tránsito + ingresos.
     const it = (DATA.items || []).find(x => x.sku === sku);
     if (it) {
       it.stock_en_camino = qty;
@@ -488,7 +492,7 @@ async function saveInbound(sku, inputEl) {
     renderTable();   // recalcula total, valorizado, cobertura, reposición y los totales del header
   } catch (e) {
     inputEl.disabled = false;
-    alert('No se pudo guardar el en camino: ' + e.message);
+    alert('No se pudo guardar el tránsito Full: ' + e.message);
   }
 }
 </script>

@@ -60,7 +60,7 @@
     .row-edit input { padding: 4px 6px; border: 1px solid #ddd; border-radius: 4px; font-size: 12px; font-family: 'Inter', sans-serif; width: 100%; }
     .cell-input { padding: 4px 6px; border: 1px solid #ddd; border-radius: 4px; font-size: 12px; font-family: 'Inter', sans-serif; width: 100%; background: #fff; }
     .cell-input:focus { border-color: #005CFF; outline: none; }
-    /* Estado del renglón: pagado = ya está sumando al En camino de Stock. */
+    /* Estado del renglón: pagado = ya está sumando a los Ingresos de Stock. */
     .estado-inp { width: auto; min-width: 96px; font-weight: 600; cursor: pointer; }
     .estado-pendiente { color: #b06f00; border-color: #f0d9a8; background: #fff8ec; }
     .estado-pagado { color: #1a8a5a; border-color: #c5e9d8; background: #e6f5ee; }
@@ -324,7 +324,7 @@
             <th style="width:26px;"></th>
             <th style="width:30px;"><input type="checkbox" id="chk-all" onchange="toggleAll(this.checked)" /></th>
             <th>Proveedor</th><th>SKU</th><th>Cantidad</th><th>Costo s/IVA</th><th>Cond. IVA</th><th>Valorizado</th>
-            <th title="Pagado = la mercadería ya está paga y viniendo: esas unidades aparecen como En camino en Stock valorizado hasta que se confirme el Ingreso.">Estado</th>
+            <th title="Pagado = la mercadería ya está paga y viniendo: esas unidades aparecen en la columna Ingresos de Stock valorizado hasta que se confirme el Ingreso.">Estado</th>
             <th class="actions">Acciones</th>
           </tr></thead>
           <tbody id="items-tbody">
@@ -664,9 +664,9 @@
   }
 
   // Estado del renglón: pendiente | pagado. "Pagado" = la compra ya se pagó y
-  // la mercadería viene en camino, así que esas unidades se suman al "En camino"
-  // de Stock valorizado. Cuando se confirma el Ingreso el renglón se borra de
-  // Posible Compra y por eso sale solo del en camino (Stock lo calcula al leer).
+  // la mercadería está viniendo, así que esas unidades salen en la columna
+  // "Ingresos" de Stock valorizado. Cuando se confirma el Ingreso el renglón se
+  // borra de Posible Compra y por eso sale solo de ahí (Stock lo calcula al leer).
   // Va por su propio endpoint para no mezclarse con el guardado con debounce.
   async function saveEstado(id, sel) {
     const estado = sel.value;
@@ -684,7 +684,7 @@
       if(it) it.estado = estado;
     } catch(e) {
       // Si falló, volver atrás: dejarlo en "pagado" en pantalla sin haberlo
-      // guardado haría creer que ya está sumando al en camino de Stock.
+      // guardado haría creer que ya está sumando a los Ingresos de Stock.
       console.error(e);
       sel.value = previo;
       sel.classList.toggle('estado-pagado', previo === 'pagado');
