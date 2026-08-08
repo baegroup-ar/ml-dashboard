@@ -2633,9 +2633,20 @@ def _business_week_tag(d: date):
 
 @app.get("/api/costos/{account_id}/metrics")
 async def api_costos_metrics(request: Request, account_id: int):
-    """Filas de CMV con cantidad cargada (qty IS NOT NULL) -sea a mano, por
-    Excel en Costos, o vía un Ingreso confirmado en Compras-, con el tag de
-    año/mes/semana comercial para armar el pivot en el frontend."""
+    """Compras para el pivot de Métricas, de DOS fuentes, mezcladas en una sola
+    lista (el frontend no las distingue):
+
+    1. CMV con cantidad cargada (`product_costs.qty IS NOT NULL`) — sea a mano,
+       por Excel en Costos, o vía un Ingreso confirmado en Compras. Fecha = la
+       de vigencia del costo (`valid_from`).
+    2. Renglones de Posible Compra marcados como **PAGADO**
+       (`purchase_items.estado='pagado'`) — compras ya pagadas que todavía no se
+       ingresaron. Fecha = `created_at` del renglón pasada a hora argentina (es
+       la única que hay: no se registra la fecha de pago).
+
+    No hay doble conteo: al confirmar el Ingreso el renglón se BORRA de
+    purchase_items y recién ahí aparece en product_costs, así que una compra
+    está en una fuente o en la otra, nunca en las dos."""
     user_id = get_session_user_id(request)
     if not user_id:
         raise HTTPException(401)
@@ -2644,28 +2655,47 @@ async def api_costos_metrics(request: Request, account_id: int):
         raise HTTPException(404)
     user = get_user(user_id)
     cost_aid = _cost_account_id_for(user, account_id)
+    items = []
+
+    def _add(sku, qty, cost, iva_rate, fecha):
+        """fecha = date; arma la fila con su tag de año/mes/semana comercial."""
+        year, month, week = _business_week_tag(fecha)
+        total_sin_iva = qty * cost
+        items.append({
+            "sku": sku, "qty": qty, "cost": cost, "iva_rate": iva_rate,
+            "valid_from": fecha.isoformat(),
+            "year": year, "month": month, "week": week,
+            "total_sin_iva": total_sin_iva,
+            "total_con_iva": total_sin_iva * (1 + iva_rate / 100.0),
+        })
+
     rows = db_fetchall(
         "SELECT sku, qty, cost, iva_rate, valid_from FROM product_costs"
         " WHERE account_id=:aid AND qty IS NOT NULL ORDER BY valid_from",
         {"aid": cost_aid},
     )
-    items = []
     for r in rows:
         vf = r["valid_from"]
         if not hasattr(vf, "year"):
             continue
-        year, month, week = _business_week_tag(vf)
-        qty = float(r["qty"])
-        cost = float(r["cost"])
-        iva_rate = float(r["iva_rate"]) if r["iva_rate"] is not None else 21.0
-        total_sin_iva = qty * cost
-        items.append({
-            "sku": r["sku"], "qty": qty, "cost": cost, "iva_rate": iva_rate,
-            "valid_from": vf.isoformat(),
-            "year": year, "month": month, "week": week,
-            "total_sin_iva": total_sin_iva,
-            "total_con_iva": total_sin_iva * (1 + iva_rate / 100.0),
-        })
+        _add(r["sku"], float(r["qty"]), float(r["cost"]),
+             float(r["iva_rate"]) if r["iva_rate"] is not None else 21.0, vf)
+
+    pagadas = db_fetchall(
+        "SELECT sku, qty, cost, iva_rate, created_at FROM purchase_items"
+        " WHERE account_id=:aid AND estado='pagado' ORDER BY created_at",
+        {"aid": cost_aid},
+    )
+    for r in pagadas:
+        ca = r["created_at"]
+        if not hasattr(ca, "year"):
+            continue
+        # created_at se guarda en UTC (DEFAULT NOW() del server): a hora AR antes
+        # de sacar la fecha, si no una compra cargada de noche cae al día siguiente.
+        fecha = (ca - timedelta(hours=3)).date() if hasattr(ca, "hour") else ca
+        _add(r["sku"], float(r["qty"] or 0), float(r["cost"] or 0),
+             float(r["iva_rate"]) if r["iva_rate"] is not None else 21.0, fecha)
+
     return {"items": items}
 
 

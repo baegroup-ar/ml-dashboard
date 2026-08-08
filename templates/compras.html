@@ -195,10 +195,13 @@
     <div class="card">
       <h3>Métricas de compra</h3>
       <p style="font-size:12px;color:#888;margin-bottom:10px;">
-        Solo cuenta lo que tiene <b>Cantidad</b> cargada en Costos (a mano, por Excel, o vía un Ingreso
-        confirmado en <b>Posible Compra</b>). Si un costo se cargó sin cantidad, no cuenta como compra real
-        y no aparece acá. La semana es "comercial": lunes a sábado, arranca el primer día hábil del mes y
-        la última semana cierra el último día hábil.
+        Cuenta dos cosas, todo junto: lo que tiene <b>Cantidad</b> cargada en Costos (a mano, por Excel, o
+        vía un Ingreso confirmado) y los renglones de <b>Posible Compra</b> marcados como <b>Pagado</b>.
+        Un costo cargado sin cantidad no cuenta como compra real y no aparece acá; un renglón pendiente
+        de pago tampoco. No hay doble conteo: al confirmar el Ingreso el renglón deja Posible Compra y pasa
+        a Costos. La fecha es la de vigencia del costo y, en los pagados, la de carga del renglón.
+        La semana es "comercial": lunes a sábado, arranca el primer día hábil del mes y la última semana
+        cierra el último día hábil.
       </p>
       <span class="count" id="metrics-count-label"></span>
     </div>
